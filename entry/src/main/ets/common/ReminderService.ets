@@ -5,6 +5,7 @@ import { reminderAgentManager } from '@kit.BackgroundTasksKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
+import { AppSettings } from './AppSettings';
 import { LogUtil } from './LogUtil';
 
 export class ReminderService {
@@ -18,8 +19,13 @@ export class ReminderService {
       const now: number = Date.now();
       const rows: LocalEvent[] =
         await EventDb.queryRemindable(context, now, now + ReminderService.WINDOW);
+      // 提醒静音的日历本（如别人分享的本）：其中所有日程都不再提醒
+      const muted: string[] = await AppSettings.getMutedReminderKeys(context);
       let published: number = 0;
       for (const e of rows) {
+        if (muted.includes(e.calKey)) {
+          continue;
+        }
         if (published >= ReminderService.MAX_REMINDERS) {
           break;
         }
@@ -50,7 +56,7 @@ export class ReminderService {
         await reminderAgentManager.publishReminder(request);
         published++;
       }
-      LogUtil.write(`提醒刷新完成：发布 ${published} 个提醒（窗口 7 天）`);
+      LogUtil.write(`提醒刷新完成：发布 ${published} 个提醒（窗口 7 天，静音日历本 ${muted.length} 个）`);
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`提醒刷新失败: ${e.code} - ${e.message}`);

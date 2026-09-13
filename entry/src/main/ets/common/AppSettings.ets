@@ -13,6 +13,7 @@ export class AppSettings {
   private static readonly KEY_SYS_MODE: string = 'sys_cal_mode';       // 'display' | 'backup'
   private static readonly KEY_BACKUP_KEY: string = 'sys_backup_cal_key'; // 备份目标 DAV 日历本
   private static readonly KEY_MANUAL_READONLY: string = 'manual_readonly_keys'; // 手动标记只读的 calKey
+  private static readonly KEY_MUTED_REMINDER: string = 'muted_reminder_keys';  // 提醒静音的 calKey
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
 
   /**
@@ -83,6 +84,33 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存手动只读标记失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 提醒静音的日历本 calKey 列表。
+   * 适用于别人分享的日历本：静音后其中所有日程都不再发布系统提醒（日程本身仍正常显示）。
+   */
+  static async getMutedReminderKeys(context: common.Context): Promise<string[]> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const raw: string = await store.get(AppSettings.KEY_MUTED_REMINDER, '') as string;
+      return raw === '' ? [] : raw.split(';');
+    } catch (err) {
+      return [];
+    }
+  }
+
+  static async setMutedReminderKeys(context: common.Context, keys: string[]): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MUTED_REMINDER, keys.join(';'));
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存提醒静音标记失败: ${e.message}`);
     }
   }
 

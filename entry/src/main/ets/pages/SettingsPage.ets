@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { AppSettings } from '../common/AppSettings';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
+import { ReminderService } from '../common/ReminderService';
 import { LogUtil } from '../common/LogUtil';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
@@ -27,6 +28,7 @@ struct SettingsPage {
   @State backupTargets: BackupTarget[] = [];
   @State allBooks: BackupTarget[] = []; // 全部 DAV 日历本（只读标记管理用）
   @State manualKeys: string[] = [];     // 手动标记只读的 calKey
+  @State mutedKeys: string[] = [];      // 提醒静音的 calKey
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -50,6 +52,9 @@ struct SettingsPage {
     });
     AppSettings.getManualReadonlyKeys(ctx).then((v: string[]): void => {
       this.manualKeys = v;
+    });
+    AppSettings.getMutedReminderKeys(ctx).then((v: string[]): void => {
+      this.mutedKeys = v;
     });
     this.loadBackupSettings();
     this.loadAllBooks();
@@ -104,6 +109,33 @@ struct SettingsPage {
       return '只读（手动）';
     }
     return b.serverWritable ? '可写' : '只读';
+  }
+
+  /** 切换日历本提醒静音：静音后该本所有日程不再发布系统提醒 */
+  private async toggleMuteBook(b: BackupTarget): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    const list: string[] = [...this.mutedKeys];
+    const idx: number = list.indexOf(b.calKey);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      list.push(b.calKey);
+    }
+    this.mutedKeys = list;
+    await AppSettings.setMutedReminderKeys(this.context, list);
+    // 立即重建提醒（全量取消后按新静音规则重发），无需等下次同步
+    try {
+      await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
+    } catch (err) {
+      // 重建失败不影响设置保存，下次同步时会再刷新
+    }
+    this.getUIContext().getPromptAction().showToast({
+      message: idx >= 0
+        ? '已恢复提醒'
+        : '已静音：该日历本的所有日程不再提醒'
+    });
   }
 
   /** 加载备份目标候选（可写 DAV 日历本）+ 当前选择 */
@@ -371,6 +403,59 @@ struct SettingsPage {
                 this.toggleManualBook(b);
               })
             }, (b: BackupTarget) => `${b.calKey}_${this.manualKeys.includes(b.calKey) ? 1 : 0}`)
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 日历本提醒静音（如别人分享的日历本，静音后其中所有日程不再提醒）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('日历本提醒静音')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('点击日历本切换静音：静音后该日历本的所有日程都不再提醒（日程仍正常显示）')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+            }
+            .width('100%')
+            if (this.allBooks.length === 0) {
+              Text('暂无 CalDAV 日历本')
+                .fontSize(12)
+                .fontColor($r('app.color.text_hint'))
+                .width('100%')
+            }
+            ForEach(this.allBooks, (b: BackupTarget) => {
+              Row({ space: 8 }) {
+                Text(b.label)
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_primary'))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Text(this.mutedKeys.includes(b.calKey) ? '已静音' : '提醒中')
+                  .fontSize(11)
+                  .fontColor(this.mutedKeys.includes(b.calKey)
+                    ? $r('app.color.error') : $r('app.color.success'))
+                  .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                  .borderRadius(10)
+                  .backgroundColor(this.mutedKeys.includes(b.calKey)
+                    ? $r('app.color.error_bg') : $r('app.color.success_bg'))
+              }
+              .width('100%')
+              .padding({ top: 6, bottom: 6 })
+              .onClick(() => {
+                this.toggleMuteBook(b);
+              })
+            }, (b: BackupTarget) => `mute_${b.calKey}_${this.mutedKeys.includes(b.calKey) ? 1 : 0}`)
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
