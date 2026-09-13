@@ -1,0 +1,17 @@
+# 编译产物
+/build/
+/entry/build/
+/entry/.preview/
+/.hvigor/
+/oh_modules/
+/entry/oh_modules/
+
+# IDE 配置
+/.idea/
+*.iml
+
+# 本地配置
+/local.properties
+/.clangd
+/.clang-format
+/.clang-tidy

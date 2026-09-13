@@ -1,0 +1,76 @@
+{
+  "forms": [
+    {
+      "name": "WidgetCard2x2",
+      "displayName": "$string:card_2x2_name",
+      "description": "$string:card_desc",
+      "src": "./ets/pages/widget/Widget2x2.ets",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "light",
+      "uiSyntax": "arkts",
+      "isDefault": true,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "07:30",
+      "updateDuration": 1,
+      "defaultDimension": "2*2",
+      "supportDimensions": ["2*2"]
+    },
+    {
+      "name": "WidgetCard2x4",
+      "displayName": "$string:card_2x4_name",
+      "description": "$string:card_desc",
+      "src": "./ets/pages/widget/Widget4x2.ets",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "light",
+      "uiSyntax": "arkts",
+      "isDefault": false,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "07:30",
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*4"]
+    },
+    {
+      "name": "WidgetCard4x4",
+      "displayName": "$string:card_4x4_name",
+      "description": "$string:card_desc",
+      "src": "./ets/pages/widget/Widget4x4.ets",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "light",
+      "uiSyntax": "arkts",
+      "isDefault": false,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "07:30",
+      "updateDuration": 1,
+      "defaultDimension": "4*4",
+      "supportDimensions": ["4*4"]
+    },
+    {
+      "name": "WidgetCard6x4",
+      "displayName": "$string:card_6x4_name",
+      "description": "$string:card_desc",
+      "src": "./ets/pages/widget/Widget6x4.ets",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "light",
+      "uiSyntax": "arkts",
+      "isDefault": false,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "07:30",
+      "updateDuration": 1,
+      "defaultDimension": "6*4",
+      "supportDimensions": ["6*4"]
+    }
+  ]
+}

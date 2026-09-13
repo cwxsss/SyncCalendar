@@ -1,0 +1,52 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "同步日历：以同步为核心的日历应用"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "同步日历主界面"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "同步日历"
+    },
+    {
+      "name": "perm_read_calendar",
+      "value": "读取系统日历日程，用于在日历视图中混合展示"
+    },
+    {
+      "name": "perm_write_calendar",
+      "value": "写入系统日历，用于保存您创建的日程"
+    },
+    {
+      "name": "perm_read_whole_calendar",
+      "value": "读取所有日历账户的日程，用于在日历中统一展示"
+    },
+    {
+      "name": "card_ability_desc",
+      "value": "同步日历服务卡片"
+    },
+    {
+      "name": "card_desc",
+      "value": "展示从今天开始的日程安排"
+    },
+    {
+      "name": "card_2x2_name",
+      "value": "下一条日程"
+    },
+    {
+      "name": "card_2x4_name",
+      "value": "日程速览"
+    },
+    {
+      "name": "card_4x4_name",
+      "value": "日程列表"
+    },
+    {
+      "name": "card_6x4_name",
+      "value": "日程大全"
+    }
+  ]
+}
