@@ -58,6 +58,9 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        "backgroundModes": [
+          "dataTransfer"
+        ],
         "skills": [
           {
             "entities": [
@@ -95,6 +98,13 @@
             "resource": "$profile:form_config"
           }
         ]
+      },
+      {
+        "name": "SyncWorkAbility",
+        "srcEntry": "./ets/syncwork/SyncWorkAbility.ets",
+        "description": "$string:sync_work_desc",
+        "type": "workScheduler",
+        "exported": false
       }
     ]
   },

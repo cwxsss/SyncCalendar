@@ -8,6 +8,30 @@ export class AppSettings {
   private static readonly STORE: string = 'sync_settings';
   private static readonly KEY_SHOW_SYSTEM: string = 'show_system_calendar';
   private static readonly KEY_SYNC_INTERVAL: string = 'sync_interval_minutes';
+  private static readonly KEY_BACKGROUND_SYNC: string = 'background_sync';
+
+  /** 是否开启后台持续同步（长时任务，默认关） */
+  static async getBackgroundSync(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_BACKGROUND_SYNC, false) as boolean;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  static async setBackgroundSync(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_BACKGROUND_SYNC, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存后台同步设置失败: ${e.message}`);
+    }
+  }
 
   /** 是否混合显示系统日历日程（默认开） */
   static async getShowSystemCalendar(context: common.Context): Promise<boolean> {

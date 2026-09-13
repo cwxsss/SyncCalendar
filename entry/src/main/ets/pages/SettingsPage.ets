@@ -3,6 +3,7 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppSettings } from '../common/AppSettings';
+import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { LogUtil } from '../common/LogUtil';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
@@ -12,6 +13,7 @@ const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
 struct SettingsPage {
   @State showSystem: boolean = true;
   @State intervalMinutes: number = 1;
+  @State backgroundSync: boolean = false;
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -26,6 +28,9 @@ struct SettingsPage {
     });
     AppSettings.getSyncIntervalMinutes(ctx).then((v: number): void => {
       this.intervalMinutes = v;
+    });
+    AppSettings.getBackgroundSync(ctx).then((v: boolean): void => {
+      this.backgroundSync = v;
     });
   }
 
@@ -46,6 +51,24 @@ struct SettingsPage {
     AppStorage.setOrCreate('syncIntervalMinutes', minutes);
     this.getUIContext().getPromptAction()
       .showToast({ message: `自动同步间隔已设为 ${minutes} 分钟` });
+  }
+
+  private async saveBackgroundSync(value: boolean): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    try {
+      await BackgroundSyncService.setBackgroundSync(
+        this.context as common.UIAbilityContext, value);
+      this.getUIContext().getPromptAction().showToast({
+        message: value
+          ? '后台持续同步已开启，通知栏将显示常驻通知'
+          : '后台持续同步已关闭'
+      });
+    } catch (err) {
+      this.backgroundSync = !value; // 失败回滚 UI
+      this.getUIContext().getPromptAction().showToast({ message: '设置失败，请重试' });
+    }
   }
 
   private intervalLabel(minutes: number): string {
@@ -126,6 +149,34 @@ struct SettingsPage {
                 if (index >= 0 && index < INTERVAL_OPTIONS.length) {
                   this.intervalMinutes = INTERVAL_OPTIONS[index];
                   this.saveInterval(INTERVAL_OPTIONS[index]);
+                }
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 后台持续同步（长时任务）
+          Row({ space: 10 }) {
+            Column({ space: 2 }) {
+              Text('后台持续同步')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_primary'))
+              Text('开启后申请后台长时任务，App 退到后台也按设定间隔继续同步（通知栏会显示常驻通知）')
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.backgroundSync })
+              .selectedColor($r('app.color.brand'))
+              .onChange((isOn: boolean) => {
+                if (isOn !== this.backgroundSync) {
+                  this.backgroundSync = isOn;
+                  this.saveBackgroundSync(isOn);
                 }
               })
           }

@@ -25,7 +25,7 @@ export class SyncEngine {
    * 同步一个 CalDAV 账号（先推该账号的本地修改，再拉远端变更），
    * 返回远端事件总数（拉取侧）。带 120 秒超时保护。
    */
-  static async syncAccount(context: common.UIAbilityContext, acc: DavAccount): Promise<number> {
+  static async syncAccount(context: common.Context, acc: DavAccount): Promise<number> {
     const t0: number = Date.now();
     LogUtil.write(`========== 同步账号「${acc.name}」开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
     try {

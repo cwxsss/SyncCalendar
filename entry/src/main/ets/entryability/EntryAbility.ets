@@ -1,12 +1,15 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { BackgroundSyncService } from '../common/BackgroundSyncService';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    // 后台同步：注册延迟任务兜底 + 按设置恢复长时任务
+    BackgroundSyncService.initOnLaunch(this.context);
   }
 
   onDestroy(): void {

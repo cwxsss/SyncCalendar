@@ -47,6 +47,10 @@
     {
       "name": "card_6x4_name",
       "value": "日程大全"
+    },
+    {
+      "name": "sync_work_desc",
+      "value": "日历后台兜底同步任务"
     }
   ]
 }
