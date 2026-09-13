@@ -39,6 +39,7 @@ struct Index {
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
   @State syncing: boolean = false;
   @State loading: boolean = true;
+  @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
@@ -404,6 +405,11 @@ struct Index {
       .height('100%')
       .backgroundColor($r('app.color.page_bg'))
 
+      // ≡ 下拉菜单覆盖层（全屏遮罩 + 菜单卡片）
+      if (this.menuOpen) {
+        this.dropdownOverlay()
+      }
+
       Button() {
         Text('＋')
           .fontSize(26)
@@ -448,33 +454,14 @@ struct Index {
         .onClick(() => {
           this.goToday();
         })
+      // ≡ 菜单按钮
       Button() {
-        if (this.syncing) {
-          LoadingProgress()
-            .width(20)
-            .height(20)
-            .color($r('app.color.brand'))
-        } else {
-          Text('⟳')
-            .fontSize(18)
-            .fontColor($r('app.color.brand'))
-            .fontWeight(FontWeight.Bold)
+        Column({ space: 4 }) {
+          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
         }
-      }
-      .width(36)
-      .height(36)
-      .borderRadius(18)
-      .backgroundColor($r('app.color.card_bg'))
-      .border({ width: 1, color: $r('app.color.shadow_color') })
-      .enabled(!this.syncing)
-      .onClick(() => {
-        this.syncAll(true);
-      })
-      Button() {
-        Text('账')
-          .fontSize(14)
-          .fontColor($r('app.color.brand'))
-          .fontWeight(FontWeight.Medium)
+        .alignItems(HorizontalAlign.Center)
       }
       .width(36)
       .height(36)
@@ -482,25 +469,101 @@ struct Index {
       .backgroundColor($r('app.color.card_bg'))
       .border({ width: 1, color: $r('app.color.shadow_color') })
       .onClick(() => {
-        router.pushUrl({ url: 'pages/AccountsPage' });
-      })
-      Button() {
-        Text('设')
-          .fontSize(14)
-          .fontColor($r('app.color.brand'))
-          .fontWeight(FontWeight.Medium)
-      }
-      .width(36)
-      .height(36)
-      .borderRadius(18)
-      .backgroundColor($r('app.color.card_bg'))
-      .border({ width: 1, color: $r('app.color.shadow_color') })
-      .onClick(() => {
-        router.pushUrl({ url: 'pages/SettingsPage' });
+        this.menuOpen = !this.menuOpen;
       })
     }
     .width('100%')
     .padding({ left: 20, right: 20, top: 12, bottom: 8 })
+  }
+
+  /** 顶部 ≡ 下拉菜单（全屏遮罩 + 右上角菜单卡片） */
+  @Builder
+  dropdownOverlay() {
+    Stack({ alignContent: Alignment.TopEnd }) {
+      // 遮罩：点击任意处关闭
+      Column()
+        .width('100%')
+        .height('100%')
+        .onClick(() => {
+          this.menuOpen = false;
+        })
+      // 菜单卡片
+      Column({ space: 2 }) {
+        // 手动同步
+        Row({ space: 10 }) {
+          if (this.syncing) {
+            LoadingProgress()
+              .width(16)
+              .height(16)
+              .color($r('app.color.brand'))
+          } else {
+            Text('⟳')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_primary'))
+              .width(16)
+              .textAlign(TextAlign.Center)
+          }
+          Text(this.syncing ? '同步中…' : '手动同步')
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%')
+        .height(40)
+        .borderRadius(8)
+        .padding({ left: 12 })
+        .enabled(!this.syncing)
+        .onClick(() => {
+          this.menuOpen = false;
+          this.syncAll(true);
+        })
+        // 账号管理
+        Row({ space: 10 }) {
+          Text('👤')
+            .fontSize(13)
+            .width(16)
+            .textAlign(TextAlign.Center)
+          Text('账号管理')
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%')
+        .height(40)
+        .borderRadius(8)
+        .padding({ left: 12 })
+        .onClick(() => {
+          this.menuOpen = false;
+          router.pushUrl({ url: 'pages/AccountsPage' });
+        })
+        // 设置
+        Row({ space: 10 }) {
+          Text('⚙')
+            .fontSize(13)
+            .width(16)
+            .textAlign(TextAlign.Center)
+          Text('设置')
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%')
+        .height(40)
+        .borderRadius(8)
+        .padding({ left: 12 })
+        .onClick(() => {
+          this.menuOpen = false;
+          router.pushUrl({ url: 'pages/SettingsPage' });
+        })
+      }
+      .width(150)
+      .padding(6)
+      .borderRadius(12)
+      .backgroundColor($r('app.color.card_bg'))
+      .border({ width: 1, color: $r('app.color.shadow_color') })
+      .shadow({ radius: 12, color: '#22000000', offsetY: 4 })
+      .margin({ top: 56, right: 20 })
+    }
+    .width('100%')
+    .height('100%')
   }
 
   @Builder
