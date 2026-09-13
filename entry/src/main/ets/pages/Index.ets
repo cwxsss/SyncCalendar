@@ -27,7 +27,7 @@ const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 @Entry
 @Component
 struct Index {
-  @State mode: string = 'month'; // month | week | day | agenda
+  @State mode: string = 'month'; // month | week | agenda | todo
   @State displayYear: number = 2026;
   @State displayMonth: number = 0; // 0-11
   @State selectedDate: number = 0; // 当天 0 点毫秒
@@ -393,8 +393,6 @@ struct Index {
           this.monthBody()
         } else if (this.mode === 'week') {
           this.weekBody()
-        } else if (this.mode === 'day') {
-          this.dayBody()
         } else if (this.mode === 'todo') {
           this.todoBody()
         } else {
@@ -571,7 +569,6 @@ struct Index {
     Row({ space: 4 }) {
       this.modeTab('month', '月')
       this.modeTab('week', '周')
-      this.modeTab('day', '日')
       this.modeTab('agenda', '列表')
       this.modeTab('todo', '待办')
       Blank()
@@ -762,28 +759,35 @@ struct Index {
     .layoutWeight(1)
   }
 
+  /** 周视图整周切换（左滑下一周、右滑上一周）；跨月时自动重载数据 */
+  private switchWeek(delta: number): void {
+    this.selectedDate += delta * 7 * 86400000;
+    const d = new Date(this.selectedDate);
+    if (d.getFullYear() !== this.displayYear || d.getMonth() !== this.displayMonth) {
+      this.displayYear = d.getFullYear();
+      this.displayMonth = d.getMonth();
+      this.reloadEvents();
+    }
+  }
+
+  /** 回到本周（含今天） */
+  private goThisWeek(): void {
+    this.selectedDate = this.startOfDay(Date.now());
+  }
+
   @Builder
   weekBody() {
     Column() {
       Row({ space: 16 }) {
-        Text('‹')
-          .fontSize(22)
-          .fontColor($r('app.color.brand'))
-          .onClick(() => {
-            this.selectedDate -= 7 * 86400000;
-          })
         Blank()
         Text('本周')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_primary'))
-        Blank()
-        Text('›')
-          .fontSize(22)
-          .fontColor($r('app.color.brand'))
           .onClick(() => {
-            this.selectedDate += 7 * 86400000;
+            this.goThisWeek();
           })
+        Blank()
       }
       .width('100%')
       .padding({ left: 20, right: 20, top: 4, bottom: 4 })
@@ -804,41 +808,20 @@ struct Index {
     }
     .width('100%')
     .layoutWeight(1)
+    .gesture(
+      SwipeGesture({ direction: SwipeDirection.Horizontal })
+        .onAction((event: GestureEvent) => {
+          // 左滑角度约 ±180（|angle|>90）→ 下一周；右滑约 0° → 上一周（与月视图 Swiper 方向一致）
+          if (Math.abs(event.angle) > 90) {
+            this.switchWeek(1);
+          } else {
+            this.switchWeek(-1);
+          }
+        })
+    )
   }
 
-  @Builder
-  dayBody() {
-    Column() {
-      Row({ space: 16 }) {
-        Text('‹')
-          .fontSize(22)
-          .fontColor($r('app.color.brand'))
-          .onClick(() => {
-            this.selectedDate -= 86400000;
-          })
-        Blank()
-        Text(this.fmtDateCn(this.selectedDate))
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-        Blank()
-        Text('›')
-          .fontSize(22)
-          .fontColor($r('app.color.brand'))
-          .onClick(() => {
-            this.selectedDate += 86400000;
-          })
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 6, bottom: 6 })
-
-      this.eventList()
-    }
-    .width('100%')
-    .layoutWeight(1)
-  }
-
-  /** 单日日程列表（月/周/日共用） */
+  /** 单日日程列表（周视图使用） */
   @Builder
   eventList() {
     Scroll() {
