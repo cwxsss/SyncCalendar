@@ -14,6 +14,7 @@ export class AppSettings {
   private static readonly KEY_BACKUP_KEY: string = 'sys_backup_cal_key'; // 备份目标 DAV 日历本
   private static readonly KEY_MANUAL_READONLY: string = 'manual_readonly_keys'; // 手动标记只读的 calKey
   private static readonly KEY_MUTED_REMINDER: string = 'muted_reminder_keys';  // 提醒静音的 calKey
+  private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
 
   /**
@@ -111,6 +112,29 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存提醒静音标记失败: ${e.message}`);
+    }
+  }
+
+  /** 应用内提醒模式的上次检查时间戳（毫秒，0 = 未初始化） */
+  static async getReminderTick(context: common.Context): Promise<number> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_REMINDER_TICK, 0) as number;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  static async setReminderTick(context: common.Context, tick: number): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_REMINDER_TICK, tick);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存提醒检查时间戳失败: ${e.message}`);
     }
   }
 

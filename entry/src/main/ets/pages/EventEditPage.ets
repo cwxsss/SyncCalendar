@@ -8,6 +8,8 @@ import { EventDb, LocalEvent } from '../common/EventDb';
 import { AppSettings } from '../common/AppSettings';
 import { DavClient } from '../common/DavClient';
 import { SyncEngine } from '../common/SyncEngine';
+import { ReminderService } from '../common/ReminderService';
+import { LogUtil } from '../common/LogUtil';
 
 /** 可选的日历本 */
 class BookChoice {
@@ -32,7 +34,7 @@ struct EventEditPage {
   @State statusMsg: string = '';
   @State isExisting: boolean = false;
   @State repeatMode: string = 'none'; // none|daily|workday|weekly|monthly|yearly|custom
-  @State reminderMin: number = 0;    // 提前提醒分钟数，0 = 不提醒
+  @State reminderList: number[] = []; // 提前提醒分钟数（多选），空 = 不提醒
   @State pickerShow: boolean = false; // 开始/结束时间选择底部弹层（日期+时间一次选完）
   @State pickerIsEnd: boolean = false;
   @State pickDate: Date = new Date();
@@ -77,16 +79,18 @@ struct EventEditPage {
         this.endMs = loaded.endTime;
         this.chosenKey = loaded.calKey;
         this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
-        this.reminderMin = loaded.reminder;
+        this.reminderList = loaded.reminders.length > 0 ? loaded.reminders
+          : (loaded.reminder > 0 ? [loaded.reminder] : []);
         return;
       }
     }
-    // 新建：默认时间 = 所选日期 9:00-10:00
+    // 新建：日期取所选日（未选则今天），时间取当前时刻；结束 = 开始 + 1 小时
     const base: number = AppStorage.get<number>('pendingEventDate') ?? Date.now();
     const dayStart = new Date(new Date(base).getFullYear(), new Date(base).getMonth(),
       new Date(base).getDate()).getTime();
-    this.startMs = dayStart + 9 * 3600000;
-    this.endMs = dayStart + 10 * 3600000;
+    const now = new Date();
+    this.startMs = dayStart + now.getHours() * 3600000 + now.getMinutes() * 60000;
+    this.endMs = this.startMs + 3600000;
     if (choices.length > 0) {
       this.chosenKey = choices[0].calKey;
     }
@@ -179,9 +183,9 @@ struct EventEditPage {
       // 全天日程的结束存为"当天 23:59:59.999"（排他日期前 1 毫秒）
       this.endMs = this.allDay ? picked + 86399999 : picked;
     } else {
-      const dur: number = Math.max(0, this.endMs - this.startMs);
+      // 设定开始时间后，结束时间自动跟随 = 开始 + 1 小时
       this.startMs = picked;
-      this.endMs = this.allDay ? picked + 86399999 : picked + dur;
+      this.endMs = this.allDay ? picked + 86399999 : picked + 3600000;
     }
   }
 
@@ -246,7 +250,8 @@ struct EventEditPage {
         e.rrule = this.rruleForMode(this.repeatMode);
       }
       e.recurring = e.rrule !== '';
-      e.reminder = this.reminderMin;
+      e.reminders = EventDb.normalizeReminders(this.reminderList);
+      e.reminder = e.reminders.length > 0 ? e.reminders[0] : 0;
       if (isNew) {
         e.uid = `syncal-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
         e.remotePath = encodeURIComponent(e.uid) + '.ics';
@@ -265,11 +270,18 @@ struct EventEditPage {
       } else {
         await SyncEngine.settleLocalEvents(context);
       }
+      LogUtil.write(`本地保存日程「${e.title}」提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
+      // 立即刷新提醒（不等下一轮同步），保证刚保存的提醒马上生效
+      try {
+        await ReminderService.refreshReminders(context as common.UIAbilityContext);
+      } catch (err) {
+        // 刷新失败不影响保存
+      }
       this.getUIContext().getPromptAction().showToast({ message: '日程已保存' });
       router.back();
     } catch (err) {
       const ex = err as BusinessError;
-      console.error(`保存日程失败: ${ex.message}`);
+      LogUtil.write(`保存日程流程失败（数据已存本地待重试）：${ex.message}`);
       this.statusMsg = `保存失败：${ex.message}（已保存到本地，稍后同步会重试）`;
       // 数据仍在本地且带 dirty 标记，不会丢
       router.back();
@@ -301,6 +313,13 @@ struct EventEditPage {
         }
       } else {
         await SyncEngine.settleLocalEvents(context);
+      }
+      LogUtil.write(`本地删除日程「${this.event?.title ?? ''}」`);
+      // 立即刷新提醒（取消已发布但日程已删的提醒）
+      try {
+        await ReminderService.refreshReminders(context as common.UIAbilityContext);
+      } catch (err) {
+        // 刷新失败不影响删除
       }
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
       router.back();
@@ -407,7 +426,7 @@ struct EventEditPage {
 
           // 提醒
           Column({ space: 8 }) {
-            Text('提醒')
+            Text('提醒（可多选）')
               .fontSize(14)
               .fontColor($r('app.color.text_secondary'))
             Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
@@ -541,7 +560,8 @@ struct EventEditPage {
     .width('100%')
     .padding({ left: 8, right: 8, top: 10, bottom: 10 })
     .onClick(() => {
-      this.openPicker(isStart);
+      // 注意：timeRow 的参数是 isStart，openPicker 的参数是 isEnd，语义相反必须取反
+      this.openPicker(!isStart);
     })
   }
 
@@ -560,18 +580,42 @@ struct EventEditPage {
       })
   }
 
+  /** 提醒 chip 是否选中：0 = 不提醒（列表为空时选中）；其余按是否已选 */
+  private chipOn(minutes: number): boolean {
+    if (minutes === 0) {
+      return this.reminderList.length === 0;
+    }
+    return this.reminderList.includes(minutes);
+  }
+
+  /** 切换提醒：0 = 清空全部；其余多选切换 */
+  private toggleReminder(minutes: number): void {
+    if (minutes === 0) {
+      this.reminderList = [];
+      return;
+    }
+    const list: number[] = [...this.reminderList];
+    const idx: number = list.indexOf(minutes);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      list.push(minutes);
+    }
+    this.reminderList = list;
+  }
+
   @Builder
   reminderChip(minutes: number) {
     Text(this.reminderLabel(minutes))
       .fontSize(12)
-      .fontColor(this.reminderMin === minutes
+      .fontColor(this.chipOn(minutes)
         ? $r('app.color.button_text') : $r('app.color.text_primary'))
       .padding({ left: 10, right: 10, top: 6, bottom: 6 })
       .borderRadius(14)
       .margin({ right: 8, bottom: 8 })
-      .backgroundColor(this.reminderMin === minutes ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+      .backgroundColor(this.chipOn(minutes) ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
       .onClick(() => {
-        this.reminderMin = minutes;
+        this.toggleReminder(minutes);
       })
   }
 

@@ -25,7 +25,8 @@ export class LocalEvent {
   completed: boolean = false; // 待办是否已完成（STATUS:COMPLETED）
   rrule: string = '';       // 原始 RRULE（空 = 非重复）；显示时按规则展开多次发生
   exdate: string = '';      // 原始 EXDATE 排除日期，分号分隔
-  reminder: number = 0;     // 提醒提前分钟数（来自 VALARM，0 = 不提醒）
+  reminder: number = 0;     // 主提醒提前分钟数（第一个提醒，兼容旧字段），0 = 不提醒
+  reminders: number[] = []; // 全部提醒提前分钟数（多选），按添加顺序
 }
 
 /** 远端事件条目（REPORT 解析结果） */
@@ -43,7 +44,8 @@ export class RemoteEvent {
   completed: boolean = false; // VTODO STATUS:COMPLETED
   rrule: string = '';         // 原始 RRULE
   exdate: string = '';        // 原始 EXDATE（分号分隔）
-  reminder: number = 0;       // 提醒提前分钟数（VALARM）
+  reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
+  reminders: number[] = [];   // 全部提醒提前分钟数（多选）
 }
 
 export class EventDb {
@@ -97,8 +99,29 @@ export class EventDb {
     } catch (err) {
       // 列已存在
     }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN reminders TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
     EventDb.db = store;
     return store;
+  }
+
+  /** 提醒数组规范化：去掉 0/非法值并去重升序 */
+  static normalizeReminders(list: number[]): number[] {
+    const set = new Set<number>();
+    for (const n of list) {
+      if (n > 0) {
+        set.add(n);
+      }
+    }
+    return Array.from(set).sort((a: number, b: number): number => a - b);
+  }
+
+  /** 提醒数组比较键（规范化后逗号连接，用于增量比对） */
+  static remKey(list: number[]): string {
+    return EventDb.normalizeReminders(list).join(',');
   }
 
   private static fromRow(rs: relationalStore.ResultSet): LocalEvent {
@@ -124,6 +147,14 @@ export class EventDb {
     e.rrule = rs.getString(rs.getColumnIndex('rrule'));
     e.exdate = rs.getString(rs.getColumnIndex('exdate'));
     e.reminder = rs.getLong(rs.getColumnIndex('reminder'));
+    // 多提醒（逗号分隔分钟数）；旧数据无该列时回退单提醒
+    const remStr: string = rs.getString(rs.getColumnIndex('reminders'));
+    if (remStr !== '') {
+      e.reminders = remStr.split(',').map((s: string): number => Number(s))
+        .filter((n: number): boolean => !Number.isNaN(n) && n > 0);
+    } else if (e.reminder > 0) {
+      e.reminders = [e.reminder];
+    }
     return e;
   }
 
@@ -147,7 +178,8 @@ export class EventDb {
       'completed': e.completed ? 1 : 0,
       'rrule': e.rrule,
       'exdate': e.exdate,
-      'reminder': e.reminder
+      'reminder': e.reminders.length > 0 ? e.reminders[0] : 0,
+      'reminders': e.reminders.map((n: number): string => String(n)).join(',')
     };
     return bucket;
   }
@@ -365,10 +397,12 @@ export class EventDb {
         e.rrule = r.rrule;
         e.exdate = r.exdate;
         e.reminder = r.reminder;
+        e.reminders = r.reminders;
         await store.insert('events', EventDb.toBucket(e));
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
-        || found.reminder !== r.reminder || found.recurring !== r.recurring) {
+        || found.reminder !== r.reminder || found.recurring !== r.recurring
+        || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)) {
         // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填）
         found.title = r.title;
         found.description = r.description;
@@ -385,6 +419,7 @@ export class EventDb {
         found.rrule = r.rrule;
         found.exdate = r.exdate;
         found.reminder = r.reminder;
+        found.reminders = r.reminders;
         const up = new relationalStore.RdbPredicates('events');
         up.equalTo('id', found.id);
         await store.update(EventDb.toBucket(found), up);

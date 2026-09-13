@@ -2,6 +2,8 @@
 // 设置页：系统日历模式（仅显示/备份到 CalDAV）+ 混合显示开关 + 自动同步间隔 + 后台同步
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { AppSettings } from '../common/AppSettings';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
@@ -29,6 +31,10 @@ struct SettingsPage {
   @State allBooks: BackupTarget[] = []; // 全部 DAV 日历本（只读标记管理用）
   @State manualKeys: string[] = [];     // 手动标记只读的 calKey
   @State mutedKeys: string[] = [];      // 提醒静音的 calKey
+  @State showLogSheet: boolean = false; // 同步日志查看弹层
+  @State logText: string = '';
+  @State notifyEnabled: boolean = true; // 通知权限状态（提醒依赖）
+  @State lastTestResult: string = '';
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -56,6 +62,13 @@ struct SettingsPage {
     AppSettings.getMutedReminderKeys(ctx).then((v: string[]): void => {
       this.mutedKeys = v;
     });
+    notificationManager.isNotificationEnabled()
+      .then((v: boolean): void => {
+        this.notifyEnabled = v;
+      })
+      .catch((): void => {
+        this.notifyEnabled = false;
+      });
     this.loadBackupSettings();
     this.loadAllBooks();
   }
@@ -271,6 +284,65 @@ struct SettingsPage {
     await AppSettings.resetFullRefetch(this.context);
     this.getUIContext().getPromptAction().showToast({
       message: '已开启，返回首页后点一次同步即可，请保持屏幕常亮'
+    });
+  }
+
+  /** 打开同步日志查看弹层 */
+  private openLogSheet(): void {
+    if (this.context === undefined) {
+      return;
+    }
+    this.logText = LogUtil.readAll(this.context);
+    this.showLogSheet = true;
+  }
+
+  /** 复制全部日志到剪贴板（方便粘贴给我诊断） */
+  private copyLog(): void {
+    if (this.context === undefined) {
+      return;
+    }
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(
+        pasteboard.MIMETYPE_TEXT_PLAIN, LogUtil.readAll(this.context));
+      pasteboard.getSystemPasteboard().setData(data)
+        .then((): void => {
+          this.getUIContext().getPromptAction().showToast({ message: '日志已复制到剪贴板' });
+        })
+        .catch((): void => {
+          this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
+        });
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
+    }
+  }
+
+  private clearLog(): void {
+    if (this.context === undefined) {
+      return;
+    }
+    LogUtil.clear(this.context);
+    this.logText = '(日志已清空)';
+    this.getUIContext().getPromptAction().showToast({ message: '日志已清空' });
+  }
+
+  /** 发布 1 分钟后的测试提醒，验证提醒链路 */
+  private async testReminder(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    this.lastTestResult = await ReminderService.publishTestReminder(
+      this.context as common.UIAbilityContext);
+  }
+
+  /** 按当前数据立即重建提醒，显示发布条数 */
+  private async refreshNow(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    const n: number = await ReminderService.refreshReminders(
+      this.context as common.UIAbilityContext);
+    this.getUIContext().getPromptAction().showToast({
+      message: n > 0 ? `已发布 ${n} 个提醒` : '没有发布任何提醒（可能都过了提醒时间、被静音或通知未开启，详见日志）'
     });
   }
 
@@ -581,6 +653,85 @@ struct SettingsPage {
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
+          // 提醒诊断：通知权限状态 + 测试提醒 + 立即刷新
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Row({ space: 6 }) {
+                  Text('提醒诊断')
+                    .fontSize(15)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor($r('app.color.text_primary'))
+                  Text(this.notifyEnabled ? '通知已开启' : '通知未开启！')
+                    .fontSize(11)
+                    .fontColor(this.notifyEnabled ? $r('app.color.success') : $r('app.color.error'))
+                    .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                    .borderRadius(10)
+                    .backgroundColor(this.notifyEnabled ? $r('app.color.success_bg') : $r('app.color.error_bg'))
+                }
+                Text(this.notifyEnabled
+                  ? '点"测试提醒"验证链路：1 分钟后应收到通知'
+                  : '系统设置 → 通知管理 → 找到本应用 → 允许通知，日程提醒才能弹出')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+            }
+            .width('100%')
+            Row({ space: 10 }) {
+              Button('测试提醒')
+                .fontSize(13)
+                .backgroundColor($r('app.color.brand'))
+                .onClick(() => {
+                  this.testReminder();
+                })
+              Button('立即刷新提醒')
+                .fontSize(13)
+                .backgroundColor($r('app.color.text_secondary'))
+                .onClick(() => {
+                  this.refreshNow();
+                })
+            }
+            if (this.lastTestResult !== '') {
+              Text(this.lastTestResult)
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+                .width('100%')
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 同步日志：查看/复制/清空（真机测试诊断用）
+          Row({ space: 10 }) {
+            Column({ space: 2 }) {
+              Text('同步日志')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_primary'))
+              Text('记录每次同步/推送/提醒的详细过程，测试出问题时复制日志用于分析')
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Button('查看')
+              .fontSize(13)
+              .backgroundColor($r('app.color.brand'))
+              .onClick(() => {
+                this.openLogSheet();
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
         }
         .width('100%')
         .padding({ left: 20, right: 20, top: 8, bottom: 20 })
@@ -588,9 +739,53 @@ struct SettingsPage {
       .layoutWeight(1)
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
+      .bindSheet($$this.showLogSheet, this.logSheetBuilder(), {
+        height: 560,
+        dragBar: true,
+        title: { title: '同步日志' }
+      })
     }
     .width('100%')
     .height('100%')
+    .backgroundColor($r('app.color.page_bg'))
+  }
+
+  @Builder
+  logSheetBuilder() {
+    Column({ space: 10 }) {
+      Row({ space: 10 }) {
+        Button('复制全部')
+          .fontSize(13)
+          .backgroundColor($r('app.color.brand'))
+          .onClick(() => {
+            this.copyLog();
+          })
+        Button('清空')
+          .fontSize(13)
+          .backgroundColor($r('app.color.error'))
+          .onClick(() => {
+            this.clearLog();
+          })
+        Button('刷新')
+          .fontSize(13)
+          .backgroundColor($r('app.color.text_secondary'))
+          .onClick(() => {
+            this.openLogSheet();
+          })
+      }
+      Scroll() {
+        Text(this.logText === '' ? '(日志为空)' : this.logText)
+          .fontSize(11)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+      }
+      .layoutWeight(1)
+      .align(Alignment.Top)
+      .scrollBar(BarState.On)
+    }
+    .width('100%')
+    .height('100%')
+    .padding(16)
     .backgroundColor($r('app.color.page_bg'))
   }
 }

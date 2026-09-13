@@ -181,12 +181,18 @@ struct Index {
         });
       }
       this.autoSyncTimer = setInterval((): void => {
+        // 应用内提醒模式（代理提醒配额为 0 的降级）：每 15 秒检查到点的提醒
+        const tickCtx = this.getUIContext().getHostContext();
+        if (tickCtx !== undefined && !this.syncing) {
+          ReminderService.tickReminders(tickCtx as common.UIAbilityContext);
+        }
         const minutes: number = AppStorage.get<number>('syncIntervalMinutes') ?? 1;
         if (Date.now() - this.lastSyncTime < minutes * 60000) {
           return; // 未到设置的同步间隔
         }
         if (!this.syncing && this.accounts.length > 0) {
           this.lastSyncTime = Date.now();
+          LogUtil.write(`自动同步触发（间隔 ${minutes} 分钟，账号 ${this.accounts.length} 个）`);
           this.syncAll(false);
         }
       }, 15000);

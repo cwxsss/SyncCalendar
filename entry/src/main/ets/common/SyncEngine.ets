@@ -277,6 +277,7 @@ export class SyncEngine {
     r.rrule = e.rrule;
     r.exdate = e.exdate;
     r.reminder = e.reminder;
+    r.reminders = e.reminders.slice();
     return r;
   }
 
@@ -319,7 +320,7 @@ export class SyncEngine {
         const ics: string = IcsUtil.build(e);
         const etag: string = await DavClient.putEvent(url, auth, ics);
         await EventDb.clearDirty(context, e.id, etag);
-        LogUtil.write(`推送保存「${e.title}」→ ${url}（${ics.length} 字节）`);
+        LogUtil.write(`推送保存「${e.title}」→ ${url}（${ics.length} 字节，提醒=${e.reminders.map((n: number): string => String(n)).join('/')}分钟，VALARM=${ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'}）`);
       }
     }
   }

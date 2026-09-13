@@ -4,12 +4,16 @@ import { window } from '@kit.ArkUI';
 import { notificationManager } from '@kit.NotificationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
+import { LogUtil } from '../common/LogUtil';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    // 文件日志初始化：所有页面的同步日志统一写入 filesDir/sync.log
+    LogUtil.init(this.context);
+    LogUtil.write('---- App 启动 ----');
     // 后台同步：注册延迟任务兜底 + 按设置恢复长时任务
     BackgroundSyncService.initOnLaunch(this.context);
     // 申请通知权限：日程提醒、后台同步常驻通知都依赖它（系统只弹一次授权框）

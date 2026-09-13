@@ -16,7 +16,8 @@ class ParsedEvent {
   inAlarm: boolean = false; // 是否处于 VALARM 子组件内（内部属性不参与解析）
   rrule: string = '';       // 原始 RRULE 值
   exdates: string[] = [];   // 原始 EXDATE 值列表
-  reminder: number = 0;     // 提醒提前分钟数（来自 VALARM TRIGGER，0 = 不提醒）
+  reminder: number = 0;     // 主提醒提前分钟数（第一个 VALARM，0 = 不提醒）
+  reminders: number[] = []; // 全部提醒提前分钟数（多 VALARM）
 }
 
 /** iCal 时间解析结果 */
@@ -71,7 +72,13 @@ export class IcsUtil {
           const av: string = line.substring(ac + 1).trim();
           const an: string = ap.split(';')[0].toUpperCase();
           if (an === 'TRIGGER') {
-            current.reminder = IcsUtil.triggerMinutes(av, ap);
+            const m: number = IcsUtil.triggerMinutes(av, ap);
+            if (m > 0) {
+              current.reminders.push(m);
+              if (current.reminder === 0) {
+                current.reminder = m; // 第一个提醒作为主提醒（兼容旧字段）
+              }
+            }
           }
         }
         continue;
@@ -134,6 +141,7 @@ export class IcsUtil {
       r.rrule = p.rrule;
       r.exdate = p.exdates.join(';');
       r.reminder = p.reminder;
+      r.reminders = p.reminders;
       return r;
     });
   }
@@ -244,9 +252,21 @@ export class IcsUtil {
       `SUMMARY:${IcsUtil.escape(e.title)}\r\n` +
       (e.location !== '' ? `LOCATION:${IcsUtil.escape(e.location)}\r\n` : '') +
       (e.description !== '' ? `DESCRIPTION:${IcsUtil.escape(e.description)}\r\n` : '') +
-      (e.reminder > 0 ? IcsUtil.valarm(e.reminder) : '') +
+      IcsUtil.valarms(e.reminders.length > 0 ? e.reminders
+        : (e.reminder > 0 ? [e.reminder] : [])) +
       'END:VEVENT\r\n' +
       'END:VCALENDAR\r\n';
+  }
+
+  /** 由提醒分钟数组生成多个 VALARM（已规范化去重） */
+  private static valarms(minutes: number[]): string {
+    let out: string = '';
+    for (const m of minutes) {
+      if (m > 0) {
+        out += IcsUtil.valarm(m);
+      }
+    }
+    return out;
   }
 
   /** 由提前分钟数生成 VALARM（TRIGGER 负时长 = 提前触发） */
