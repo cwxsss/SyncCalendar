@@ -108,6 +108,13 @@ export class RruleUtil {
       if (targets.length === 0) {
         targets.push(base.getDay());
       }
+      // RFC 5545：DTSTART 始终是第一次发生——即使它的星期不在 BYDAY 中
+      // （例如周二创建的"每周一重复"日程，第一次是周二那次，必须显示）
+      if (byday.length > 0 && !targets.includes(base.getDay())) {
+        if (!accept(dtstart)) {
+          return result;
+        }
+      }
       const anchorWeek: number = RruleUtil.weekStartMs(dtstart);
       let dayMs: number = baseZeroMs;
       let guard: number = 0;
@@ -129,6 +136,13 @@ export class RruleUtil {
       let y: number = base.getFullYear();
       let m: number = base.getMonth();
       let guard: number = 0;
+      // RFC 5545：DTSTART 始终是第一次发生——即使它的日期不在 BYMONTHDAY 中
+      if (bymonthday.length > 0 &&
+        !bymonthday.some((v: number): boolean => v === base.getDate())) {
+        if (!accept(dtstart)) {
+          return result;
+        }
+      }
       while (guard < 1500) {
         guard++;
         const monthFirst: number = new Date(y, m, 1).getTime();

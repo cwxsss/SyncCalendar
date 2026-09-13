@@ -39,6 +39,7 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
         }
       }
       await SyncEngine.settleLocalEvents(context);
+      await SyncEngine.pruneOrphanRows(context, accounts);
       // 同步后刷新卡片 + 重建提醒，保证后台同步的成果直接可见
       await CardDataService.pushToAllForms(context);
       await ReminderService.refreshReminders(context);

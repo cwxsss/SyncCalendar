@@ -121,13 +121,15 @@ export class CardDataService {
       const end: number = start + 60 * 86400000;
       const sources = await CalendarDataService.loadSources(context);
       const events: DisplayEvent[] = await CalendarDataService.loadEvents(context, start, end, sources);
-      // 1) 过滤已结束超过 1 小时的；2) 按天分组，组内全天在前、有时间按开始时间排序；
+      // 1) 过滤：保留"今天 0 点以来"的日程（今天已结束的也显示，否则重复日程的
+      //    第一次发生会被隐藏，表现为"第一次不显示、第二次及以后显示"）；
+      // 2) 按天分组，组内全天在前、有时间按开始时间排序；
       // 3) 平铺输出并给每组第一条打 showDate 标记（日期头只跟在自己日期前面）
       // 跨天日程：已开始未结束的归到"今天"、按全天显示，不再从开始那天重复显示
-      const upcoming: DisplayEvent[] = events
-        .filter((e: DisplayEvent): boolean => e.endTime >= now.getTime() - 3600000);
-
       const todayKey: number = CardDataService.startOfDay(now.getTime());
+      const upcoming: DisplayEvent[] = events
+        .filter((e: DisplayEvent): boolean => e.endTime >= todayKey);
+
       const dayKey = (ms: number): number => CardDataService.startOfDay(ms);
       const spansDays = (e: DisplayEvent): boolean =>
         dayKey(e.endTime) > dayKey(e.startTime);

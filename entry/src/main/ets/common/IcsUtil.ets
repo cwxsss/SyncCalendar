@@ -91,7 +91,7 @@ export class IcsUtil {
         current.description = IcsUtil.unescape(value);
       } else if (propName === 'LOCATION') {
         current.location = IcsUtil.unescape(value);
-      } else if (propName === 'RRULE' || propName === 'RECURREIENCE-ID') {
+      } else if (propName === 'RRULE' || propName === 'RECURRENCE-ID') {
         current.recurring = true;
         if (propName === 'RRULE') {
           current.rrule = value;

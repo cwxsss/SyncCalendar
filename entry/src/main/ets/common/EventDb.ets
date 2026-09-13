@@ -368,8 +368,8 @@ export class EventDb {
         await store.insert('events', EventDb.toBucket(e));
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
-        || found.reminder !== r.reminder) {
-        // 更新（rrule/exdate 变化也更新，兼容老数据回填）
+        || found.reminder !== r.reminder || found.recurring !== r.recurring) {
+        // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填）
         found.title = r.title;
         found.description = r.description;
         found.location = r.location;
@@ -415,6 +415,26 @@ export class EventDb {
     const predicates = new relationalStore.RdbPredicates('events');
     predicates.like(`cal_key`, `${accId}%`);
     await store.delete(predicates);
+  }
+
+  /**
+   * 清理孤儿行：calKey 既不是本机日历（local）、也不属于任何现有账号（accId_ 前缀）的历史残留数据。
+   * 典型来源：账号删除重建、日历重选后序号变化遗留的旧 calKey（如 `_13`、`acc1789274273124_0_13`）。
+   * 这些行会参与重复日程的 override 排除计算，导致重复日程的第一次发生不显示，必须物理删除。
+   * 匹配规则为前缀包含（NOT LIKE 'accId_%' 的 AND 组合），宁可少删不会误删有效数据。
+   */
+  static async pruneOrphanCalKeys(context: common.Context, accIds: string[]): Promise<number> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.notEqualTo('cal_key', 'local');
+    for (const id of accIds) {
+      if (id === '') {
+        continue;
+      }
+      predicates.and().notLike('cal_key', `${id}_%`);
+    }
+    const removed: number = await store.delete(predicates);
+    return removed;
   }
 
   /**

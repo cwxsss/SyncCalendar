@@ -201,4 +201,23 @@ export class SyncEngine {
       }
     }
   }
+
+  /**
+   * 清理孤儿日程行：calKey 不属于任何现有账号（accId_ 前缀）也不是本机日历（local）的历史残留。
+   * 典型如账号重建/日历重选后遗留的 `_13`、`acc1789274273124_0_13` 等，
+   * 这些行会参与重复日程的 override 排除计算，导致重复日程第一次发生不显示。
+   * 建议在所有账号同步完成后调用。
+   */
+  static async pruneOrphanRows(context: common.Context, accounts: DavAccount[]): Promise<void> {
+    try {
+      const accIds: string[] = accounts.map((a: DavAccount): string => a.id);
+      const removed: number = await EventDb.pruneOrphanCalKeys(context, accIds);
+      if (removed > 0) {
+        LogUtil.write(`清理孤儿日程行：${removed} 条（calKey 不属于任何现有账号）`);
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`清理孤儿日程行失败(忽略)：${e.message}`);
+    }
+  }
 }

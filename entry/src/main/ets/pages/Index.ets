@@ -3,7 +3,7 @@
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
 import { SyncEngine } from '../common/SyncEngine';
@@ -12,6 +12,9 @@ import { LunarUtil } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
+import { EventDb, LocalEvent } from '../common/EventDb';
+import { RruleUtil } from '../common/RruleUtil';
+import { IcsUtil } from '../common/IcsUtil';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -284,6 +287,7 @@ struct Index {
       }
       await SyncEngine.withTimeout(
         SyncEngine.syncAccount(context as common.UIAbilityContext, acc), 120000);
+      await SyncEngine.pruneOrphanRows(context, this.accounts);
       acc.lastSyncTime = this.formatNow();
       await AccountStore.saveAll(context, this.accounts);
       this.getUIContext().getPromptAction()
@@ -341,6 +345,7 @@ struct Index {
     }
     try {
       await SyncEngine.settleLocalEvents(context);
+      await SyncEngine.pruneOrphanRows(context, this.accounts);
       await AccountStore.saveAll(context, this.accounts);
     } catch (err) {
       const e = err as BusinessError;
@@ -608,7 +613,7 @@ struct Index {
       })
   }
 
-  /** 切换视图：进入列表视图时按需加载（今天 ~ 未来2年，已结束的不显示） */
+  /** 切换视图：进入列表视图时按需加载（今天整天 ~ 未来2年，昨天之前已结束的不显示） */
   private async handleModeSwitch(key: string): Promise<void> {
     this.mode = key;
     if (key === 'agenda') {
@@ -630,8 +635,9 @@ struct Index {
     const end: number = now + 730 * 86400000;
     try {
       const raw: DisplayEvent[] = await CalendarDataService.loadEvents(context, start, end, this.sources);
-      // 只保留未结束的（跨天进行中的保留）；跨天且已开始的归到今天，与卡片一致
-      this.agendaEvents = raw.filter((e: DisplayEvent): boolean => e.endTime >= now - 3600000);
+      // 保留"今天 0 点以来"的全部日程：今天已结束的也显示（否则重复日程的第一次发生会被隐藏），
+      // 昨天及更早且已结束的不显示；跨天进行中的归到今天，与卡片一致
+      this.agendaEvents = raw.filter((e: DisplayEvent): boolean => e.endTime >= start);
       this.agendaGroupsData = this.buildAgendaGroups(this.agendaEvents);
       this.agendaStale = false;
       LogUtil.write(`列表视图加载：${this.agendaEvents.length} 条（今天~未来2年），分组 ${this.agendaGroupsData.length} 组`);
@@ -752,11 +758,118 @@ struct Index {
       }
       .width('100%')
       .padding({ left: 20, right: 20, top: 6 })
+      .gesture(LongPressGesture().onAction(() => {
+        this.showOccurrenceDebug(this.selectedDate);
+      }))
 
       this.eventList()
     }
     .width('100%')
     .layoutWeight(1)
+  }
+
+  /** 调试（临时）：长按月视图日期标题，检查重复日程在该日的首次发生情况 */
+  private async showOccurrenceDebug(dateMs: number): Promise<void> {
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    try {
+      const dayStart: number = this.startOfDay(dateMs);
+      const dayEnd: number = dayStart + 86400000;
+      const winStart: number = dayStart - 365 * 86400000;
+      const winEnd: number = dayEnd + 365 * 86400000;
+      const rows: LocalEvent[] = await EventDb.queryRange(context, winStart, winEnd);
+      const sources = await CalendarDataService.loadSources(context);
+      const visibleKeys: string[] = sources.filter((s: CalSource): boolean => s.visible)
+        .map((s: CalSource): string => s.calKey);
+      const masters = new Map<string, LocalEvent>();
+      const overrides = new Map<string, LocalEvent[]>();
+      for (const r of rows) {
+        if (r.rrule !== '') {
+          masters.set(r.uid, r);
+        } else {
+          const arr = overrides.get(r.uid);
+          if (arr === undefined) {
+            overrides.set(r.uid, [r]);
+          } else {
+            arr.push(r);
+          }
+        }
+      }
+      const p = (n: number): string => (n < 10 ? '0' + n : String(n));
+      const fmt = (ms: number): string => {
+        const d = new Date(ms);
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      };
+      const lines: string[] = [`调试 ${this.fmtDateCn(dateMs)}`, `visibleKeys=${visibleKeys.join(',')}`];
+      let idx: number = 0;
+      for (const m of masters.values()) {
+        if (idx >= 6) {
+          lines.push('…（更多系列省略）');
+          break;
+        }
+        // 只列出与该日期相关的系列：主行开始日在该日±90天内，或展开命中该日
+        const exNums: number[] = [];
+        if (m.exdate !== '') {
+          for (const raw of m.exdate.split(';')) {
+            const t = IcsUtil.parseTime(raw, !raw.includes('T'));
+            if (t !== null) {
+              exNums.push(t.time);
+            }
+          }
+        }
+        const occs: number[] = RruleUtil.expand(m.rrule, m.startTime, m.startTime, winEnd, exNums, 400);
+        const hitsDay: boolean = occs.some((o: number): boolean => o >= dayStart && o < dayEnd);
+        const nearStart: boolean = Math.abs(m.startTime - dayStart) <= 90 * 86400000;
+        if (!hitsDay && !nearStart) {
+          continue;
+        }
+        idx++;
+        const hasFirst: boolean = occs.some((o: number): boolean => o === m.startTime);
+        const mVis: boolean = visibleKeys.includes(m.calKey);
+        lines.push(`◇ ${m.title}`);
+        lines.push(`  uid=${m.uid.substring(0, 8)} 主行=${fmt(m.startTime)} rec=${m.recurring ? 1 : 0} calKey=${m.calKey} vis=${mVis ? 1 : 0} dirty=${m.dirty ? 1 : 0}`);
+        lines.push(`  rrule=${m.rrule === '' ? '(空!)' : m.rrule}`);
+        lines.push(`  exdate=${m.exdate === '' ? '无' : m.exdate}`);
+        lines.push(`  展开条数=${occs.length} 含首次=${hasFirst ? '是' : '否'} 首次=${occs.length > 0 ? fmt(occs[0]) : '无'} 该日发生=${hitsDay ? '是' : '否'}`);
+        const ovs = overrides.get(m.uid) ?? [];
+        if (ovs.length === 0) {
+          lines.push('  覆盖实例: 无');
+        } else {
+          for (const o of ovs.slice(0, 5)) {
+            const oVis: boolean = visibleKeys.includes(o.calKey);
+            lines.push(`  覆盖: ${fmt(o.startTime)}~${fmt(o.endTime)} rec=${o.recurring ? 1 : 0} calKey=${o.calKey} vis=${oVis ? 1 : 0} dirty=${o.dirty ? 1 : 0}`);
+          }
+          if (ovs.length > 5) {
+            lines.push(`  覆盖共 ${ovs.length} 条`);
+          }
+        }
+      }
+      if (lines.length <= 2) {
+        lines.push('（该日期附近没有重复主事件）');
+      }
+      const text: string = lines.join('\n').substring(0, 3500);
+      this.getUIContext().showAlertDialog({
+        title: '重复日程调试',
+        message: text,
+        autoCancel: true,
+        alignment: DialogAlignment.Center,
+        primaryButton: {
+          value: '复制',
+          action: (): void => {
+            const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+            pasteboard.getSystemPasteboard().setData(data);
+          }
+        },
+        secondaryButton: {
+          value: '关闭',
+          action: (): void => {}
+        }
+      });
+    } catch (err) {
+      // 调试失败不影响主流程
+    }
   }
 
   /** 周视图整周切换（左滑下一周、右滑上一周）；跨月时自动重载数据 */

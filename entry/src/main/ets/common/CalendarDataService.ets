@@ -153,11 +153,14 @@ export class CalendarDataService {
           rows.push(m);
         }
       }
-      // 单次覆盖实例（RECURRENCE-ID 独立行）：展开时跳过对应发生，避免重复
+      // 单次覆盖实例（RECURRENCE-ID 独立行）：展开时跳过对应发生，避免重复。
+      // 注意：①排除键必须带 calKey（同一系列可能出现在多个日历本）；
+      // ②只有"可见日历本"的覆盖行才参与排除——历史孤儿行（旧账号迁移残留）
+      //    自己不显示，却会把主事件的对应发生排除掉，导致"第一次不显示"
       const overrideKeys: string[] = [];
       for (const e of rows) {
-        if (e.rrule === '' && e.recurring) {
-          overrideKeys.push(`${e.uid}_${e.startTime}`);
+        if (e.rrule === '' && e.recurring && visibleKeys.includes(e.calKey)) {
+          overrideKeys.push(`${e.calKey}_${e.uid}_${e.startTime}`);
         }
       }
       let occTotal: number = 0;
@@ -181,7 +184,8 @@ export class CalendarDataService {
           }
           const occs: number[] = RruleUtil.expand(e.rrule, e.startTime, start, end, exNums, 1500);
           if (occs.length > 0) {
-            times = occs.filter((occ: number): boolean => !overrideKeys.includes(`${e.uid}_${occ}`));
+            times = occs.filter((occ: number): boolean =>
+              !overrideKeys.includes(`${e.calKey}_${e.uid}_${occ}`));
           }
         }
         for (const occ of times) {

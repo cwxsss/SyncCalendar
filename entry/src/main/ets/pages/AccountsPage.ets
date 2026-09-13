@@ -76,6 +76,7 @@ struct AccountsPage {
       if (acc.type === TYPE_CALDAV) {
         await SyncEngine.withTimeout(
           SyncEngine.syncAccount(context as common.UIAbilityContext, acc), 120000);
+        await SyncEngine.pruneOrphanRows(context, this.accounts);
       }
       acc.itemCount = acc.calendarHrefs.length;
       acc.lastSyncTime = this.formatNow();
