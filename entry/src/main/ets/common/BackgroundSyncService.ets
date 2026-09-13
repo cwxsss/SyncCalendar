@@ -12,7 +12,7 @@ import { LogUtil } from './LogUtil';
 const WORK_ID: number = 1001;
 
 export class BackgroundSyncService {
-  /** 申请长时任务（DATA_TRANSFER）：申请成功后进程在后台不被挂起 */
+  /** 申请长时任务（DATA_TRANSFER）：申请成功后进程在后台不被挂起，失败抛错由调用方提示用户 */
   static async startContinuousTask(context: common.UIAbilityContext): Promise<void> {
     try {
       const info: wantAgent.WantAgentInfo = {
@@ -30,6 +30,7 @@ export class BackgroundSyncService {
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`长时任务申请失败: ${e.code} - ${e.message}`);
+      throw new Error(`长时任务申请失败（错误码 ${e.code}）`);
     }
   }
 
@@ -83,22 +84,32 @@ export class BackgroundSyncService {
     }
   }
 
-  /** App 启动时统一入口：注册延迟任务 + 按设置恢复长时任务 */
+  /** App 启动时统一入口：注册延迟任务 + 按设置恢复长时任务（恢复失败静默，不影响启动） */
   static async initOnLaunch(context: common.UIAbilityContext): Promise<void> {
     BackgroundSyncService.scheduleDeferredSync(context);
     const enabled: boolean = await AppSettings.getBackgroundSync(context);
     if (enabled) {
-      await BackgroundSyncService.startContinuousTask(context);
+      try {
+        await BackgroundSyncService.startContinuousTask(context);
+      } catch (err) {
+        // 启动时恢复失败不阻塞 App：下次开关切换或重启再试
+      }
     }
   }
 
-  /** 设置页开关切换 */
+  /** 设置页开关切换：失败抛错由页面提示并回滚 UI */
   static async setBackgroundSync(context: common.UIAbilityContext, enabled: boolean): Promise<void> {
-    await AppSettings.setBackgroundSync(context, enabled);
     if (enabled) {
+      // 先申请任务，成功才落盘设置（失败时设置页回滚开关）
       await BackgroundSyncService.startContinuousTask(context);
+      await AppSettings.setBackgroundSync(context, true);
     } else {
-      await BackgroundSyncService.stopContinuousTask(context);
+      await AppSettings.setBackgroundSync(context, false);
+      try {
+        await BackgroundSyncService.stopContinuousTask(context);
+      } catch (err) {
+        // 停止失败（如任务本就不在运行）不影响设置保存
+      }
     }
   }
 }

@@ -234,7 +234,9 @@ struct SettingsPage {
       });
     } catch (err) {
       this.backgroundSync = !value; // 失败回滚 UI
-      this.getUIContext().getPromptAction().showToast({ message: '设置失败，请重试' });
+      const msg: string = (err as BusinessError).message !== ''
+        ? (err as BusinessError).message : '请重试';
+      this.getUIContext().getPromptAction().showToast({ message: `开启失败：${msg}` });
     }
   }
 

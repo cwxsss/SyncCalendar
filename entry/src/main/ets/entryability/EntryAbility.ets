@@ -1,6 +1,7 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { notificationManager } from '@kit.NotificationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 
@@ -11,6 +12,16 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     // 后台同步：注册延迟任务兜底 + 按设置恢复长时任务
     BackgroundSyncService.initOnLaunch(this.context);
+    // 申请通知权限：日程提醒、后台同步常驻通知都依赖它（系统只弹一次授权框）
+    notificationManager.isNotificationEnabled()
+      .then((enabled: boolean): Promise<void> => {
+        if (!enabled) {
+          return notificationManager.requestEnableNotification(this.context)
+            .catch((): void => {});
+        }
+        return Promise.resolve();
+      })
+      .catch((): void => {});
   }
 
   onDestroy(): void {
