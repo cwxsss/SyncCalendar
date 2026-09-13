@@ -1,5 +1,12 @@
 // entry/src/main/ets/common/AccountStore.ets
+// DAV 账号持久化（加密版）：
+// - 账号列表（含密码）序列化为 JSON 后用 AES-256-GCM 整体加密，
+//   存储为 caldav_vault 偏好中的 data_b64（iv:密文+tag）；
+// - AES 密钥首次随机生成后存于同一偏好（key_b64）；
+// - 旧版明文存储（caldav_account 的 acc_0..n）在首次 loadAll 时自动迁移并清除。
 import { preferences } from '@kit.ArkData';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { util } from '@kit.ArkTS';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 
@@ -10,6 +17,15 @@ export const TYPE_KEYS: string[] = [TYPE_CALDAV, TYPE_CARDDAV, TYPE_WEBDAV];
 
 /** 本机事件所属的虚拟日历 key */
 export const LOCAL_CAL_KEY: string = 'local';
+
+/** 旧版明文存储（迁移后清除） */
+const LEGACY_STORE: string = 'caldav_account';
+const LEGACY_COUNT_KEY: string = 'accountCount';
+
+/** 加密存储 */
+const VAULT_STORE: string = 'caldav_vault';
+const VAULT_KEY: string = 'key_b64';
+const VAULT_DATA: string = 'data_b64';
 
 /**
  * DAV 账号（@Observed 使同步状态变化能刷新列表 UI）
@@ -52,13 +68,100 @@ export class BookPalette {
   }
 }
 
+function bytesToB64(u: Uint8Array): string {
+  return new util.Base64Helper().encodeToStringSync(u);
+}
+
+function b64ToBytes(s: string): Uint8Array {
+  return new util.Base64Helper().decodeSync(s);
+}
+
+function strToBytes(s: string): Uint8Array {
+  return new util.TextEncoder().encodeInto(s);
+}
+
+function bytesToStr(u: Uint8Array): string {
+  return new util.TextDecoder('utf-8').decodeToString(u);
+}
+
+/** 账号加密存储实现（AES-256-GCM，密钥持久化） */
+class Vault {
+  private static keyB64: string = ''; // 进程内缓存，避免每轮同步重复读偏好
+
+  static async prefs(context: common.Context): Promise<preferences.Preferences> {
+    return preferences.getPreferences(context, VAULT_STORE);
+  }
+
+  /** 获取（或首次生成）AES-256 密钥 */
+  private static async aesKey(context: common.Context): Promise<cryptoFramework.SymKey> {
+    if (Vault.keyB64 === '') {
+      const store: preferences.Preferences = await Vault.prefs(context);
+      Vault.keyB64 = await store.get(VAULT_KEY, '') as string;
+    }
+    const gen: cryptoFramework.SymKeyGenerator =
+      cryptoFramework.createSymKeyGenerator('AES256');
+    if (Vault.keyB64 !== '') {
+      return gen.convertKey({ data: b64ToBytes(Vault.keyB64) });
+    }
+    const key: cryptoFramework.SymKey = await gen.generateSymKey();
+    const raw: cryptoFramework.DataBlob = key.getEncoded();
+    Vault.keyB64 = bytesToB64(raw.data);
+    const store: preferences.Preferences = await Vault.prefs(context);
+    await store.put(VAULT_KEY, Vault.keyB64);
+    await store.flush();
+    return key;
+  }
+
+  private static gcmParams(iv: Uint8Array, authTag: Uint8Array): cryptoFramework.GcmParamsSpec {
+    return {
+      algName: 'GcmParamsSpec',
+      iv: { data: iv },
+      aad: { data: new Uint8Array(0) },
+      authTag: { data: authTag }
+    };
+  }
+
+  /** 加密：返回 base64(iv) + ':' + base64(密文+authTag) */
+  static async encrypt(context: common.Context, plain: string): Promise<string> {
+    const key: cryptoFramework.SymKey = await Vault.aesKey(context);
+    const iv: Uint8Array =
+      cryptoFramework.createRandom().generateRandomSync(12).data;
+    const cipher: cryptoFramework.Cipher =
+      cryptoFramework.createCipher('AES256|GCM|NoPadding');
+    await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, key,
+      Vault.gcmParams(iv, new Uint8Array(16)));
+    const out: cryptoFramework.DataBlob =
+      await cipher.doFinal({ data: strToBytes(plain) });
+    return `${bytesToB64(iv)}:${bytesToB64(out.data)}`;
+  }
+
+  /** 解密：失败返回 null（调用方按"无账号"或迁移路径处理） */
+  static async decrypt(context: common.Context, stored: string): Promise<string | null> {
+    const sep: number = stored.indexOf(':');
+    if (sep <= 0) {
+      return null;
+    }
+    const iv: Uint8Array = b64ToBytes(stored.substring(0, sep));
+    const blob: Uint8Array = b64ToBytes(stored.substring(sep + 1));
+    if (blob.length <= 16) {
+      return null;
+    }
+    const tag: Uint8Array = blob.slice(blob.length - 16);
+    const ct: Uint8Array = blob.slice(0, blob.length - 16);
+    const key: cryptoFramework.SymKey = await Vault.aesKey(context);
+    const cipher: cryptoFramework.Cipher =
+      cryptoFramework.createCipher('AES256|GCM|NoPadding');
+    await cipher.init(cryptoFramework.CryptoMode.DECRYPT_MODE, key,
+      Vault.gcmParams(iv, tag));
+    const out: cryptoFramework.DataBlob = await cipher.doFinal({ data: ct });
+    return bytesToStr(out.data);
+  }
+}
+
 /**
- * 账号持久化：每个账号编码为一个分隔符字符串存储（acc_0、acc_1…），避免 JSON 结构化类型问题
+ * 账号持久化：加密 JSON 存储 + 旧版明文自动迁移
  */
 export class AccountStore {
-  private static readonly STORE: string = 'caldav_account';
-  private static readonly COUNT_KEY: string = 'accountCount';
-
   /** 规范化颜色：#RRGGBBAA → #RRGGBB；非法返回空串 */
   static normalizeColor(raw: string): string {
     const v: string = raw.trim();
@@ -69,25 +172,6 @@ export class AccountStore {
       return v.toUpperCase();
     }
     return '';
-  }
-
-  private static encodeAccount(acc: DavAccount): string {
-    const safe = (s: string): string => s.split('|').join('∥');
-    const parts: string[] = [
-      safe(acc.type),
-      safe(acc.name),
-      safe(acc.serverUrl),
-      safe(acc.username),
-      safe(acc.password),
-      String(acc.itemCount),
-      safe(acc.lastSyncTime),
-      acc.calendarHrefs.join(';'),
-      acc.calendarNames.join(';'),
-      acc.calendarColors.join(';'),
-      safe(acc.id),
-      acc.calendarWritable.join(';')
-    ];
-    return parts.join('|');
   }
 
   private static decodeAccount(raw: string): DavAccount | null {
@@ -119,69 +203,153 @@ export class AccountStore {
     return acc;
   }
 
-  static async loadAll(context: common.Context): Promise<DavAccount[]> {
-    const result: DavAccount[] = [];
-    let migrated: boolean = false;
+  /** 旧版明文账号编码（迁移旧数据时使用） */
+  private static encodeLegacyAccount(acc: DavAccount): string {
+    const safe = (s: string): string => s.split('|').join('∥');
+    const parts: string[] = [
+      safe(acc.type),
+      safe(acc.name),
+      safe(acc.serverUrl),
+      safe(acc.username),
+      safe(acc.password),
+      String(acc.itemCount),
+      safe(acc.lastSyncTime),
+      acc.calendarHrefs.join(';'),
+      acc.calendarNames.join(';'),
+      acc.calendarColors.join(';'),
+      safe(acc.id),
+      acc.calendarWritable.join(';')
+    ];
+    return parts.join('|');
+  }
+
+  /** 从旧版明文存储读取（无则返回 null） */
+  private static async loadLegacy(context: common.Context): Promise<DavAccount[] | null> {
     try {
       const store: preferences.Preferences =
-        await preferences.getPreferences(context, AccountStore.STORE);
-      const count: number = await store.get(AccountStore.COUNT_KEY, 0) as number;
-      console.info(`[AccountStore] loadAll: count=${count}`);
+        await preferences.getPreferences(context, LEGACY_STORE);
+      const count: number = await store.get(LEGACY_COUNT_KEY, 0) as number;
+      if (count <= 0) {
+        return null;
+      }
+      const result: DavAccount[] = [];
       for (let i = 0; i < count; i++) {
         const raw = await store.get(`acc_${i}`, '') as string;
         if (raw === '') {
-          console.warn(`[AccountStore] loadAll: acc_${i} 为空`);
           continue;
         }
         const acc = AccountStore.decodeAccount(raw);
         if (acc !== null) {
           if (acc.id === '') {
-            // 旧版本存储没有 id：补发一个并标记需要回写，保证 id 跨启动稳定
             acc.id = `acc${Date.now()}_${i}`;
-            migrated = true;
           }
           result.push(acc);
-        } else {
-          console.error(`[AccountStore] loadAll: acc_${i} 解码失败，raw 长度=${raw.length}`);
         }
+      }
+      return result;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** 清除旧版明文存储（迁移完成后调用） */
+  private static async clearLegacy(context: common.Context): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, LEGACY_STORE);
+      const count: number = await store.get(LEGACY_COUNT_KEY, 0) as number;
+      for (let i = 0; i < count; i++) {
+        store.delete(`acc_${i}`);
+      }
+      store.delete(LEGACY_COUNT_KEY);
+      await store.flush();
+    } catch (err) {
+      // 清理失败不影响使用，下次迁移再试
+    }
+  }
+
+  static async loadAll(context: common.Context): Promise<DavAccount[]> {
+    // 1) 新加密存储
+    try {
+      const store: preferences.Preferences = await Vault.prefs(context);
+      const data: string = await store.get(VAULT_DATA, '') as string;
+      if (data !== '') {
+        const plain: string | null = await Vault.decrypt(context, data);
+        if (plain !== null) {
+          const arr: Array<Record<string, Object>> =
+            JSON.parse(plain) as Array<Record<string, Object>>;
+          const result: DavAccount[] = [];
+          for (const o of arr) {
+            const a = new DavAccount();
+            a.id = o['id'] !== undefined ? o['id'] as string : '';
+            a.type = o['type'] !== undefined ? o['type'] as string : TYPE_CALDAV;
+            a.name = o['name'] !== undefined ? o['name'] as string : '';
+            a.serverUrl = o['serverUrl'] !== undefined ? o['serverUrl'] as string : '';
+            a.username = o['username'] !== undefined ? o['username'] as string : '';
+            a.password = o['password'] !== undefined ? o['password'] as string : '';
+            a.calendarHrefs = o['calendarHrefs'] !== undefined ? o['calendarHrefs'] as string[] : [];
+            a.calendarNames = o['calendarNames'] !== undefined ? o['calendarNames'] as string[] : [];
+            a.calendarColors = o['calendarColors'] !== undefined ? o['calendarColors'] as string[] : [];
+            a.calendarWritable = o['calendarWritable'] !== undefined ? o['calendarWritable'] as string[] : [];
+            a.itemCount = o['itemCount'] !== undefined ? o['itemCount'] as number : 0;
+            a.lastSyncTime = o['lastSyncTime'] !== undefined ? o['lastSyncTime'] as string : '';
+            if (a.id === '') {
+              a.id = `acc${Date.now()}_${result.length}`;
+            }
+            result.push(a);
+          }
+          console.info(`[AccountStore] loadAll: ${result.length} 个账号（加密存储）`);
+          return result;
+        }
+        console.error('[AccountStore] 加密账号数据解密失败');
       }
     } catch (err) {
       const e = err as BusinessError;
-      console.error(`读取账号失败: ${e.message}`);
+      console.error(`[AccountStore] 读取加密账号失败: ${e.message}`);
     }
-    if (migrated) {
-      try {
-        await AccountStore.saveAll(context, result);
-        console.info('旧版账号数据已迁移：补充持久化账号 id');
-      } catch (err) {
-        const e = err as BusinessError;
-        console.error(`账号 id 迁移回写失败: ${e.message}`);
-      }
+
+    // 2) 旧版明文存储 → 迁移
+    const legacy: DavAccount[] | null = await AccountStore.loadLegacy(context);
+    if (legacy !== null) {
+      console.info(`[AccountStore] 迁移 ${legacy.length} 个明文账号到加密存储`);
+      await AccountStore.saveAll(context, legacy, true);
+      await AccountStore.clearLegacy(context);
+      return legacy;
     }
-    return result;
+    return [];
   }
 
   /**
-   * 保存全部账号。
-   * 防御：存储里已有账号时，禁止用空列表覆盖（调用方若因读取异常拿到空列表再回写，
+   * 保存全部账号（整体加密写入）。
+   * 防御：当前已有账号时，禁止用空列表覆盖（调用方因读取异常拿到空列表再回写，
    * 会把所有账号抹掉）。仅删除账号的合法场景通过 force=true 放行。
    */
   static async saveAll(context: common.Context, accounts: DavAccount[], force: boolean = false): Promise<void> {
-    const store: preferences.Preferences =
-      await preferences.getPreferences(context, AccountStore.STORE);
-    const oldCount: number = await store.get(AccountStore.COUNT_KEY, 0) as number;
-    if (accounts.length === 0 && oldCount > 0 && !force) {
-      console.error(`[AccountStore] 拒绝用空列表覆盖账号存储（原有 ${oldCount} 个账号）`);
+    // 防御：先看加密存储里现有数量（空列表覆盖保护）
+    let existing: number = -1;
+    try {
+      const store: preferences.Preferences = await Vault.prefs(context);
+      const data: string = await store.get(VAULT_DATA, '') as string;
+      if (data !== '') {
+        const plain: string | null = await Vault.decrypt(context, data);
+        if (plain !== null) {
+          existing = (JSON.parse(plain) as Array<Record<string, Object>>).length;
+        }
+      }
+    } catch (err) {
+      // 读取失败按"未知"处理，不拦截
+      existing = -1;
+    }
+    if (accounts.length === 0 && existing > 0 && !force) {
+      console.error(`[AccountStore] 拒绝用空列表覆盖账号存储（原有 ${existing} 个账号）`);
       throw new Error('账号列表为空，已阻止覆盖存储（保护原有账号数据）');
     }
-    for (let i = 0; i < oldCount; i++) {
-      store.delete(`acc_${i}`);
-    }
-    for (let i = 0; i < accounts.length; i++) {
-      await store.put(`acc_${i}`, AccountStore.encodeAccount(accounts[i]));
-    }
-    await store.put(AccountStore.COUNT_KEY, accounts.length);
+    const plain: string = JSON.stringify(accounts);
+    const enc: string = await Vault.encrypt(context, plain);
+    const store: preferences.Preferences = await Vault.prefs(context);
+    await store.put(VAULT_DATA, enc);
     await store.flush();
+    console.info(`[AccountStore] saveAll: ${accounts.length} 个账号已加密写入`);
   }
 
   static async addAccount(context: common.Context, acc: DavAccount): Promise<void> {

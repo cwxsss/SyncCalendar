@@ -2,7 +2,8 @@
 // 同步日历主界面：月视图（左右滑动翻月）/ 周视图 / 日视图 / 日程列表
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
 import { mediaquery, router } from '@kit.ArkUI';
-import { common } from '@kit.AbilityKit';
+import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
+import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
@@ -55,6 +56,8 @@ struct Index {
   private autoSyncTimer: number = -1;
   private lastSyncTime: number = 0;
   private permissionAsked: boolean = false;
+  @State detailShow: boolean = false; // 只读日程详情半屏弹层
+  @State detailEvent: DisplayEvent | null = null;
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -433,42 +436,304 @@ struct Index {
     router.pushUrl({ url: 'pages/EventEditPage' });
   }
 
-  /** 只读日程详情弹窗 */
+  /** 只读日程详情：改为卡片式半屏弹层（与编辑页风格一致） */
   private showEventDetail(e: DisplayEvent): void {
-    const lines: string[] = [];
+    this.detailEvent = e;
+    this.detailShow = true;
+  }
+
+  private detailStartText(e: DisplayEvent): string {
     if (e.isAllDay) {
-      lines.push(`时间：全天 ${this.fmtDateCn(e.startTime)}`);
-      if (this.spansDays(e)) {
-        lines.push(`        ~ ${this.fmtDateCn(e.endTime)}`);
-      }
-    } else if (this.spansDays(e)) {
-      lines.push(`时间：${this.fmtDateCn(e.startTime)} ${this.fmtTime(e.startTime)}`);
-      lines.push(`        ~ ${this.fmtDateCn(e.endTime)} ${this.fmtTime(e.endTime)}`);
+      return `全天 ${this.fmtDateCn(e.startTime)}`;
+    }
+    return `${this.fmtDateCn(e.startTime)} ${this.fmtTime(e.startTime)}`;
+  }
+
+  private detailEndText(e: DisplayEvent): string {
+    const sameDay: boolean = this.startOfDay(e.startTime) === this.startOfDay(e.endTime);
+    if (e.isAllDay) {
+      return `全天 ${this.fmtDateCn(e.endTime)}`;
+    }
+    if (sameDay) {
+      return this.fmtTime(e.endTime);
+    }
+    return `${this.fmtDateCn(e.endTime)} ${this.fmtTime(e.endTime)}`;
+  }
+
+  /** 点击地点：拉起高德 App 路线规划，地址经系统地理编码转为坐标后传入目的地 */
+  private async openInAmap(address: string): Promise<void> {
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined || address === '') {
+      return;
+    }
+    const ctx = context as common.UIAbilityContext;
+    const enc: string = encodeURIComponent(address);
+    // 高德鸿蒙深链 dlat/dlon 为必填（dname 仅作名称显示），先地理编码拿坐标
+    let coords: number[] | null = null;
+    if (await this.ensureLocationPermission()) {
+      coords = await this.geocodeAddress(address);
+    }
+    const base: string = 'amapuri://route/plan/?sourceApplication=SyncCalendar';
+    let link: string;
+    if (coords !== null) {
+      // 系统地理编码返回 WGS84，高德要求 GCJ02（dev=0），做本地转换
+      const gcj: number[] = this.wgs84ToGcj02(coords[0], coords[1]);
+      link = `${base}&dlat=${gcj[0].toFixed(6)}&dlon=${gcj[1].toFixed(6)}&dname=${enc}&dev=0&t=0`;
     } else {
-      lines.push(`时间：${this.fmtDateCn(e.startTime)} ${this.fmtTime(e.startTime)} ~ ${this.fmtTime(e.endTime)}`);
+      // 无坐标时尽力而为：部分版本只认坐标，目的地可能为空
+      link = `${base}&dname=${enc}&dev=0&t=0`;
     }
-    if (e.location !== '') {
-      lines.push(`地点：${e.location}`);
+    try {
+      await ctx.openLink(link);
+      LogUtil.write(`已拉起高德导航：${address}（坐标=${coords !== null ? '有' : '无'}）`);
+      return;
+    } catch (err) {
+      LogUtil.write(`高德深链打开失败：${(err as BusinessError).message}`);
     }
-    if (e.recurring) {
-      lines.push('重复：是');
-    }
-    if (e.calName !== '') {
-      lines.push(`日历本：${e.calName}${e.isSystem ? '' : '（只读）'}`);
-    }
-    if (e.description !== '') {
-      lines.push(`备注：${e.description}`);
-    }
-    this.getUIContext().showAlertDialog({
-      title: e.title === '' ? '(无标题)' : e.title,
-      message: lines.join('\n'),
-      autoCancel: true,
-      alignment: DialogAlignment.Center,
-      primaryButton: {
-        value: '关闭',
-        action: (): void => {}
+    this.getUIContext().getPromptAction().showToast({ message: '未安装高德地图或无法打开' });
+  }
+
+  /** 确认定位权限（地理编码依赖），未授权时向用户申请一次 */
+  private async ensureLocationPermission(): Promise<boolean> {
+    try {
+      const atManager = abilityAccessCtrl.createAtManager();
+      const bundleInfo = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      const tokenId = bundleInfo.appInfo.accessTokenId;
+      const status = await atManager.checkAccessToken(tokenId, 'ohos.permission.LOCATION');
+      if (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
+        return true;
       }
-    });
+    } catch (err) {
+      // 未授权会走申请流程
+    }
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const atManager = abilityAccessCtrl.createAtManager();
+      // LOCATION 与 APPROXIMATELY_LOCATION 必须一起申请
+      const result = await atManager.requestPermissionsFromUser(context,
+        ['ohos.permission.LOCATION', 'ohos.permission.APPROXIMATELY_LOCATION']);
+      return result.authResults.every((r: number): boolean => r === 0);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /** 正向地理编码：地址 → 坐标（系统服务，无需高德 key） */
+  private async geocodeAddress(address: string): Promise<number[] | null> {
+    try {
+      if (!geoLocationManager.isGeocoderAvailable()) {
+        LogUtil.write('系统地理编码服务不可用');
+        return null;
+      }
+      const req: geoLocationManager.GeoCodeRequest = { description: address, maxItems: 1 };
+      const list: geoLocationManager.GeoAddress[] =
+        await geoLocationManager.getAddressesFromLocationName(req);
+      if (list.length > 0 && list[0].latitude !== undefined && list[0].longitude !== undefined) {
+        return [list[0].latitude, list[0].longitude];
+      }
+      LogUtil.write(`地理编码无结果：${address}`);
+    } catch (err) {
+      LogUtil.write(`地理编码失败：${(err as BusinessError).message}`);
+    }
+    return null;
+  }
+
+  /** WGS84 → GCJ02 火星坐标转换（中国境内；标准偏移算法） */
+  private wgs84ToGcj02(wlat: number, wlon: number): number[] {
+    const a: number = 6378245.0;
+    const ee: number = 0.00669342162296594323;
+    const transformLat = (x: number, y: number): number => {
+      let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y
+        + 0.2 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320.0 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+      return ret;
+    };
+    const transformLon = (x: number, y: number): number => {
+      let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+      return ret;
+    };
+    if (wlon < 72.004 || wlon > 137.8347 || wlat < 0.8293 || wlat > 55.8271) {
+      return [wlat, wlon]; // 中国境外无偏移
+    }
+    let dLat: number = transformLat(wlon - 105.0, wlat - 35.0);
+    let dLon: number = transformLon(wlon - 105.0, wlat - 35.0);
+    const radLat: number = wlat / 180.0 * Math.PI;
+    let magic: number = Math.sin(radLat);
+    magic = 1 - ee * magic * magic;
+    const sqrtMagic: number = Math.sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+    dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+    return [wlat + dLat, wlon + dLon];
+  }
+
+  @Builder
+  detailTag(text: string) {
+    Text(text)
+      .fontSize(11)
+      .fontColor($r('app.color.brand'))
+      .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+      .borderRadius(9)
+      .border({ width: 1, color: $r('app.color.brand') })
+  }
+
+  @Builder
+  detailRow(label: string, value: string) {
+    Row({ space: 12 }) {
+      Text(label)
+        .fontSize(14)
+        .fontColor($r('app.color.text_secondary'))
+        .width(56)
+      Text(value)
+        .fontSize(15)
+        .fontColor($r('app.color.text_primary'))
+        .textAlign(TextAlign.End)
+        .layoutWeight(1)
+    }
+    .width('100%')
+  }
+
+  @Builder
+  detailSheet() {
+    Column({ space: 12 }) {
+      if (this.detailEvent !== null) {
+        // 标题区：色点 + 标题 + 徽标紧跟标题 + 自绘关闭按钮（与标题同行）
+        Row({ space: 8 }) {
+          Circle()
+            .fill(this.detailEvent.color)
+            .width(12)
+            .height(12)
+          Text(this.detailEvent.title === '' ? '(无标题)' : this.detailEvent.title)
+            .fontSize(19)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '58%' })
+          if (this.detailEvent.isSystem) {
+            this.detailTag('系统')
+          } else if (!this.detailEvent.writable) {
+            this.detailTag('只读')
+          }
+          Blank()
+          Text('✕')
+            .fontSize(16)
+            .fontColor($r('app.color.text_secondary'))
+            .width(30)
+            .height(30)
+            .textAlign(TextAlign.Center)
+            .borderRadius(15)
+            .backgroundColor($r('app.color.card_bg'))
+            .onClick(() => {
+              this.detailShow = false;
+            })
+        }
+        .width('100%')
+
+        Scroll() {
+          Column({ space: 12 }) {
+            // 时间卡片
+            Column({ space: 12 }) {
+              if (this.detailEvent.isAllDay && !this.spansDays(this.detailEvent)) {
+                this.detailRow('时间', `全天 ${this.fmtDateCn(this.detailEvent.startTime)}`)
+              } else {
+                this.detailRow('开始', this.detailStartText(this.detailEvent))
+                Divider().color($r('app.color.shadow_color'))
+                this.detailRow('结束', this.detailEndText(this.detailEvent))
+              }
+            }
+            .width('100%')
+            .padding(14)
+            .borderRadius(12)
+            .backgroundColor($r('app.color.card_bg'))
+
+            // 日历本 / 重复
+            Column({ space: 12 }) {
+              Row({ space: 12 }) {
+                Text('日历本')
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_secondary'))
+                  .width(56)
+                Text(this.detailEvent.calName === '' ? '-' : this.detailEvent.calName)
+                  .fontSize(15)
+                  .fontColor($r('app.color.text_primary'))
+                  .textAlign(TextAlign.End)
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              if (this.detailEvent.recurring) {
+                Divider().color($r('app.color.shadow_color'))
+                this.detailRow('重复', '重复日程')
+              }
+            }
+            .width('100%')
+            .padding(14)
+            .borderRadius(12)
+            .backgroundColor($r('app.color.card_bg'))
+
+            // 地点：点击打开高德地图导航
+            if (this.detailEvent.location !== '') {
+              Row({ space: 8 }) {
+                Column({ space: 4 }) {
+                  Text('地点')
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_secondary'))
+                  Text(this.detailEvent.location)
+                    .fontSize(15)
+                    .fontColor($r('app.color.brand'))
+                }
+                .alignItems(HorizontalAlign.Start)
+                .layoutWeight(1)
+                Text('导航 ›')
+                  .fontSize(14)
+                  .fontColor($r('app.color.brand'))
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+              .padding(14)
+              .borderRadius(12)
+              .backgroundColor($r('app.color.card_bg'))
+              .onClick(() => {
+                if (this.detailEvent !== null) {
+                  this.openInAmap(this.detailEvent.location);
+                }
+              })
+            }
+
+            // 备注
+            if (this.detailEvent.description !== '') {
+              Column({ space: 8 }) {
+                Text('备注')
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_secondary'))
+                Text(this.detailEvent.description)
+                  .fontSize(15)
+                  .fontColor($r('app.color.text_primary'))
+                  .width('100%')
+              }
+              .alignItems(HorizontalAlign.Start)
+              .width('100%')
+              .padding(14)
+              .borderRadius(12)
+              .backgroundColor($r('app.color.card_bg'))
+            }
+          }
+          .width('100%')
+        }
+        .scrollBar(BarState.Auto)
+        .align(Alignment.Top)
+        .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
+    .alignItems(HorizontalAlign.Start)
   }
 
   private addEvent(): void {
@@ -520,6 +785,12 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+    .bindSheet($$this.detailShow, this.detailSheet(), {
+      height: 540,
+      dragBar: true,
+      showClose: false, // 关闭按钮自绘在标题行右侧，避免系统按钮压住徽标
+      backgroundColor: $r('app.color.page_bg')
+    })
   }
 
   @Builder

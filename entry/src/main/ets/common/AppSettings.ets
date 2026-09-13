@@ -138,6 +138,32 @@ export class AppSettings {
     }
   }
 
+  /**
+   * 删除账号后的设置清理：移除该账号名下所有日历本的
+   * 手动只读标记、提醒静音标记，并清空指向它的备份目标。
+   */
+  static async cleanupAccountSettings(context: common.Context, accId: string): Promise<void> {
+    try {
+      const manual: string[] = await AppSettings.getManualReadonlyKeys(context);
+      const manual2: string[] = manual.filter((k: string): boolean => !k.startsWith(`${accId}_`));
+      if (manual2.length !== manual.length) {
+        await AppSettings.setManualReadonlyKeys(context, manual2);
+      }
+      const muted: string[] = await AppSettings.getMutedReminderKeys(context);
+      const muted2: string[] = muted.filter((k: string): boolean => !k.startsWith(`${accId}_`));
+      if (muted2.length !== muted.length) {
+        await AppSettings.setMutedReminderKeys(context, muted2);
+      }
+      const backupKey: string = await AppSettings.getBackupCalKey(context);
+      if (backupKey.startsWith(`${accId}_`)) {
+        await AppSettings.setBackupCalKey(context, '');
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`清理账号设置失败: ${e.message}`);
+    }
+  }
+
   /** 系统日历模式：display = 仅混合显示；backup = 本地系统日程备份到选定 CalDAV 日历本 */
   static async getSysCalMode(context: common.Context): Promise<string> {
     try {

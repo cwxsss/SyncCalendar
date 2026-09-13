@@ -8,6 +8,7 @@ import { SyncEngine } from '../common/SyncEngine';
 import { EditNavParams } from './EditAccountPage';
 import { EventDb } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
+import { AppSettings } from '../common/AppSettings';
 import { ScreenKeeper } from '../common/ScreenKeeper';
 
 @Entry
@@ -150,8 +151,11 @@ struct AccountsPage {
     }
     try {
       this.accounts = this.accounts.filter((a: DavAccount): boolean => a.id !== acc.id);
-      await AccountStore.saveAll(context, this.accounts);
+      // force=true：删除最后一个账号时列表为空是合法场景，允许覆盖
+      await AccountStore.saveAll(context, this.accounts, true);
+      // 删除该账号全部本地日程/待办，并清理只读/静音/备份目标等关联设置
       await EventDb.deleteAccountEvents(context, acc.id);
+      await AppSettings.cleanupAccountSettings(context, acc.id);
       this.getUIContext().getPromptAction()
         .showToast({ message: `「${acc.name}」已删除` });
     } catch (err) {
