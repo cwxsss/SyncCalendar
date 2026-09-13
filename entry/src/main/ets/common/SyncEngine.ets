@@ -70,6 +70,9 @@ export class SyncEngine {
         }
         // 一个资源可能包含主事件 + 单次覆盖实例（RECURRENCE-ID），全部入库
         for (const r of parsed) {
+          if (r.uid === 'syncprobe') {
+            continue; // 写权限探测资源（万一删除失败），不入库展示
+          }
           if (r.uid === '') {
             r.uid = SyncEngine.uidFromHref(it.href);
           }
@@ -113,31 +116,44 @@ export class SyncEngine {
    * 失败静默（颜色不影响数据正确性）
    */
   static async refreshCalendarColors(acc: DavAccount, auth: string): Promise<void> {
+    let entries: DavColorEntry[] = [];
     try {
-      const entries: DavColorEntry[] = await DavClient.propfindColors(acc.serverUrl, auth);
-      if (entries.length === 0) {
-        return;
-      }
-      for (let i = 0; i < acc.calendarHrefs.length; i++) {
-        const target: string = acc.calendarHrefs[i];
-        const originMatch = /https?:\/\/[^/]+/i.exec(target);
-        let path: string = originMatch !== null ? target.substring(originMatch[0].length) : target;
-        if (path === '') {
-          path = '/';
-        }
-        const norm = (s: string): string => s.endsWith('/') ? s : s + '/';
-        const found = entries.find((e: DavColorEntry): boolean =>
-          norm(e.href) === norm(path));
-        if (found !== undefined && found.color !== '') {
-          while (acc.calendarColors.length <= i) {
-            acc.calendarColors.push('');
-          }
-          acc.calendarColors[i] = found.color;
-        }
-      }
+      entries = await DavClient.propfindColors(acc.serverUrl, auth);
     } catch (err) {
       const e = err as BusinessError;
-      console.info(`刷新日历本颜色失败(忽略): ${e.message}`);
+      LogUtil.write(`PROPFIND 颜色/权限失败(继续探测写权限): ${e.message}`);
+    }
+    for (let i = 0; i < acc.calendarHrefs.length; i++) {
+      const target: string = acc.calendarHrefs[i];
+      const originMatch = /https?:\/\/[^/]+/i.exec(target);
+      let path: string = originMatch !== null ? target.substring(originMatch[0].length) : target;
+      if (path === '') {
+        path = '/';
+      }
+      const norm = (s: string): string => s.endsWith('/') ? s : s + '/';
+      const found = entries.find((e: DavColorEntry): boolean =>
+        norm(e.href) === norm(path));
+      if (found !== undefined && found.color !== '') {
+        while (acc.calendarColors.length <= i) {
+          acc.calendarColors.push('');
+        }
+        acc.calendarColors[i] = found.color;
+      }
+      // 回写各日历本写权限（'1'=可写 '0'=只读）
+      while (acc.calendarWritable.length <= i) {
+        acc.calendarWritable.push('1');
+      }
+      const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
+      if (found !== undefined && found.privilegeKnown) {
+        // 服务器声明了权限：直接采用
+        acc.calendarWritable[i] = found.writable ? '1' : '0';
+        LogUtil.write(`日历本[${i}]「${calName}」写权限(privilege)：${found.writable ? '可写' : '只读'}`);
+      } else {
+        // 服务器未声明权限（如部分 Synology 配置）或 PROPFIND 未匹配到该本：真实写探测
+        const w: boolean = await DavClient.probeWritable(target, auth);
+        acc.calendarWritable[i] = w ? '1' : '0';
+        LogUtil.write(`日历本[${i}]「${calName}」写权限(探测)：${w ? '可写' : '只读'}`);
+      }
     }
   }
 
@@ -159,16 +175,27 @@ export class SyncEngine {
     const mine: LocalEvent[] = dirty.filter((e: LocalEvent): boolean => acc.calendarHrefs.includes(e.href));
     LogUtil.write(`推送本地修改：全部待推送 ${dirty.length} 条，属于账号「${acc.name}」的 ${mine.length} 条`);
     for (const e of mine) {
+      // 只读日历本：推送必然 403，跳过并保留 dirty（权限恢复后可再推）
+      const bookIdx: number = acc.calendarHrefs.indexOf(e.href);
+      if (bookIdx >= 0 && acc.calendarWritable.length > bookIdx
+        && acc.calendarWritable[bookIdx] === '0') {
+        LogUtil.write(`推送跳过只读日历本事件「${e.title}」(uid=${e.uid})`);
+        continue;
+      }
       if (e.kind === 'todo') {
         // 待办只读：本地不会有 dirty 待办，兜底清除
         await EventDb.clearDirty(context, e.id, e.etag);
         continue;
       }
-      if (e.recurring) {
-        // 重复日程实例推送会破坏服务器整个序列，暂不支持
+      if (e.recurring && e.rrule === '') {
+        // 重复日程的"单次覆盖实例"（RECURRENCE-ID）推送会破坏服务器整个序列，暂不支持
         await EventDb.clearDirty(context, e.id, e.etag);
         LogUtil.write(`推送跳过重复日程实例「${e.title}」(uid=${e.uid})`);
         continue;
+      }
+      if (e.recurring) {
+        // 重复主事件（含 RRULE，含本机新建的重复日程）：整条 PUT 覆盖推送
+        LogUtil.write(`推送重复主事件「${e.title}」(uid=${e.uid})`);
       }
       const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
       if (e.deleted) {

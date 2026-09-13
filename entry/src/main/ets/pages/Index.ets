@@ -1,7 +1,7 @@
 // entry/src/main/ets/pages/Index.ets
 // 同步日历主界面：月视图（左右滑动翻月）/ 周视图 / 日视图 / 日程列表
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
-import { router } from '@kit.ArkUI';
+import { mediaquery, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
@@ -15,6 +15,7 @@ import { AppSettings } from '../common/AppSettings';
 import { EventDb, LocalEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
 import { IcsUtil } from '../common/IcsUtil';
+import { SystemCalendarImport } from '../common/SystemCalendarImport';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -43,6 +44,8 @@ struct Index {
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
+  @State isLandscape: boolean = false; // 横屏：月视图切左右双栏（左月历/右当日日程）
+  private landscapeListener: mediaquery.MediaQueryListener | null = null;
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
@@ -62,6 +65,7 @@ struct Index {
     this.displayMonth = now.getMonth();
     this.selectedDate = this.startOfDay(now.getTime());
     this.rebuildPages();
+    this.initLandscapeListener();
     this.initPermissionAndLoad();
   }
 
@@ -70,6 +74,20 @@ struct Index {
       clearInterval(this.autoSyncTimer);
       this.autoSyncTimer = -1;
     }
+    if (this.landscapeListener !== null) {
+      this.landscapeListener.off('change');
+      this.landscapeListener = null;
+    }
+  }
+
+  /** 监听横竖屏：旋转后 isLandscape 驱动月视图在上下/左右布局间切换 */
+  private initLandscapeListener(): void {
+    this.landscapeListener =
+      this.getUIContext().getMediaQuery().matchMediaSync('(orientation: landscape)');
+    this.isLandscape = this.landscapeListener.matches;
+    this.landscapeListener.on('change', (result: mediaquery.MediaQueryResult) => {
+      this.isLandscape = result.matches;
+    });
   }
 
   /** 从设置页/账号页返回时刷新（同步间隔、系统日历开关立即生效），并处理编辑账号后的待同步 */
@@ -329,6 +347,12 @@ struct Index {
     }
     let ok: number = 0;
     let failMsg: string = '';
+    // 备份模式：先把系统本地日历导入目标日历本（幂等），再随正常同步推送上服务器
+    try {
+      await SystemCalendarImport.importIfNeeded(context);
+    } catch (err) {
+      // 导入失败不影响正常同步
+    }
     for (const acc of this.accounts) {
       if (acc.type !== TYPE_CALDAV) {
         continue;
@@ -373,13 +397,51 @@ struct Index {
   }
 
   private openEvent(e: DisplayEvent): void {
-    if (e.isSystem) {
-      this.getUIContext().getPromptAction()
-        .showToast({ message: '系统日历日程，请在系统日历 App 中编辑' });
+    // 只读日历本或系统日历日程：无法保存修改，直接显示详情
+    if (e.isSystem || !e.writable) {
+      this.showEventDetail(e);
       return;
     }
     AppStorage.setOrCreate<number>('pendingEventId', e.id);
     router.pushUrl({ url: 'pages/EventEditPage' });
+  }
+
+  /** 只读日程详情弹窗 */
+  private showEventDetail(e: DisplayEvent): void {
+    const lines: string[] = [];
+    if (e.isAllDay) {
+      lines.push(`时间：全天 ${this.fmtDateCn(e.startTime)}`);
+      if (this.spansDays(e)) {
+        lines.push(`        ~ ${this.fmtDateCn(e.endTime)}`);
+      }
+    } else if (this.spansDays(e)) {
+      lines.push(`时间：${this.fmtDateCn(e.startTime)} ${this.fmtTime(e.startTime)}`);
+      lines.push(`        ~ ${this.fmtDateCn(e.endTime)} ${this.fmtTime(e.endTime)}`);
+    } else {
+      lines.push(`时间：${this.fmtDateCn(e.startTime)} ${this.fmtTime(e.startTime)} ~ ${this.fmtTime(e.endTime)}`);
+    }
+    if (e.location !== '') {
+      lines.push(`地点：${e.location}`);
+    }
+    if (e.recurring) {
+      lines.push('重复：是');
+    }
+    if (e.calName !== '') {
+      lines.push(`日历本：${e.calName}${e.isSystem ? '' : '（只读）'}`);
+    }
+    if (e.description !== '') {
+      lines.push(`备注：${e.description}`);
+    }
+    this.getUIContext().showAlertDialog({
+      title: e.title === '' ? '(无标题)' : e.title,
+      message: lines.join('\n'),
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '关闭',
+        action: (): void => {}
+      }
+    });
   }
 
   private addEvent(): void {
@@ -707,65 +769,109 @@ struct Index {
 
   @Builder
   monthBody() {
-    Column() {
-      // 星期表头
+    if (this.isLandscape) {
+      // 横屏（平板适配）：左右双栏——左侧月历，右侧当日日程
       Row() {
-        ForEach(WEEK_LABELS, (w: string) => {
-          Text(w)
-            .fontSize(12)
-            .fontColor($r('app.color.text_hint'))
-            .textAlign(TextAlign.Center)
-            .layoutWeight(1)
-        }, (w: string) => w)
+        Column() {
+          this.monthWeekHeader()
+          this.monthSwiper()
+        }
+        .layoutWeight(3)
+        .height('100%')
+
+        Divider()
+          .vertical(true)
+          .height('92%')
+          .strokeWidth(1)
+          .color($r('app.color.shadow_color'))
+
+        Column() {
+          this.dayPanelHeader()
+          this.eventList()
+        }
+        .layoutWeight(2)
+        .height('100%')
       }
       .width('100%')
-      .padding({ left: 12, right: 12 })
-
-      // 三页月格，左右滑动切换月份
-      Swiper(this.swiperController) {
-        ForEach(this.monthPages, (cells: MonthCell[]) => {
-          Column({ space: 2 }) {
-            ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
-              Row({ space: 2 }) {
-                ForEach(week, (cell: MonthCell) => {
-                  this.dayCell(cell)
-                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
-              }
-              .width('100%')
-            }, (week: MonthCell[], idx: number) => String(idx))
-          }
-          .width('100%')
-        }, (cells: MonthCell[]) => String(cells[0].dateMs))
+      .layoutWeight(1)
+    } else {
+      // 竖屏：月历在上、当日日程在下（保持原布局）
+      Column() {
+        this.monthWeekHeader()
+        this.monthSwiper()
+        this.dayPanelHeader()
+        this.eventList()
       }
-      .index(1)
-      .loop(false)
-      .indicator(false)
       .width('100%')
-      .onChange((index: number) => {
-        this.handleSwiperChange(index);
-      })
+      .layoutWeight(1)
+    }
+  }
 
-      // 当日日程列表
-      Row({ space: 8 }) {
-        Text(this.fmtDateCn(this.selectedDate))
-          .fontSize(13)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_secondary'))
-        Blank()
-        Text(this.fmtMonthTitle())
+  /** 月视图星期表头 */
+  @Builder
+  monthWeekHeader() {
+    Row() {
+      ForEach(WEEK_LABELS, (w: string) => {
+        Text(w)
           .fontSize(12)
           .fontColor($r('app.color.text_hint'))
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 6 })
-      .gesture(LongPressGesture().onAction(() => {
-        this.showOccurrenceDebug(this.selectedDate);
-      }))
-
-      this.eventList()
+          .textAlign(TextAlign.Center)
+          .layoutWeight(1)
+      }, (w: string) => w)
     }
     .width('100%')
-    .layoutWeight(1)
+    .padding({ left: 12, right: 12 })
+  }
+
+  /** 月视图三页 Swiper（横屏时占满剩余高度并均分每周行，竖屏保持自然高度） */
+  @Builder
+  monthSwiper() {
+    Swiper(this.swiperController) {
+      ForEach(this.monthPages, (cells: MonthCell[]) => {
+        Column({ space: 2 }) {
+          ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
+            Row({ space: 2 }) {
+              ForEach(week, (cell: MonthCell) => {
+                this.dayCell(cell)
+              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+            }
+            .width('100%')
+            .layoutWeight(this.isLandscape ? 1 : 0)
+          }, (week: MonthCell[], idx: number) => String(idx))
+        }
+        .width('100%')
+        // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
+        // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
+      }, (cells: MonthCell[]) => String(cells[0].dateMs))
+    }
+    .index(1)
+    .loop(false)
+    .indicator(false)
+    .width('100%')
+    .layoutWeight(this.isLandscape ? 1 : 0)
+    .onChange((index: number) => {
+      this.handleSwiperChange(index);
+    })
+  }
+
+  /** 当日日程标题行（长按可触发重复日程调试） */
+  @Builder
+  dayPanelHeader() {
+    Row({ space: 8 }) {
+      Text(this.fmtDateCn(this.selectedDate))
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+      Text(this.fmtMonthTitle())
+        .fontSize(12)
+        .fontColor($r('app.color.text_hint'))
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 6 })
+    .gesture(LongPressGesture().onAction(() => {
+      this.showOccurrenceDebug(this.selectedDate);
+    }))
   }
 
   /** 调试（临时）：长按月视图日期标题，检查重复日程在该日的首次发生情况 */
@@ -890,48 +996,144 @@ struct Index {
 
   @Builder
   weekBody() {
-    Column() {
-      Row({ space: 16 }) {
-        Blank()
-        Text('本周')
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .onClick(() => {
-            this.goThisWeek();
+    if (this.isLandscape) {
+      // 横屏（平板适配）：左侧一周日期，右侧选中日日程
+      Row() {
+        Column() {
+          Text('本周')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+            .textAlign(TextAlign.Center)
+            .padding({ top: 4, bottom: 8 })
+            .onClick(() => {
+              this.goThisWeek();
+            })
+          this.weekStripVertical()
+        }
+        .layoutWeight(1)
+        .height('100%')
+
+        Divider()
+          .vertical(true)
+          .height('92%')
+          .strokeWidth(1)
+          .color($r('app.color.shadow_color'))
+
+        Column() {
+          this.dayPanelHeader()
+          this.eventList()
+        }
+        .layoutWeight(2)
+        .height('100%')
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .gesture(
+        SwipeGesture({ direction: SwipeDirection.Horizontal })
+          .onAction((event: GestureEvent) => {
+            if (Math.abs(event.angle) > 90) {
+              this.switchWeek(1);
+            } else {
+              this.switchWeek(-1);
+            }
           })
-        Blank()
+      )
+    } else {
+      // 竖屏：保持原上下结构
+      Column() {
+        Row({ space: 16 }) {
+          Blank()
+          Text('本周')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              this.goThisWeek();
+            })
+          Blank()
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: 4, bottom: 4 })
+
+        this.weekStrip()
+
+        Row({ space: 8 }) {
+          Text(this.fmtDateCn(this.selectedDate))
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: 8 })
+
+        this.eventList()
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: 4, bottom: 4 })
-
-      this.weekStrip()
-
-      Row({ space: 8 }) {
-        Text(this.fmtDateCn(this.selectedDate))
-          .fontSize(13)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_secondary'))
-        Blank()
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 8 })
-
-      this.eventList()
+      .layoutWeight(1)
+      .gesture(
+        SwipeGesture({ direction: SwipeDirection.Horizontal })
+          .onAction((event: GestureEvent) => {
+            // 左滑角度约 ±180（|angle|>90）→ 下一周；右滑约 0° → 上一周（与月视图 Swiper 方向一致）
+            if (Math.abs(event.angle) > 90) {
+              this.switchWeek(1);
+            } else {
+              this.switchWeek(-1);
+            }
+          })
+      )
     }
+  }
+
+  /** 周视图竖排日期条（横屏左栏：周一~周日从上到下，可上下滚动） */
+  @Builder
+  weekStripVertical() {
+    Scroll() {
+      Column({ space: 2 }) {
+        ForEach(this.weekStripDays(), (cell: MonthCell) => {
+          Row({ space: 10 }) {
+            Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
+              .fontSize(12)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+              .width(18)
+              .textAlign(TextAlign.Center)
+            Text(String(cell.day))
+              .fontSize(15)
+              .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
+                ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .width(32)
+              .height(32)
+              .textAlign(TextAlign.Center)
+              .borderRadius(16)
+              .backgroundColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.selected_bg')
+                : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+          }
+          .width('100%')
+          .height(44)
+          .borderRadius(10)
+          .padding({ left: 10 })
+          .backgroundColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.chip_off_bg') : Color.Transparent)
+          .onClick(() => {
+            this.selectedDate = cell.dateMs;
+          })
+        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+      }
+      .width('100%')
+      .padding({ left: 8, right: 8, top: 2, bottom: 8 })
+      .constraintSize({ minHeight: '100%' })
+    }
+    .scrollBar(BarState.Off)
+    .edgeEffect(EdgeEffect.Spring)
+    .align(Alignment.Top)
     .width('100%')
     .layoutWeight(1)
-    .gesture(
-      SwipeGesture({ direction: SwipeDirection.Horizontal })
-        .onAction((event: GestureEvent) => {
-          // 左滑角度约 ±180（|angle|>90）→ 下一周；右滑约 0° → 上一周（与月视图 Swiper 方向一致）
-          if (Math.abs(event.angle) > 90) {
-            this.switchWeek(1);
-          } else {
-            this.switchWeek(-1);
-          }
-        })
-    )
   }
 
   /** 单日日程列表（周视图使用） */
@@ -952,7 +1154,7 @@ struct Index {
         }
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: 4, bottom: 90 })
+      .padding({ left: 20, right: 20, top: 4, bottom: 24 })
       .constraintSize({ minHeight: '100%' })
     }
     .layoutWeight(1)
@@ -1000,7 +1202,7 @@ struct Index {
     .layoutWeight(1)
     .scrollBar(BarState.Auto)
     .edgeEffect(EdgeEffect.Spring)
-    .padding({ left: 20, right: 20, top: 6, bottom: 90 })
+    .padding({ left: 20, right: 20, top: 6, bottom: 24 })
     .cachedCount(8)
   }
 
@@ -1097,7 +1299,7 @@ struct Index {
         }
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: 8, bottom: 90 })
+      .padding({ left: 20, right: 20, top: 8, bottom: 24 })
       .constraintSize({ minHeight: '100%' })
     }
     .layoutWeight(1)
@@ -1196,7 +1398,7 @@ struct Index {
           .borderRadius(6)
           .backgroundColor($r('app.color.chip_off_bg'))
       }
-      // 所属日历本：最右侧、垂直居中，颜色同日历本
+      // 所属日历本：最右侧、垂直居中，颜色同日历本；只读日历本加删除线标识
       if (e.calName !== '') {
         Text(e.calName)
           .fontSize(11)
@@ -1204,6 +1406,7 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .constraintSize({ maxWidth: '30%' })
+          .decoration({ type: e.writable ? TextDecorationType.None : TextDecorationType.LineThrough })
       }
     }
     .alignItems(VerticalAlign.Center)
@@ -1221,23 +1424,26 @@ struct Index {
   dayCell(cell: MonthCell) {
     Column({ space: 2 }) {
       Text(String(cell.day))
-        .fontSize(13)
+        .fontSize(this.isLandscape ? 12 : 13)
         .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
         .fontColor(!cell.inMonth
           ? $r('app.color.text_hint')
           : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
-        .width(26)
-        .height(26)
+        .width(this.isLandscape ? 22 : 26)
+        .height(this.isLandscape ? 22 : 26)
         .textAlign(TextAlign.Center)
-        .borderRadius(13)
+        .borderRadius(this.isLandscape ? 11 : 13)
         .backgroundColor(cell.dateMs === this.selectedDate
           ? $r('app.color.selected_bg')
           : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-      Text(cell.lunar)
-        .fontSize(8)
-        .fontColor(cell.dateMs === this.selectedDate
-          ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
-        .maxLines(1)
+      if (!this.isLandscape) {
+        // 横屏高度有限，省略农历腾出空间
+        Text(cell.lunar)
+          .fontSize(8)
+          .fontColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+          .maxLines(1)
+      }
     }
     .layoutWeight(1)
     .padding({ top: 4, bottom: 4 })

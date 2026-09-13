@@ -12,10 +12,12 @@ export class RemoteItem {
   ics: string = '';    // VCALENDAR 文本
 }
 
-/** PROPFIND 返回的集合颜色 */
+/** PROPFIND 返回的集合颜色与写权限 */
 export class DavColorEntry {
   href: string = '';   // 集合路径（服务器返回的是路径，不带域名）
   color: string = '';  // 规范化后的 #RRGGBB，可能为空
+  writable: boolean = true; // current-user-privilege 是否含 write 权限（默认可写）
+  privilegeKnown: boolean = false; // 服务器是否返回了 current-user-privilege-set（未返回时需要写探测）
 }
 
 export class DavClient {
@@ -28,6 +30,7 @@ export class DavClient {
       '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
       'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
       '<d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
+      '<d:current-user-privilege-set/>' +
       '</d:prop></d:propfind>';
     const httpRequest = http.createHttp();
     try {
@@ -71,6 +74,13 @@ export class DavClient {
           color = DavClient.normalizeHex(DavClient.extractTag(block, 'calendar-color'));
         }
         entry.color = color;
+        // 写权限：current-user-privilege-set 存在且不含任何 write 权限 → 只读
+        const privSet: string = DavClient.extractTag(block, 'current-user-privilege-set');
+        if (privSet !== '') {
+          entry.privilegeKnown = true;
+          entry.writable = /write/i.test(privSet);
+          LogUtil.write(`PROPFIND ${href} 权限声明：${privSet.replace(/\s+/g, '').substring(0, 150)}`);
+        }
         result.push(entry);
       }
       if (result.length > 0 && result.every((e: DavColorEntry): boolean => e.color === '')) {
@@ -98,6 +108,61 @@ export class DavClient {
   /** Basic Auth 头 */
   static authHeader(username: string, password: string): string {
     return 'Basic ' + buffer.from(`${username}:${password}`).toString('base64');
+  }
+
+  /**
+   * 写权限探测：向日历本 PUT 一个探测资源——
+   * 2xx → 可写（随后删除探测资源）；403/401 等 → 只读；网络异常 → 乐观按可写。
+   * 用于服务器不返回 current-user-privilege-set 的情况（如部分 Synology 配置）。
+   */
+  static async probeWritable(href: string, auth: string): Promise<boolean> {
+    const url: string = href.endsWith('/')
+      ? `${href}synccalendar-probe.ics` : `${href}/synccalendar-probe.ics`;
+    const ics: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Probe//CN\r\n' +
+      'BEGIN:VEVENT\r\n' +
+      'UID:syncprobe\r\n' +
+      'DTSTAMP:20000101T000000Z\r\n' +
+      'DTSTART:20000101T000000Z\r\n' +
+      'DTEND:20000101T010000Z\r\n' +
+      'SUMMARY:probe\r\n' +
+      'END:VEVENT\r\n' +
+      'END:VCALENDAR\r\n';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.PUT,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'text/calendar; charset=utf-8',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: ics,
+        connectTimeout: 10000,
+        readTimeout: 15000
+      });
+      LogUtil.write(`HTTP PUT(探测) ${url} → ${resp.responseCode}`);
+      if (resp.responseCode >= 200 && resp.responseCode < 300) {
+        // 写入成功：删除探测资源，避免污染日历本
+        try {
+          await DavClient.deleteRemote(url, auth);
+        } catch (err) {
+          // 删除失败不影响权限判定
+        }
+        return true;
+      }
+      if (resp.responseCode === 412 || resp.responseCode === 405 || resp.responseCode === 409) {
+        // 资源已存在/方法冲突等：说明有写权限
+        return true;
+      }
+      return false; // 403/401 等 → 只读
+    } catch (err) {
+      // 网络异常无法判定：乐观按可写，避免误标只读
+      return true;
+    } finally {
+      httpRequest.destroy();
+    }
   }
 
   /** REPORT calendar-query：全量拉取某日历本内所有 VEVENT（不加时间范围，保证数据完整） */

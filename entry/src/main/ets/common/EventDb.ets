@@ -409,6 +409,17 @@ export class EventDb {
     return `新增${added} 更新${updated} 删除${removed} 不变${unchanged}`;
   }
 
+  /** 按 UID 判断事件是否已存在（系统日历备份导入的幂等判重） */
+  static async uidExists(context: common.Context, uid: string): Promise<boolean> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('uid', uid);
+    const rs = await store.query(predicates);
+    const exists: boolean = rs.rowCount > 0;
+    rs.close();
+    return exists;
+  }
+
   /** 删除某账号全部本地事件（删除账号时调用） */
   static async deleteAccountEvents(context: common.Context, accId: string): Promise<void> {
     const store = await EventDb.getDb(context);

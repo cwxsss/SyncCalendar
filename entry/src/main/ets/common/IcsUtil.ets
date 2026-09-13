@@ -240,11 +240,30 @@ export class IcsUtil {
       `DTSTAMP:${now}\r\n` +
       `${dtstart}\r\n` +
       `${dtend}\r\n` +
+      (e.rrule !== '' ? `RRULE:${e.rrule}\r\n` : '') +
       `SUMMARY:${IcsUtil.escape(e.title)}\r\n` +
       (e.location !== '' ? `LOCATION:${IcsUtil.escape(e.location)}\r\n` : '') +
       (e.description !== '' ? `DESCRIPTION:${IcsUtil.escape(e.description)}\r\n` : '') +
+      (e.reminder > 0 ? IcsUtil.valarm(e.reminder) : '') +
       'END:VEVENT\r\n' +
       'END:VCALENDAR\r\n';
+  }
+
+  /** 由提前分钟数生成 VALARM（TRIGGER 负时长 = 提前触发） */
+  private static valarm(minutes: number): string {
+    let trigger: string;
+    if (minutes >= 1440 && minutes % 1440 === 0) {
+      trigger = `-P${minutes / 1440}D`;
+    } else if (minutes >= 60 && minutes % 60 === 0) {
+      trigger = `-PT${minutes / 60}H`;
+    } else {
+      trigger = `-PT${minutes}M`;
+    }
+    return 'BEGIN:VALARM\r\n' +
+      `TRIGGER:${trigger}\r\n` +
+      'ACTION:DISPLAY\r\n' +
+      'DESCRIPTION:提醒\r\n' +
+      'END:VALARM\r\n';
   }
 
   static escape(s: string): string {

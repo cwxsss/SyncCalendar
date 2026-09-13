@@ -26,6 +26,8 @@ export class DavAccount {
   calendarNames: string[] = [];
   /** 服务器端定义的日历本颜色（calendar-color），与 calendarHrefs 一一对应，空串表示未定义 */
   calendarColors: string[] = [];
+  /** 各日历本写权限（'1'=可写 '0'=只读），与 calendarHrefs 一一对应；空数组表示未知（按可写处理） */
+  calendarWritable: string[] = [];
   itemCount: number = 0;
   lastSyncTime: string = '';
 }
@@ -37,6 +39,7 @@ export class CalSource {
   color: string = '#007DFF';
   source: string = 'dav'; // 'dav' | 'system' | 'local'
   visible: boolean = true;
+  writable: boolean = true; // 只读日历本中的日程只能查看详情，不能编辑
 }
 
 /** 与 UI 无关的调色板 */
@@ -81,7 +84,8 @@ export class AccountStore {
       acc.calendarHrefs.join(';'),
       acc.calendarNames.join(';'),
       acc.calendarColors.join(';'),
-      safe(acc.id)
+      safe(acc.id),
+      acc.calendarWritable.join(';')
     ];
     return parts.join('|');
   }
@@ -108,6 +112,9 @@ export class AccountStore {
     // 兼容旧版本存储（无 id 字段）：加载时为空，由 loadAll 统一补发并持久化
     if (parts.length >= 11) {
       acc.id = parts[10];
+    }
+    if (parts.length >= 12) {
+      acc.calendarWritable = parts[11] === '' ? [] : parts[11].split(';');
     }
     return acc;
   }

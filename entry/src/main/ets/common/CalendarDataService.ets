@@ -25,6 +25,7 @@ export class DisplayEvent {
   color: string = '#007DFF';
   completed: boolean = false; // 仅待办使用
   recurring: boolean = false; // 是否为重复日程展开出的发生
+  writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
 export class CalendarDataService {
@@ -53,6 +54,7 @@ export class CalendarDataService {
   /** 收集全部日历来源：DAV 日历本 + 本机 + 系统日历账户 */
   static async loadSources(context: common.Context): Promise<CalSource[]> {
     const sources: CalSource[] = [];
+    const manualKeys: string[] = await AppSettings.getManualReadonlyKeys(context);
     try {
       const accounts: DavAccount[] = await AccountStore.loadAll(context);
       for (const acc of accounts) {
@@ -69,6 +71,10 @@ export class CalendarDataService {
           s.color = color !== '' ? color : BookPalette.colorFor(i);
           s.source = 'dav';
           s.visible = true;
+          // 写权限：服务器探测结果 + 手动标记（部分服务器不在 CalDAV 层拒绝写入）
+          const detected: boolean = acc.calendarWritable.length > i
+            ? acc.calendarWritable[i] !== '0' : true;
+          s.writable = detected && !manualKeys.includes(s.calKey);
           sources.push(s);
         }
       }
@@ -142,6 +148,10 @@ export class CalendarDataService {
       const found = sources.find((s: CalSource): boolean => s.calKey === key);
       return found !== undefined ? found.name : '';
     };
+    const writableOf = (key: string): boolean => {
+      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      return found !== undefined ? found.writable : true;
+    };
 
     // 1) 本地库（DAV + 本机）；重复日程(RRULE)按规则展开为窗口内的多次发生
     try {
@@ -202,6 +212,7 @@ export class CalendarDataService {
           d.calName = baseName;
           d.color = baseColor;
           d.recurring = e.rrule !== '';
+          d.writable = writableOf(e.calKey);
           result.push(d);
           occTotal++;
         }

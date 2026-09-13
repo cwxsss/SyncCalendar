@@ -7,6 +7,7 @@ import { DavAccount, AccountStore, TYPE_CALDAV } from '../common/AccountStore';
 import { SyncEngine } from '../common/SyncEngine';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
+import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { LogUtil } from '../common/LogUtil';
 
 export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
@@ -24,6 +25,12 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
     try {
       const context = this.context;
       const accounts: DavAccount[] = await AccountStore.loadAll(context);
+      // 备份模式：先导入系统本地日历（幂等），再随同步推送
+      try {
+        await SystemCalendarImport.importIfNeeded(context);
+      } catch (err) {
+        // 导入失败不影响正常同步
+      }
       let ok: number = 0;
       for (const acc of accounts) {
         if (acc.type !== TYPE_CALDAV) {

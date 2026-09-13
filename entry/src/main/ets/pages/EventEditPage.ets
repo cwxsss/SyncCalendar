@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, BookPalette } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
+import { AppSettings } from '../common/AppSettings';
 import { DavClient } from '../common/DavClient';
 import { SyncEngine } from '../common/SyncEngine';
 
@@ -30,6 +31,13 @@ struct EventEditPage {
   @State isSaving: boolean = false;
   @State statusMsg: string = '';
   @State isExisting: boolean = false;
+  @State repeatMode: string = 'none'; // none|daily|workday|weekly|monthly|yearly|custom
+  @State reminderMin: number = 0;    // 提前提醒分钟数，0 = 不提醒
+  @State pickerShow: boolean = false; // 开始/结束时间选择底部弹层（日期+时间一次选完）
+  @State pickerIsEnd: boolean = false;
+  @State pickDate: Date = new Date();
+  @State pickHour: number = 9;
+  @State pickMin: number = 0;
   private event: LocalEvent | null = null;
 
   aboutToAppear(): Promise<void> {
@@ -41,7 +49,7 @@ struct EventEditPage {
     if (context === undefined) {
       return;
     }
-    // 收集可写入的日历本（DAV + 本机）
+    // 收集可写入的日历本（DAV 可写日历本 + 本机）；只读日历本不出现在新建/编辑选择中
     const sources: CalSourceWithHref[] = await CalendarDataBridge.loadWritableSources(context);
     const choices: BookChoice[] = [];
     for (const s of sources) {
@@ -68,6 +76,8 @@ struct EventEditPage {
         this.startMs = loaded.startTime;
         this.endMs = loaded.endTime;
         this.chosenKey = loaded.calKey;
+        this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
+        this.reminderMin = loaded.reminder;
         return;
       }
     }
@@ -98,62 +108,81 @@ struct EventEditPage {
     return `${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
-  private pickStartDate(): void {
-    const cur = new Date(this.startMs);
-    DatePickerDialog.show({
-      start: new Date(2000, 0, 1),
-      end: new Date(2050, 11, 31),
-      selected: cur,
-      onDateAccept: (value: Date) => {
-        const keep = new Date(this.startMs);
-        const newStart: number = new Date(value.getFullYear(), value.getMonth(), value.getDate(),
-          keep.getHours(), keep.getMinutes()).getTime();
-        const dur: number = this.endMs - this.startMs;
-        this.startMs = newStart;
-        this.endMs = this.allDay ? newStart + 86399999 : newStart + dur;
-      }
-    });
+  /** 重复模式 → RRULE 字符串（RruleUtil 已支持这些规则） */
+  private rruleForMode(mode: string): string {
+    if (mode === 'daily') {
+      return 'FREQ=DAILY';
+    }
+    if (mode === 'workday') {
+      return 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR';
+    }
+    if (mode === 'weekly') {
+      return 'FREQ=WEEKLY';
+    }
+    if (mode === 'monthly') {
+      return 'FREQ=MONTHLY';
+    }
+    if (mode === 'yearly') {
+      return 'FREQ=YEARLY';
+    }
+    return '';
   }
 
-  private pickStartTime(): void {
-    const cur = new Date(this.startMs);
-    TimePickerDialog.show({
-      selected: cur,
-      onAccept: (value: TimePickerResult) => {
-        const d = new Date(this.startMs);
-        const newStart: number = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
-          value.hour, value.minute).getTime();
-        const dur: number = this.endMs - this.startMs;
-        this.startMs = newStart;
-        this.endMs = newStart + dur;
-      }
-    });
+  /** RRULE → 重复模式（无法识别的规则归为 custom，保存时保留原规则） */
+  private modeFromRrule(rrule: string): string {
+    const u: string = rrule.toUpperCase();
+    if (u.includes('FREQ=DAILY')) {
+      return 'daily';
+    }
+    if (u.includes('FREQ=WEEKLY')) {
+      const hasWeekday: boolean = u.includes('MO') && u.includes('TU') && u.includes('WE')
+        && u.includes('TH') && u.includes('FR');
+      return hasWeekday ? 'workday' : 'weekly';
+    }
+    if (u.includes('FREQ=MONTHLY')) {
+      return 'monthly';
+    }
+    if (u.includes('FREQ=YEARLY')) {
+      return 'yearly';
+    }
+    return 'custom';
   }
 
-  private pickEndDate(): void {
-    const cur = new Date(this.endMs);
-    DatePickerDialog.show({
-      start: new Date(2000, 0, 1),
-      end: new Date(2050, 11, 31),
-      selected: cur,
-      onDateAccept: (value: Date) => {
-        const keep = new Date(this.endMs);
-        this.endMs = new Date(value.getFullYear(), value.getMonth(), value.getDate(),
-          keep.getHours(), keep.getMinutes()).getTime();
-      }
-    });
+  private reminderLabel(m: number): string {
+    if (m === 0) {
+      return '不提醒';
+    }
+    if (m < 60) {
+      return `提前${m}分钟`;
+    }
+    if (m < 1440) {
+      return `提前${m / 60}小时`;
+    }
+    return `提前${m / 1440}天`;
   }
 
-  private pickEndTime(): void {
-    const cur = new Date(this.endMs);
-    TimePickerDialog.show({
-      selected: cur,
-      onAccept: (value: TimePickerResult) => {
-        const d = new Date(this.endMs);
-        this.endMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
-          value.hour, value.minute).getTime();
-      }
-    });
+  /** 打开时间选择弹层：日期 + 时间一次选完 */
+  private openPicker(isEnd: boolean): void {
+    this.pickerIsEnd = isEnd;
+    const base = new Date(isEnd ? this.endMs : this.startMs);
+    this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+    this.pickHour = base.getHours();
+    this.pickMin = base.getMinutes();
+    this.pickerShow = true;
+  }
+
+  private applyPicker(): void {
+    const d = this.pickDate;
+    const picked: number = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
+      this.pickHour, this.pickMin).getTime();
+    if (this.pickerIsEnd) {
+      // 全天日程的结束存为"当天 23:59:59.999"（排他日期前 1 毫秒）
+      this.endMs = this.allDay ? picked + 86399999 : picked;
+    } else {
+      const dur: number = Math.max(0, this.endMs - this.startMs);
+      this.startMs = picked;
+      this.endMs = this.allDay ? picked + 86399999 : picked + dur;
+    }
   }
 
   private toggleAllDay(): void {
@@ -186,8 +215,9 @@ struct EventEditPage {
     if (this.isSaving || !this.validate()) {
       return;
     }
-    if (this.event !== null && this.event.recurring) {
-      this.statusMsg = '重复日程（系列中的一天）暂不支持修改，请到服务器端调整重复规则';
+    // 仅阻止"单次覆盖实例"（RECURRENCE-ID）的修改；重复主事件（含 RRULE）允许编辑
+    if (this.event !== null && this.event.recurring && this.event.rrule === '') {
+      this.statusMsg = '重复日程的单次修改暂不支持，请到服务器端调整重复规则';
       return;
     }
     this.isSaving = true;
@@ -208,6 +238,15 @@ struct EventEditPage {
       e.isAllDay = this.allDay;
       e.calKey = book !== null ? book.calKey : 'local';
       e.href = book !== null ? book.href : '';
+      // 重复规则与提醒
+      if (this.repeatMode === 'custom') {
+        // 无法识别的既有规则原样保留
+        e.rrule = this.event !== null ? this.event.rrule : '';
+      } else {
+        e.rrule = this.rruleForMode(this.repeatMode);
+      }
+      e.recurring = e.rrule !== '';
+      e.reminder = this.reminderMin;
       if (isNew) {
         e.uid = `syncal-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
         e.remotePath = encodeURIComponent(e.uid) + '.ics';
@@ -242,8 +281,8 @@ struct EventEditPage {
     if (this.event === null || this.isSaving) {
       return;
     }
-    if (this.event.recurring) {
-      this.statusMsg = '重复日程（系列中的一天）暂不支持删除，请到服务器端调整重复规则';
+    if (this.event !== null && this.event.recurring && this.event.rrule === '') {
+      this.statusMsg = '重复日程的单次删除暂不支持，请到服务器端调整重复规则';
       return;
     }
     this.isSaving = true;
@@ -274,11 +313,12 @@ struct EventEditPage {
 
   build() {
     Column({ space: 14 }) {
-      // 顶部
+      // 顶部（与内容区左右对齐，避免贴边误触）
       Row({ space: 6 }) {
         Text('取消')
           .fontSize(16)
           .fontColor($r('app.color.brand'))
+          .padding({ left: 4, right: 4, top: 8, bottom: 8 })
           .onClick(() => {
             router.back();
           })
@@ -292,11 +332,13 @@ struct EventEditPage {
           .fontSize(16)
           .fontColor(this.isSaving ? $r('app.color.text_hint') : $r('app.color.brand'))
           .fontWeight(FontWeight.Medium)
+          .padding({ left: 4, right: 4, top: 8, bottom: 8 })
           .onClick(() => {
             this.save();
           })
       }
       .width('100%')
+      .padding({ left: 16, right: 16 })
 
       Scroll() {
         Column({ space: 14 }) {
@@ -327,7 +369,7 @@ struct EventEditPage {
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
-          // 时间卡片
+          // 时间卡片（单击任一行：底部弹层中日期+时间一次选完）
           Column({ space: 10 }) {
             this.timeRow('开始', true)
             Divider().color($r('app.color.shadow_color'))
@@ -335,6 +377,53 @@ struct EventEditPage {
           }
           .width('100%')
           .padding(6)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+
+          // 重复
+          Column({ space: 8 }) {
+            Text('重复')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              this.repeatChip('none', '不重复')
+              this.repeatChip('daily', '每天')
+              this.repeatChip('workday', '工作日')
+              this.repeatChip('weekly', '每周')
+              this.repeatChip('monthly', '每月')
+              this.repeatChip('yearly', '每年')
+              if (this.repeatMode === 'custom') {
+                // 服务器来的复杂规则（INTERVAL/COUNT 等）标记为自定义，保存时原样保留
+                this.repeatChip('custom', '自定义')
+              }
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+
+          // 提醒
+          Column({ space: 8 }) {
+            Text('提醒')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              this.reminderChip(0)
+              this.reminderChip(5)
+              this.reminderChip(10)
+              this.reminderChip(15)
+              this.reminderChip(30)
+              this.reminderChip(60)
+              this.reminderChip(1440)
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
@@ -424,6 +513,12 @@ struct EventEditPage {
     .height('100%')
     .padding({ top: 12 })
     .backgroundColor($r('app.color.page_bg'))
+    .bindSheet($$this.pickerShow, this.dateTimePickerSheet(), {
+      height: 380,
+      showClose: false,
+      dragBar: true,
+      backgroundColor: $r('app.color.card_bg')
+    })
   }
 
   @Builder
@@ -433,32 +528,102 @@ struct EventEditPage {
         .fontSize(14)
         .fontColor($r('app.color.text_secondary'))
         .width(36)
-      Text(this.fmtDate(isStart ? this.startMs : this.endMs))
+      Text(this.allDay
+        ? this.fmtDate(isStart ? this.startMs : this.endMs)
+        : `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.fmtTime(isStart ? this.startMs : this.endMs)}`)
         .fontSize(15)
         .fontColor($r('app.color.brand'))
-        .onClick(() => {
-          if (isStart) {
-            this.pickStartDate();
-          } else {
-            this.pickEndDate();
-          }
-        })
-      if (!this.allDay) {
-        Text(this.fmtTime(isStart ? this.startMs : this.endMs))
-          .fontSize(15)
-          .fontColor($r('app.color.brand'))
-          .onClick(() => {
-            if (isStart) {
-              this.pickStartTime();
-            } else {
-              this.pickEndTime();
-            }
-          })
-      }
-      Blank()
+        .layoutWeight(1)
+      Text('›')
+        .fontSize(16)
+        .fontColor($r('app.color.text_hint'))
     }
     .width('100%')
-    .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+    .padding({ left: 8, right: 8, top: 10, bottom: 10 })
+    .onClick(() => {
+      this.openPicker(isStart);
+    })
+  }
+
+  @Builder
+  repeatChip(mode: string, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontColor(this.repeatMode === mode
+        ? $r('app.color.button_text') : $r('app.color.text_primary'))
+      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .borderRadius(14)
+      .margin({ right: 8, bottom: 8 })
+      .backgroundColor(this.repeatMode === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+      .onClick(() => {
+        this.repeatMode = mode;
+      })
+  }
+
+  @Builder
+  reminderChip(minutes: number) {
+    Text(this.reminderLabel(minutes))
+      .fontSize(12)
+      .fontColor(this.reminderMin === minutes
+        ? $r('app.color.button_text') : $r('app.color.text_primary'))
+      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .borderRadius(14)
+      .margin({ right: 8, bottom: 8 })
+      .backgroundColor(this.reminderMin === minutes ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+      .onClick(() => {
+        this.reminderMin = minutes;
+      })
+  }
+
+  /** 开始/结束时间选择弹层：左侧日期、右侧时间（全天时只有日期），一次确定 */
+  @Builder
+  dateTimePickerSheet() {
+    Column({ space: 14 }) {
+      Text(this.pickerIsEnd ? '选择结束时间' : '选择开始时间')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+      Row({ space: 6 }) {
+        DatePicker({
+          start: new Date(2000, 0, 1),
+          end: new Date(2050, 11, 31),
+          selected: this.pickDate
+        })
+          .onDateChange((value: Date) => {
+            this.pickDate = value;
+          })
+          .layoutWeight(1)
+          .height(210)
+        if (!this.allDay) {
+          TimePicker({
+            selected: new Date(2000, 0, 1, this.pickHour, this.pickMin)
+          })
+            .onChange((value: TimePickerResult) => {
+              this.pickHour = value.hour;
+              this.pickMin = value.minute;
+            })
+            .layoutWeight(1)
+            .height(210)
+        }
+      }
+      .width('100%')
+
+      Button(this.allDay ? '确定日期' : '确定')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .backgroundColor($r('app.color.brand'))
+        .onClick(() => {
+          this.applyPicker();
+          this.pickerShow = false;
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
   }
 }
 
@@ -467,8 +632,15 @@ class CalendarDataBridge {
   static async loadWritableSources(context: common.Context): Promise<CalSourceWithHref[]> {
     const result: CalSourceWithHref[] = [];
     const accounts: DavAccount[] = await AccountStore.loadAll(context);
+    const manualKeys: string[] = await AppSettings.getManualReadonlyKeys(context);
     for (const acc of accounts) {
       for (let i = 0; i < acc.calendarHrefs.length; i++) {
+        // 只读日历本（服务器无写权限，或用户手动标记只读）不可选
+        const detected: boolean = acc.calendarWritable.length > i
+          ? acc.calendarWritable[i] !== '0' : true;
+        if (!detected || manualKeys.includes(`${acc.id}_${i}`)) {
+          continue;
+        }
         const s = new CalSourceWithHref();
         s.calKey = `${acc.id}_${i}`;
         let name: string = i < acc.calendarNames.length ? acc.calendarNames[i] : '';
@@ -479,6 +651,7 @@ class CalendarDataBridge {
         let color: string = i < acc.calendarColors.length ? AccountStore.normalizeColor(acc.calendarColors[i]) : '';
         s.color = color !== '' ? color : BookPalette.colorFor(i);
         s.href = acc.calendarHrefs[i];
+        s.writable = true;
         result.push(s);
       }
     }
