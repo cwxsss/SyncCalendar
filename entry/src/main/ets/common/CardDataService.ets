@@ -149,6 +149,12 @@ export class CardDataService {
       const p = (n: number): string => n < 10 ? '0' + n : String(n);
       outer:
       for (const key of dayKeys) {
+        // 日期头文字由分组日期生成（与列表视图一致：第一天就是"今天"），
+        // 不能用事件的 startTime——跨天日程归组到今天后，日期头仍是开始日会造成"从开始显示"的假象
+        const gd = new Date(key);
+        const dateLabel: string = key === todayKey
+          ? '今天'
+          : `${gd.getMonth() + 1}月${gd.getDate()}日`;
         const list = groups.get(key) as DisplayEvent[];
         const allDay = list.filter((e: DisplayEvent): boolean =>
           e.isAllDay || spansDays(e)); // 跨天日程按全天展示
@@ -172,7 +178,7 @@ export class CardDataService {
             const de = new Date(e.endTime);
             item.endTime = `${p(de.getHours())}:${p(de.getMinutes())}`;
           }
-          item.date = `${d.getMonth() + 1}月${d.getDate()}日`;
+          item.date = dateLabel;
           item.showDate = i === 0; // 当天分组第一条 → 卡片上显示日期头
           item.calName = e.calName;
           item.color = e.color;
