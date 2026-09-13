@@ -110,6 +110,28 @@ export class DavClient {
     return 'Basic ' + buffer.from(`${username}:${password}`).toString('base64');
   }
 
+  /** GET 拉取单个资源的原始 ICS（调试诊断用） */
+  static async getRaw(url: string, auth: string): Promise<string> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        header: {
+          'Authorization': auth,
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        connectTimeout: 10000,
+        readTimeout: 15000
+      });
+      if (resp.responseCode >= 200 && resp.responseCode < 300) {
+        return resp.result as string;
+      }
+      return `HTTP ${resp.responseCode}`;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
   /**
    * 写权限探测：向日历本 PUT 一个探测资源——
    * 2xx → 可写（随后删除探测资源）；403/401 等 → 只读；网络异常 → 乐观按可写。
@@ -168,6 +190,58 @@ export class DavClient {
   /** REPORT calendar-query：全量拉取某日历本内所有 VEVENT（不加时间范围，保证数据完整） */
   static async reportCalendar(href: string, auth: string): Promise<RemoteItem[]> {
     return DavClient.reportComponents(href, auth, 'VEVENT', '');
+  }
+
+  /**
+   * REPORT calendar-query：仅拉取 href + getetag（不含 calendar-data）。
+   * 部分服务器（如群晖）的 REPORT calendar-data 会剥离 VALARM 导致提醒丢失，
+   * 因此数据改为对变更资源逐个 GET 补拉（GET 返回完整 ICS）。
+   */
+  static async reportEtags(href: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' +
+      '<d:prop><d:getetag/></d:prop>' +
+      '<c:filter><c:comp-filter name="VCALENDAR">' +
+      '<c:comp-filter name="VEVENT">' +
+      '</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(href, {
+        method: 'REPORT' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 30000
+      });
+      LogUtil.write(`HTTP REPORT(etag) ${href} → ${resp.responseCode}`);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new Error(`服务器返回状态码 ${resp.responseCode}`);
+      }
+      const xml: string = resp.result as string;
+      const items: RemoteItem[] = [];
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const resHref: string = DavClient.extractTag(block, 'href');
+        if (resHref === '') {
+          continue;
+        }
+        const item = new RemoteItem();
+        item.href = resHref;
+        item.etag = DavClient.extractTag(block, 'getetag').replace(/"/g, '');
+        items.push(item);
+      }
+      return items;
+    } finally {
+      httpRequest.destroy();
+    }
   }
 
   /** REPORT calendar-query：拉取某日历本内所有 VTODO 待办（不限时间范围，量小） */

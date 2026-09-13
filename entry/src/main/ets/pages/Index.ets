@@ -12,10 +12,12 @@ import { LunarUtil } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
-import { EventDb, LocalEvent } from '../common/EventDb';
+import { EventDb, LocalEvent, RemoteEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
 import { IcsUtil } from '../common/IcsUtil';
+import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
+import { ScreenKeeper } from '../common/ScreenKeeper';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -92,11 +94,9 @@ struct Index {
 
   /** 从设置页/账号页返回时刷新（同步间隔、系统日历开关立即生效），并处理编辑账号后的待同步 */
   onPageShow(): void {
-    if (this.lastSyncTime > 0 || this.accounts.length > 0) {
-      this.reloadAll().then((): Promise<void> => this.handlePendingSync());
-    } else {
-      this.handlePendingSync();
-    }
+    // 无条件刷新：之前"列表为空就跳过"的条件会导致账号列表卡死在空状态，
+    // 同步时误报"没有可同步的账号"
+    this.reloadAll().then((): Promise<void> => this.handlePendingSync());
   }
 
   private async handlePendingSync(): Promise<void> {
@@ -298,13 +298,17 @@ struct Index {
       return;
     }
     this.syncing = true;
+    // 同步期间保持屏幕常亮：熄屏会挂起进程导致请求停摆、同步超时
+    const uiCtx = this.getUIContext().getHostContext();
+    if (uiCtx !== undefined) {
+      await ScreenKeeper.acquire(uiCtx as common.UIAbilityContext);
+    }
     try {
       const context = this.getUIContext().getHostContext();
       if (context === undefined) {
         return;
       }
-      await SyncEngine.withTimeout(
-        SyncEngine.syncAccount(context as common.UIAbilityContext, acc), 120000);
+      await SyncEngine.syncAccount(context as common.UIAbilityContext, acc);
       await SyncEngine.pruneOrphanRows(context, this.accounts);
       acc.lastSyncTime = this.formatNow();
       await AccountStore.saveAll(context, this.accounts);
@@ -316,6 +320,9 @@ struct Index {
         .showToast({ message: `同步失败：${e.message}` });
     } finally {
       this.syncing = false;
+      if (uiCtx !== undefined) {
+        await ScreenKeeper.release(uiCtx as common.UIAbilityContext);
+      }
       await this.reloadAll();
       // 同步后刷新服务卡片
       try {
@@ -339,12 +346,22 @@ struct Index {
     if (this.syncing) {
       return;
     }
+    // 防御：账号列表为空时不执行同步、不清理孤儿行、不回写账号存储，
+    // 防止异常状态下把所有 CalDAV 日程和账号配置抹掉
+    if (this.accounts.length === 0) {
+      if (manual) {
+        this.getUIContext().getPromptAction().showToast({ message: '没有可同步的账号' });
+      }
+      return;
+    }
     this.syncing = true;
     const context = this.getUIContext().getHostContext();
     if (context === undefined) {
       this.syncing = false;
       return;
     }
+    // 同步期间保持屏幕常亮：熄屏会挂起进程导致请求停摆、同步超时
+    await ScreenKeeper.acquire(context as common.UIAbilityContext);
     let ok: number = 0;
     let failMsg: string = '';
     // 备份模式：先把系统本地日历导入目标日历本（幂等），再随正常同步推送上服务器
@@ -358,8 +375,7 @@ struct Index {
         continue;
       }
       try {
-        await SyncEngine.withTimeout(
-          SyncEngine.syncAccount(context as common.UIAbilityContext, acc), 120000);
+        await SyncEngine.syncAccount(context as common.UIAbilityContext, acc);
         acc.lastSyncTime = this.formatNow();
         ok++;
       } catch (err) {
@@ -371,11 +387,16 @@ struct Index {
       await SyncEngine.settleLocalEvents(context);
       await SyncEngine.pruneOrphanRows(context, this.accounts);
       await AccountStore.saveAll(context, this.accounts);
+      // 全部账号同步成功才结束"一次性全量重拉"状态（修复旧模式落库的残缺数据）
+      if (failMsg === '') {
+        await AppSettings.markFullRefetchDone(context);
+      }
     } catch (err) {
       const e = err as BusinessError;
       failMsg = e.message;
     }
     this.syncing = false;
+    await ScreenKeeper.release(context as common.UIAbilityContext);
     if (failMsg !== '') {
       this.getUIContext().getPromptAction()
         .showToast({ message: ok > 0 ? `同步完成 ${ok} 个，失败：${failMsg}` : `同步失败：${failMsg}` });
@@ -910,6 +931,7 @@ struct Index {
       };
       const lines: string[] = [`调试 ${this.fmtDateCn(dateMs)}`, `visibleKeys=${visibleKeys.join(',')}`];
       let idx: number = 0;
+      let netChecked: boolean = false;
       for (const m of masters.values()) {
         if (idx >= 6) {
           lines.push('…（更多系列省略）');
@@ -939,13 +961,54 @@ struct Index {
         lines.push(`  rrule=${m.rrule === '' ? '(空!)' : m.rrule}`);
         lines.push(`  exdate=${m.exdate === '' ? '无' : m.exdate}`);
         lines.push(`  展开条数=${occs.length} 含首次=${hasFirst ? '是' : '否'} 首次=${occs.length > 0 ? fmt(occs[0]) : '无'} 该日发生=${hitsDay ? '是' : '否'}`);
+        lines.push(`  数据库提醒=${m.reminder}分钟 DB同UID行数=${rows.filter((r: LocalEvent): boolean => r.uid === m.uid).length}`);
+        // 网络诊断（仅第一个命中该日的系列）：GET 服务器原始 ICS，看 VALARM 是否还在
+        if (hitsDay && !netChecked) {
+          netChecked = true;
+          try {
+            const accounts2: DavAccount[] = await AccountStore.loadAll(context);
+            const acc2 = accounts2.find((a: DavAccount): boolean => a.calendarHrefs.includes(m.href));
+            if (acc2 !== undefined) {
+              const auth2: string = DavClient.authHeader(acc2.username, acc2.password);
+              const url: string = m.href.endsWith('/')
+                ? m.href + m.remotePath : `${m.href}/${m.remotePath}`;
+              const raw: string = await DavClient.getRaw(url, auth2);
+              const upper: string = raw.toUpperCase();
+              const trigIdx: number = upper.indexOf('TRIGGER');
+              lines.push(`  服务器ICS：${raw.length}字节 VALARM=${upper.includes('BEGIN:VALARM') ? '有' : '无'}` +
+                (trigIdx >= 0 ? ` TRIGGER=${raw.substring(trigIdx, trigIdx + 40).replace(/\r?\n/g, ' ')}` : ''));
+              // 用解析函数当场重解析这份 ICS，验证解析是否丢提醒
+              const reParsed: RemoteEvent[] = IcsUtil.parse(raw);
+              const hit = reParsed.find((p: RemoteEvent): boolean => p.uid === m.uid);
+              lines.push(`  重新解析：提醒=${hit !== undefined ? hit.reminder : '?'}分钟 rec=${hit !== undefined ? (hit.recurring ? 1 : 0) : '?'} rrule=${hit !== undefined && hit.rrule !== '' ? hit.rrule : '无'}`);
+              // 模拟同步路径：REPORT 拉取（与 SyncEngine 完全一致）再解析
+              try {
+                const repItems: RemoteItem[] = await DavClient.reportCalendar(m.href, auth2);
+                const repIt = repItems.find((x: RemoteItem): boolean => x.ics.includes(m.uid));
+                if (repIt !== undefined) {
+                  const rp: RemoteEvent[] = IcsUtil.parse(repIt.ics);
+                  const hit2 = rp.find((p: RemoteEvent): boolean => p.uid === m.uid);
+                  lines.push(`  REPORT重解析：提醒=${hit2 !== undefined ? hit2.reminder : '?'}分钟 VALARM=${repIt.ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'} 字节=${repIt.ics.length}`);
+                  lines.push(`  etag对比：DB=${m.etag === '' ? '(空)' : m.etag.substring(0, 16)} REPORT=${repIt.etag === '' ? '(空)' : repIt.etag.substring(0, 16)}`);
+                } else {
+                  lines.push(`  REPORT重解析：未找到该UID（共${repItems.length}条）`);
+                }
+              } catch (err2) {
+                lines.push('  REPORT拉取失败：同步可能一直在此失败！');
+              }
+              lines.push(`  ICS原文：${raw.substring(0, 380).replace(/\r?\n/g, ' ⏎ ')}`);
+            }
+          } catch (err) {
+            lines.push('  服务器ICS获取失败(网络)');
+          }
+        }
         const ovs = overrides.get(m.uid) ?? [];
         if (ovs.length === 0) {
           lines.push('  覆盖实例: 无');
         } else {
           for (const o of ovs.slice(0, 5)) {
             const oVis: boolean = visibleKeys.includes(o.calKey);
-            lines.push(`  覆盖: ${fmt(o.startTime)}~${fmt(o.endTime)} rec=${o.recurring ? 1 : 0} calKey=${o.calKey} vis=${oVis ? 1 : 0} dirty=${o.dirty ? 1 : 0}`);
+            lines.push(`  覆盖: ${fmt(o.startTime)}~${fmt(o.endTime)} rec=${o.recurring ? 1 : 0} calKey=${o.calKey} vis=${oVis ? 1 : 0} dirty=${o.dirty ? 1 : 0} 提醒=${o.reminder}分钟`);
           }
           if (ovs.length > 5) {
             lines.push(`  覆盖共 ${ovs.length} 条`);
@@ -954,6 +1017,18 @@ struct Index {
       }
       if (lines.length <= 2) {
         lines.push('（该日期附近没有重复主事件）');
+      }
+      // 当日非重复日程（含覆盖实例）：核对 DB 中实际存储的提醒值，定位提醒丢失环节
+      const plain: LocalEvent[] = rows.filter((r: LocalEvent): boolean =>
+        r.rrule === '' && r.startTime < dayEnd && r.endTime >= dayStart);
+      if (plain.length > 0) {
+        lines.push(`—— 当日非重复日程 ${plain.length} 条 ——`);
+        for (const r of plain.slice(0, 8)) {
+          lines.push(`◇ ${r.title === '' ? '(无标题)' : r.title} 提醒=${r.reminder}分钟 rec=${r.recurring ? 1 : 0} calKey=${r.calKey}`);
+        }
+        if (plain.length > 8) {
+          lines.push(`…（其余 ${plain.length - 8} 条省略）`);
+        }
       }
       const text: string = lines.join('\n').substring(0, 3500);
       this.getUIContext().showAlertDialog({

@@ -3,6 +3,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { LogUtil } from './LogUtil';
 
 export class AppSettings {
   private static readonly STORE: string = 'sync_settings';
@@ -12,6 +13,50 @@ export class AppSettings {
   private static readonly KEY_SYS_MODE: string = 'sys_cal_mode';       // 'display' | 'backup'
   private static readonly KEY_BACKUP_KEY: string = 'sys_backup_cal_key'; // 备份目标 DAV 日历本
   private static readonly KEY_MANUAL_READONLY: string = 'manual_readonly_keys'; // 手动标记只读的 calKey
+  private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
+
+  /**
+   * 是否还需要一次性全量重拉：修复历史同步（REPORT 剥离 VALARM 时期）落库的残缺数据。
+   * 全量重拉期间忽略 etag 复用，所有资源 GET 完整 ICS；成功完成后标记，恢复增量模式。
+   */
+  static async isFullRefetchPending(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return !(await store.get(AppSettings.KEY_FULL_REFETCH, false) as boolean);
+    } catch (err) {
+      return true;
+    }
+  }
+
+  static async markFullRefetchDone(context: common.Context): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_FULL_REFETCH, true);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`标记全量重拉完成失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 手动重置全量重拉标记：下次同步忽略 etag 复用，所有资源 GET 完整 ICS 重建本地数据。
+   * 用于修复历史落库的残缺字段（如 reminder=0 但 etag 从未变化，增量同步永远无法纠正）。
+   */
+  static async resetFullRefetch(context: common.Context): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_FULL_REFETCH, false);
+      await store.flush();
+      LogUtil.write('已重置全量重拉标记：下次同步将 GET 全部资源重建本地数据');
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`重置全量重拉标记失败: ${e.message}`);
+    }
+  }
 
   /**
    * 手动标记为只读的日历本 calKey 列表。

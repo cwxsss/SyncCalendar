@@ -8,6 +8,7 @@ import { SyncEngine } from '../common/SyncEngine';
 import { EditNavParams } from './EditAccountPage';
 import { EventDb } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
+import { ScreenKeeper } from '../common/ScreenKeeper';
 
 @Entry
 @Component
@@ -68,14 +69,19 @@ struct AccountsPage {
     }
     this.syncing = true;
     this.syncingId = acc.id;
+    // 同步期间保持屏幕常亮：熄屏会挂起进程导致请求停摆、同步超时
+    const uiCtx = this.getUIContext().getHostContext();
+    if (uiCtx !== undefined) {
+      await ScreenKeeper.acquire(uiCtx as common.UIAbilityContext);
+    }
     try {
       const context = this.getUIContext().getHostContext();
       if (context === undefined) {
         return;
       }
       if (acc.type === TYPE_CALDAV) {
-        await SyncEngine.withTimeout(
-          SyncEngine.syncAccount(context as common.UIAbilityContext, acc), 120000);
+        // 超时保护由 syncAccount 内部处理（全量重拉 10 分钟 / 常规 2 分钟），不再套外层超时
+        await SyncEngine.syncAccount(context as common.UIAbilityContext, acc);
         await SyncEngine.pruneOrphanRows(context, this.accounts);
       }
       acc.itemCount = acc.calendarHrefs.length;
@@ -90,6 +96,9 @@ struct AccountsPage {
     } finally {
       this.syncing = false;
       this.syncingId = '';
+      if (uiCtx !== undefined) {
+        await ScreenKeeper.release(uiCtx as common.UIAbilityContext);
+      }
     }
   }
 

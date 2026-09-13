@@ -409,6 +409,23 @@ export class EventDb {
     return `新增${added} 更新${updated} 删除${removed} 不变${unchanged}`;
   }
 
+  /** 查询某日历本下同类型的全部行（同步 etag 比对用，含 dirty 行） */
+  static async queryByCalKey(context: common.Context, calKey: string, kind: string): Promise<LocalEvent[]> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('kind', kind);
+    const rs = await store.query(predicates);
+    const list: LocalEvent[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        list.push(EventDb.fromRow(rs));
+      }
+    } finally {
+      rs.close();
+    }
+    return list;
+  }
+
   /** 按 UID 判断事件是否已存在（系统日历备份导入的幂等判重） */
   static async uidExists(context: common.Context, uid: string): Promise<boolean> {
     const store = await EventDb.getDb(context);

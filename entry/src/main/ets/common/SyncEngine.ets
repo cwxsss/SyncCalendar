@@ -5,10 +5,16 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount } from './AccountStore';
 import { EventDb, LocalEvent, RemoteEvent } from './EventDb';
 import { IcsUtil } from './IcsUtil';
-import { DavClient, DavColorEntry } from './DavClient';
+import { DavClient, DavColorEntry, RemoteItem } from './DavClient';
 import { LogUtil } from './LogUtil';
+import { AppSettings } from './AppSettings';
 
 export class SyncEngine {
+  /** 正在同步中的账号 id → 开始时间：防止超时后的"僵尸同步"与新一轮同步并发写库 */
+  private static activeSyncs: Map<string, number> = new Map();
+  /** 互斥锁最长持有时间：超过视为异常残留（如进程挂起后网络停摆），允许抢占 */
+  private static readonly LOCK_STALE_MS: number = 15 * 60 * 1000;
+
   /**
    * 给异步操作加超时保护，防止网络挂起导致界面一直转圈
    */
@@ -26,11 +32,28 @@ export class SyncEngine {
    * 返回远端事件总数（拉取侧）。带 120 秒超时保护。
    */
   static async syncAccount(context: common.Context, acc: DavAccount): Promise<number> {
+    // 同一账号互斥：超时被掐断后内层任务仍在后台运行，期间不允许再次同步该账号。
+    // 锁超过 LOCK_STALE_MS 未释放（如熄屏挂起导致任务冻结）则视为残留，允许抢占
+    const heldSince: number | undefined = SyncEngine.activeSyncs.get(acc.id);
+    if (heldSince !== undefined) {
+      if (Date.now() - heldSince < SyncEngine.LOCK_STALE_MS) {
+        throw new Error('该账号正在同步中，请稍后再试');
+      }
+      LogUtil.write(`同步互斥锁超时残留（${acc.name}），强制释放并重新同步`);
+    }
+    SyncEngine.activeSyncs.set(acc.id, Date.now());
     const t0: number = Date.now();
     LogUtil.write(`========== 同步账号「${acc.name}」开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
     try {
-      const r: number = await SyncEngine.withTimeout<number>(
-        SyncEngine.syncAccountInner(context, acc), 120000);
+      // 全量重拉（升级后首次）要逐个 GET 所有资源，放宽超时到 10 分钟；常规 5 分钟
+      const fullRefetch: boolean = await AppSettings.isFullRefetchPending(context);
+      const timeoutMs: number = fullRefetch ? 600000 : 300000;
+      // 内层任务真正结束（无论成败）才释放互斥锁；超时后它仍会在后台跑完
+      const inner: Promise<number> = SyncEngine.syncAccountInner(context, acc);
+      inner.catch((): void => {}).finally((): void => {
+        SyncEngine.activeSyncs.delete(acc.id);
+      });
+      const r: number = await SyncEngine.withTimeout<number>(inner, timeoutMs);
       LogUtil.write(`同步账号「${acc.name}」完成：拉取 ${r} 条日程，耗时 ${Math.round((Date.now() - t0) / 1000)} 秒`);
       return r;
     } catch (err) {
@@ -46,7 +69,14 @@ export class SyncEngine {
     await SyncEngine.refreshCalendarColors(acc, auth);
     // 1) 推送该账号日历本下的本地修改
     await SyncEngine.pushDirtyForAccount(context, acc, auth);
-    // 2) 拉取远端变更（全量 REPORT，etag 增量落库）
+    // 2) 拉取远端变更：REPORT 仅取 etag；新增/变化的资源用 GET 补拉完整 ICS。
+    //    原因：群晖等服务器的 REPORT calendar-data 会剥离 VALARM（提醒丢失），
+    //    而 GET 返回完整 ICS；etag 未变的资源直接复用本地完整数据，几乎零开销。
+    //    首次升级后执行一次全量重拉，修复旧模式落库的残缺数据（如 reminder=0）。
+    const fullRefetch: boolean = await AppSettings.isFullRefetchPending(context);
+    if (fullRefetch) {
+      LogUtil.write('一次性全量重拉：忽略 etag 复用，全部资源 GET 完整 ICS');
+    }
     let changed: number = 0;
     for (let i = 0; i < acc.calendarHrefs.length; i++) {
       const href: string = acc.calendarHrefs[i];
@@ -54,36 +84,82 @@ export class SyncEngine {
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
       LogUtil.write(`日历本[${i}]「${calName}」开始同步：${href}`);
       const t1: number = Date.now();
-      const items = await DavClient.reportCalendar(href, auth);
+      const items: RemoteItem[] = await DavClient.reportEtags(href, auth);
       LogUtil.write(`日历本[${i}]「${calName}」REPORT 返回 ${items.length} 个资源`);
+      // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
+      const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
+      const byUid: Map<string, LocalEvent[]> = new Map();
+      for (const row of existingRows) {
+        const arr: LocalEvent[] | undefined = byUid.get(row.uid);
+        if (arr === undefined) {
+          byUid.set(row.uid, [row]);
+        } else {
+          arr.push(row);
+        }
+      }
+      const originMatch = /https?:\/\/[^/]+/i.exec(href);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
       const remote: RemoteEvent[] = [];
+      let fetched: number = 0;
       let parseFail: number = 0;
-      let failSample: string = '';
+      const needFetch: RemoteItem[] = [];
       for (const it of items) {
-        const parsed: RemoteEvent[] = IcsUtil.parse(it.ics);
-        if (parsed.length === 0) {
-          parseFail++;
-          if (failSample === '') {
-            failSample = it.ics.replace(/\r?\n/g, ' ⏎ ').substring(0, 600);
+        const resUid: string = SyncEngine.resUidFromHref(it.href);
+        const group: LocalEvent[] | undefined = byUid.get(resUid);
+        if (!fullRefetch && group !== undefined && group.length > 0 && !group[0].dirty
+          && group[0].etag === it.etag) {
+          // etag 未变：直接用本地行还原远端数据（含 reminder 等完整字段）
+          for (const row of group) {
+            remote.push(SyncEngine.rowToRemote(row, it.etag));
           }
           continue;
         }
-        // 一个资源可能包含主事件 + 单次覆盖实例（RECURRENCE-ID），全部入库
-        for (const r of parsed) {
-          if (r.uid === 'syncprobe') {
-            continue; // 写权限探测资源（万一删除失败），不入库展示
+        needFetch.push(it);
+      }
+      // 并发 GET 补拉（每批 5 个），避免全量重拉时串行请求超时
+      const batchSize: number = 5;
+      for (let b: number = 0; b < needFetch.length; b += batchSize) {
+        const batch: RemoteItem[] = needFetch.slice(b, b + batchSize);
+        const results: RemoteEvent[][] = await Promise.all(batch.map(async (it: RemoteItem): Promise<RemoteEvent[]> => {
+          const url: string = it.href.startsWith('http') ? it.href : origin + it.href;
+          try {
+            const raw: string = await DavClient.getRaw(url, auth);
+            if (!raw.startsWith('BEGIN:VCALENDAR')) {
+              return [];
+            }
+            const resUid: string = SyncEngine.resUidFromHref(it.href);
+            const parsed: RemoteEvent[] = IcsUtil.parse(raw);
+            const out: RemoteEvent[] = [];
+            for (const r of parsed) {
+              if (r.uid === 'syncprobe') {
+                continue; // 写权限探测资源（万一删除失败），不入库展示
+              }
+              if (r.uid === '') {
+                r.uid = resUid;
+              }
+              r.etag = it.etag;
+              out.push(r);
+            }
+            return out;
+          } catch (err) {
+            return [];
           }
-          if (r.uid === '') {
-            r.uid = SyncEngine.uidFromHref(it.href);
+        }));
+        for (const arr of results) {
+          if (arr.length === 0) {
+            parseFail++;
+          } else {
+            fetched++;
+            for (const r of arr) {
+              remote.push(r);
+            }
           }
-          r.etag = it.etag;
-          remote.push(r);
         }
       }
       if (parseFail > 0) {
-        LogUtil.write(`日历本[${i}]「${calName}」有 ${parseFail} 个资源解析出 0 条日程，首个样本: ${failSample}`);
+        LogUtil.write(`日历本[${i}]「${calName}」有 ${parseFail} 个资源拉取/解析失败`);
       }
-      LogUtil.write(`日历本[${i}]「${calName}」解析出 ${remote.length} 条日程，开始落库`);
+      LogUtil.write(`日历本[${i}]「${calName}」补拉变更资源 ${fetched} 个，共 ${remote.length} 条日程，开始落库`);
       const stat: string = await EventDb.applyRemote(context, calKey, href, remote, false);
       LogUtil.write(`日历本[${i}]「${calName}」日程落库完成：${stat}，耗时 ${Math.round((Date.now() - t1) / 1000)} 秒`);
       changed += remote.length;
@@ -167,6 +243,43 @@ export class SyncEngine {
     return last.endsWith('.ics') ? last.substring(0, last.length - 4) : last;
   }
 
+  /** 从资源 URL 提取 UID（URL 解码后，用于与 DB 中 parse 出的真实 uid 匹配） */
+  private static resUidFromHref(href: string): string {
+    const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
+    if (segs.length === 0) {
+      return String(Date.now());
+    }
+    let last: string = segs[segs.length - 1];
+    if (last.endsWith('.ics')) {
+      last = last.substring(0, last.length - 4);
+    }
+    try {
+      last = decodeURIComponent(last);
+    } catch (err) {
+      // 解码失败保持原样
+    }
+    return last;
+  }
+
+  /** 本地行 → 远端事件（etag 未变的资源复用本地完整数据，含 reminder） */
+  private static rowToRemote(e: LocalEvent, etag: string): RemoteEvent {
+    const r = new RemoteEvent();
+    r.uid = e.uid;
+    r.etag = etag;
+    r.title = e.title;
+    r.description = e.description;
+    r.location = e.location;
+    r.startTime = e.startTime;
+    r.endTime = e.endTime;
+    r.isAllDay = e.isAllDay;
+    r.recurring = e.recurring;
+    r.completed = e.completed;
+    r.rrule = e.rrule;
+    r.exdate = e.exdate;
+    r.reminder = e.reminder;
+    return r;
+  }
+
   /**
    * 推送指定账号日历本下的待同步事件（新建/修改 → PUT；删除 → DELETE）
    */
@@ -237,6 +350,11 @@ export class SyncEngine {
    */
   static async pruneOrphanRows(context: common.Context, accounts: DavAccount[]): Promise<void> {
     try {
+      // 防御：账号列表为空时（如同步中途读取异常），绝不能把所有 CalDAV 日程当孤儿清理
+      if (accounts.length === 0) {
+        LogUtil.write('清理孤儿日程行跳过：账号列表为空（防御保护）');
+        return;
+      }
       const accIds: string[] = accounts.map((a: DavAccount): string => a.id);
       const removed: number = await EventDb.pruneOrphanCalKeys(context, accIds);
       if (removed > 0) {

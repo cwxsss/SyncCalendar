@@ -126,9 +126,11 @@ export class AccountStore {
       const store: preferences.Preferences =
         await preferences.getPreferences(context, AccountStore.STORE);
       const count: number = await store.get(AccountStore.COUNT_KEY, 0) as number;
+      console.info(`[AccountStore] loadAll: count=${count}`);
       for (let i = 0; i < count; i++) {
         const raw = await store.get(`acc_${i}`, '') as string;
         if (raw === '') {
+          console.warn(`[AccountStore] loadAll: acc_${i} 为空`);
           continue;
         }
         const acc = AccountStore.decodeAccount(raw);
@@ -139,6 +141,8 @@ export class AccountStore {
             migrated = true;
           }
           result.push(acc);
+        } else {
+          console.error(`[AccountStore] loadAll: acc_${i} 解码失败，raw 长度=${raw.length}`);
         }
       }
     } catch (err) {
@@ -157,10 +161,19 @@ export class AccountStore {
     return result;
   }
 
-  static async saveAll(context: common.Context, accounts: DavAccount[]): Promise<void> {
+  /**
+   * 保存全部账号。
+   * 防御：存储里已有账号时，禁止用空列表覆盖（调用方若因读取异常拿到空列表再回写，
+   * 会把所有账号抹掉）。仅删除账号的合法场景通过 force=true 放行。
+   */
+  static async saveAll(context: common.Context, accounts: DavAccount[], force: boolean = false): Promise<void> {
     const store: preferences.Preferences =
       await preferences.getPreferences(context, AccountStore.STORE);
     const oldCount: number = await store.get(AccountStore.COUNT_KEY, 0) as number;
+    if (accounts.length === 0 && oldCount > 0 && !force) {
+      console.error(`[AccountStore] 拒绝用空列表覆盖账号存储（原有 ${oldCount} 个账号）`);
+      throw new Error('账号列表为空，已阻止覆盖存储（保护原有账号数据）');
+    }
     for (let i = 0; i < oldCount; i++) {
       store.delete(`acc_${i}`);
     }

@@ -210,6 +210,36 @@ struct SettingsPage {
     return minutes >= 60 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
   }
 
+  /** 确认后重置全量重拉标记，下次同步重建全部日程数据 */
+  private askRebuildData(): void {
+    this.getUIContext().showAlertDialog({
+      title: '重建日程数据',
+      message: '将重新从服务器拉取所有日程的完整数据（包括提醒），本地已修改未同步的内容不受影响。\n\n全量拉取可能需要几分钟，期间请保持 App 在前台、不要熄屏。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '开始重建',
+        action: (): void => {
+          this.doRebuildData();
+        }
+      }
+    });
+  }
+
+  private async doRebuildData(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    await AppSettings.resetFullRefetch(this.context);
+    this.getUIContext().getPromptAction().showToast({
+      message: '已开启，返回首页后点一次同步即可，请保持屏幕常亮'
+    });
+  }
+
   build() {
     Column() {
       // 顶部
@@ -343,6 +373,32 @@ struct SettingsPage {
             }, (b: BackupTarget) => `${b.calKey}_${this.manualKeys.includes(b.calKey) ? 1 : 0}`)
           }
           .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 数据修复：手动触发一次性全量重拉（重建提醒等本地残缺字段）
+          Row({ space: 10 }) {
+            Column({ space: 2 }) {
+              Text('重建日程数据')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_primary'))
+              Text('同步时重新从服务器拉取全部日程的完整数据，修复提醒丢失等本地数据问题。耗时段落请保持 App 在前台、屏幕常亮')
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Button('重建')
+              .fontSize(13)
+              .backgroundColor($r('app.color.brand'))
+              .onClick(() => {
+                this.askRebuildData();
+              })
+          }
           .width('100%')
           .padding(14)
           .borderRadius(12)

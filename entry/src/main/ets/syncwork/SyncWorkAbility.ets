@@ -8,6 +8,7 @@ import { SyncEngine } from '../common/SyncEngine';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
+import { AppSettings } from '../common/AppSettings';
 import { LogUtil } from '../common/LogUtil';
 
 export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
@@ -32,18 +33,24 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
         // 导入失败不影响正常同步
       }
       let ok: number = 0;
+      let attempted: number = 0;
       for (const acc of accounts) {
         if (acc.type !== TYPE_CALDAV) {
           continue;
         }
+        attempted++;
         try {
-          await SyncEngine.withTimeout(
-            SyncEngine.syncAccount(context, acc), 100000);
+          // 超时保护由 syncAccount 内部处理（全量重拉 10 分钟 / 常规 5 分钟），不再套外层超时
+          await SyncEngine.syncAccount(context, acc);
           ok++;
         } catch (err) {
           const e = err as BusinessError;
           LogUtil.write(`延迟任务同步「${acc.name}」失败: ${e.message}`);
         }
+      }
+      // 全部账号同步成功才结束"一次性全量重拉"状态
+      if (attempted > 0 && ok === attempted) {
+        await AppSettings.markFullRefetchDone(context);
       }
       await SyncEngine.settleLocalEvents(context);
       await SyncEngine.pruneOrphanRows(context, accounts);
