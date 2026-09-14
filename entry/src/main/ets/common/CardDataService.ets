@@ -17,6 +17,13 @@ export class CardItem {
   showDate: boolean = false; // 是否为当天分组的第一条（卡片上渲染日期头）
   calName: string = '';   // 所属日历本名（右侧显示，颜色同日历色）
   color: string = '#007DFF';
+  // 当前时间红线：start/end 为日程实际起止毫秒（用于定位"现在"位置）；
+  // showNowLine 表示该日程上方应绘制红线，isNow 表示该日程正在进行中
+  startMs: number = 0;
+  endMs: number = 0;
+  showNowLine: boolean = false; // 红线画在该日程上方
+  isNow: boolean = false;       // 该日程正在进行中
+  nowLineBelow: boolean = false; // 今天所有有时间日程已结束：红线画在最后一条下方
 }
 
 /** 卡片整体数据 */
@@ -28,6 +35,7 @@ export class CardData {
   dateMd: string = '';
   weekday: string = '';
   todayCount: number = 0;
+  ongoingCount: number = 0; // 此刻正在进行的日程条数（2x2 卡片红点提示用）
 }
 
 export class CardDataService {
@@ -192,9 +200,47 @@ export class CardDataService {
           item.showDate = i === 0; // 当天分组第一条 → 卡片上显示日期头
           item.calName = e.calName;
           item.color = e.color;
+          // 红线定位：记录实际起止毫秒（用于卡片渲染时判断"现在"位置）
+          item.startMs = e.startTime;
+          item.endMs = e.endTime;
           items.push(item);
         }
       }
+      // 红线逻辑：仅对"今天"分组、且为"有时间"的日程生效（全天/跨天按全天展示，不参与时间轴定位）
+      const nowMs: number = Date.now();
+      let linePlaced: boolean = false;
+      // 1) 正在进行的日程（start<=now<end）→ 红线画在其上方，并标记 isNow
+      for (const it of items) {
+        if (it.date === '今天' && it.time !== '全天' && it.startMs <= nowMs && nowMs < it.endMs) {
+          it.isNow = true;
+          it.showNowLine = true;
+          linePlaced = true;
+          break;
+        }
+      }
+      // 2) 否则：红线画在"下一个尚未开始"的有时间日程上方
+      if (!linePlaced) {
+        for (const it of items) {
+          if (it.date === '今天' && it.time !== '全天' && it.startMs > nowMs) {
+            it.showNowLine = true;
+            linePlaced = true;
+            break;
+          }
+        }
+      }
+      // 3) 否则：今天所有有时间日程均已结束 → 红线画在最后一条下方（标记"今日已结束"）
+      if (!linePlaced) {
+        for (let k = items.length - 1; k >= 0; k--) {
+          const it = items[k];
+          if (it.date === '今天' && it.time !== '全天') {
+            it.nowLineBelow = true;
+            linePlaced = true;
+            break;
+          }
+        }
+      }
+      // 进行中条数：用于 2x2 卡片红点提示
+      data.ongoingCount = items.filter((i: CardItem): boolean => i.isNow).length;
       data.eventsJson = JSON.stringify(items);
       // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
       data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;

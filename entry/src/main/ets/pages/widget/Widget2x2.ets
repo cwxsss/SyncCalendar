@@ -11,6 +11,7 @@ struct Widget2x2Card {
   @LocalStorageProp('dateMd') dateMd: string = '';
   @LocalStorageProp('weekday') weekday: string = '';
   @LocalStorageProp('todayCount') todayCount: number = 0;
+  @LocalStorageProp('ongoingCount') ongoingCount: number = 0; // 此刻正在进行的日程条数
 
   /** 右上角添加按钮：拉起 App 直接进入新建日程页（阻止冒泡，避免同时打开 App 首页） */
   @Builder
@@ -78,9 +79,18 @@ struct Widget2x2Card {
           .fontWeight(FontWeight.Bold)
           .fontColor('#007DFF')
         Column({ space: 2 }) {
-          Text('今日日程')
-            .fontSize(12)
-            .fontColor('#1A1A1A')
+          Row({ space: 4 }) {
+            if (this.ongoingCount > 0) {
+              Column()
+                .width(8)
+                .height(8)
+                .borderRadius(4)
+                .backgroundColor('#FF3B30')
+            }
+            Text(this.ongoingCount > 0 ? `进行中 ${this.ongoingCount}` : '今日日程')
+              .fontSize(12)
+              .fontColor(this.ongoingCount > 0 ? '#FF3B30' : '#1A1A1A')
+          }
           Text(this.todayCount === 0 ? '点击添加' : '点击查看')
             .fontSize(10)
             .fontColor('#8A8A8A')

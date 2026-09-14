@@ -54,12 +54,14 @@ struct Index {
   private swiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
   private autoSyncTimer: number = -1;
+  private nowTimer: number = -1; // 红线位置"播放"计时器（每 30s 刷新 nowMs）
   private lastSyncTime: number = 0;
   private permissionAsked: boolean = false;
   @State detailShow: boolean = false; // 只读日程详情半屏弹层
   @State detailEvent: DisplayEvent | null = null;
   // 服务卡片"添加"按钮深链：EntryAbility 写入，本页读取后拉起新建日程页
   @Watch('onWidgetActionChange') @StorageLink('widgetAction') widgetAction: string = '';
+  @State nowMs: number = Date.now(); // 当前时刻毫秒（驱动红线"播放"位置，每 30s 更新）
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -74,12 +76,20 @@ struct Index {
     this.rebuildPages();
     this.initLandscapeListener();
     this.initPermissionAndLoad();
+    // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进
+    this.nowTimer = setInterval((): void => {
+      this.nowMs = Date.now();
+    }, 30000);
   }
 
   aboutToDisappear(): void {
     if (this.autoSyncTimer !== -1) {
       clearInterval(this.autoSyncTimer);
       this.autoSyncTimer = -1;
+    }
+    if (this.nowTimer !== -1) {
+      clearInterval(this.nowTimer);
+      this.nowTimer = -1;
     }
     if (this.landscapeListener !== null) {
       this.landscapeListener.off('change');
@@ -277,6 +287,50 @@ struct Index {
   private eventsOfDate(dateMs: number): DisplayEvent[] {
     return this.events.filter((e: DisplayEvent): boolean =>
       this.startOfDay(e.startTime) <= dateMs && e.endTime >= dateMs);
+  }
+
+  /** 红线日程唯一 key（与 ForEach key 保持一致） */
+  private nowLineKey(e: DisplayEvent): string {
+    return `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}`;
+  }
+
+  /** 计算某日列表中"当前时间红线"位置：返回应画在上方/下方的日程 key，及正在进行的日程 key 集合。
+   *  仅 isToday 为 true 时生效（红线表达的是"此刻"，非今天无意义）。 */
+  private computeNowLine(list: DisplayEvent[], isToday: boolean): NowLineInfo {
+    const res: NowLineInfo = new NowLineInfo();
+    if (!isToday) {
+      return res;
+    }
+    const now: number = this.nowMs;
+    const timed: DisplayEvent[] = list
+      .filter((e: DisplayEvent): boolean => !e.isAllDay && !this.spansDays(e))
+      .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+    // 1) 正在进行的（start<=now<end）→ 红线画在其上方
+    let firstNow: DisplayEvent | undefined = undefined;
+    for (const e of timed) {
+      if (e.startTime <= now && now < e.endTime) {
+        res.nowKeys.add(this.nowLineKey(e));
+        if (firstNow === undefined) {
+          firstNow = e;
+        }
+      }
+    }
+    if (firstNow !== undefined) {
+      res.aboveKey = this.nowLineKey(firstNow);
+      return res;
+    }
+    // 2) 下一个尚未开始的 → 红线画在其上方
+    for (const e of timed) {
+      if (e.startTime > now) {
+        res.aboveKey = this.nowLineKey(e);
+        return res;
+      }
+    }
+    // 3) 全部已结束 → 红线画在最后一条下方
+    if (timed.length > 0) {
+      res.belowKey = this.nowLineKey(timed[timed.length - 1]);
+    }
+    return res;
   }
 
   private switchMonth(delta: number): void {
@@ -1526,7 +1580,19 @@ struct Index {
     Scroll() {
       Column({ space: 8 }) {
         ForEach(this.eventsOfDate(this.selectedDate), (e: DisplayEvent) => {
-          this.eventRow(e)
+          Column() {
+            if (this.computeNowLine(this.eventsOfDate(this.selectedDate),
+                this.selectedDate === this.startOfDay(this.nowMs)).aboveKey === this.nowLineKey(e)) {
+              NowLineMarker()
+            }
+            this.eventRow(e, this.computeNowLine(this.eventsOfDate(this.selectedDate),
+                this.selectedDate === this.startOfDay(this.nowMs)).nowKeys.has(this.nowLineKey(e)))
+            if (this.computeNowLine(this.eventsOfDate(this.selectedDate),
+                this.selectedDate === this.startOfDay(this.nowMs)).belowKey === this.nowLineKey(e)) {
+              NowLineMarker()
+            }
+          }
+          .width('100%')
         }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}`)
         if (this.eventsOfDate(this.selectedDate).length === 0 && !this.loading) {
           Text('当天没有日程')
@@ -1577,7 +1643,17 @@ struct Index {
         }
         ForEach(group.items, (e: DisplayEvent) => {
           ListItem() {
-            this.eventRow(e)
+            Column() {
+              if (this.computeNowLine(group.items, group.label === '今天').aboveKey === this.nowLineKey(e)) {
+                NowLineMarker()
+              }
+              this.eventRow(e, this.computeNowLine(group.items, group.label === '今天')
+                .nowKeys.has(this.nowLineKey(e)))
+              if (this.computeNowLine(group.items, group.label === '今天').belowKey === this.nowLineKey(e)) {
+                NowLineMarker()
+              }
+            }
+            .width('100%')
           }
         }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
       }, (group: AgendaGroup) => group.label)
@@ -1744,24 +1820,24 @@ struct Index {
   }
 
   @Builder
-  eventRow(e: DisplayEvent) {
+  eventRow(e: DisplayEvent, isNow: boolean = false) {
     Row({ space: 10 }) {
       Column()
         .width(4)
         .height(38)
         .borderRadius(2)
-        .backgroundColor(e.color)
+        .backgroundColor(isNow ? '#FF3B30' : e.color)
       Column({ space: 3 }) {
         Text(e.title === '' ? '(无标题)' : e.title)
           .fontSize(15)
-          .fontColor($r('app.color.text_primary'))
+          .fontColor(isNow ? '#FF3B30' : $r('app.color.text_primary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
           Text(e.isAllDay || this.spansDays(e)
             ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
             .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
+            .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
           if (e.recurring) {
             Text('↻ 重复')
               .fontSize(10)
@@ -1769,6 +1845,14 @@ struct Index {
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
               .borderRadius(4)
               .backgroundColor($r('app.color.chip_off_bg'))
+          }
+          if (isNow) {
+            Text('● 进行中')
+              .fontSize(10)
+              .fontColor('#FF3B30')
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .borderRadius(4)
+              .backgroundColor('#FFECEA')
           }
         }
         if (e.location !== '') {
@@ -1872,4 +1956,52 @@ struct Index {
 class AgendaGroup {
   label: string = '';
   items: DisplayEvent[] = [];
+}
+
+/** 某日列表中"当前时间红线"位置信息（避免内联对象字面量类型，ArkTS 不允许） */
+class NowLineInfo {
+  aboveKey: string = '';   // 红线画在该 key 对应日程的上方
+  belowKey: string = '';   // 今天所有有时间日程已结束：红线画在该 key 对应日程的下方
+  nowKeys: Set<string> = new Set<string>(); // 正在进行的日程 key 集合
+}
+
+/** 当前时间红线标记（带呼吸/播放效果）：左侧红点 + 贯穿整行的红色细线。
+ *  自带动画（opacity 往复），不依赖外部状态刷新，避免整页重绘。 */
+@Component
+struct NowLineMarker {
+  @State private dim: boolean = false;
+  private timer: number = -1;
+
+  aboutToAppear(): void {
+    // 每 ~1.1s 切换一次，配合 .animation 形成呼吸式"播放"效果
+    this.timer = setInterval((): void => {
+      this.dim = !this.dim;
+    }, 1100);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timer !== -1) {
+      clearInterval(this.timer);
+      this.timer = -1;
+    }
+  }
+
+  build() {
+    Row() {
+      Column()
+        .width(6)
+        .height(6)
+        .borderRadius(3)
+        .backgroundColor('#FF3B30')
+      Column()
+        .height(2)
+        .layoutWeight(1)
+        .backgroundColor('#FF3B30')
+        .borderRadius(1)
+    }
+    .width('100%')
+    .padding({ top: 3, bottom: 3 })
+    .opacity(this.dim ? 0.45 : 1)
+    .animation({ duration: 1000 })
+  }
 }

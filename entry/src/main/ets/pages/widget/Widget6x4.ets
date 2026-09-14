@@ -10,6 +10,12 @@ class CardItem6x4 {
   showDate: boolean = false;
   calName: string = '';
   color: string = '#007DFF';
+  // 红线：startMs/endMs 实际起止；showNowLine 上方画红线；isNow 正在进行；nowLineBelow 画在底部
+  startMs: number = 0;
+  endMs: number = 0;
+  showNowLine: boolean = false;
+  isNow: boolean = false;
+  nowLineBelow: boolean = false;
 }
 
 @Entry(storage6x4)
@@ -87,6 +93,25 @@ struct Widget6x4Card {
     .backgroundColor('#F5F7FA')
   }
 
+  /** 当前时间红线标记：左侧红点 + 贯穿整行的红色细线 */
+  @Builder
+  nowLine() {
+    Row() {
+      Column()
+        .width(6)
+        .height(6)
+        .borderRadius(3)
+        .backgroundColor('#FF3B30')
+      Column()
+        .height(2)
+        .layoutWeight(1)
+        .backgroundColor('#FF3B30')
+        .borderRadius(1)
+    }
+    .width('100%')
+    .padding({ top: 3, bottom: 3 })
+  }
+
   /** 有时间事件行（时间轴）：圆角矩形 + 左色竖条 + 开始时间(上)-竖线-结束时间(下) + 标题 */
   @Builder
   buildTimedRow(item: CardItem6x4) {
@@ -95,13 +120,13 @@ struct Widget6x4Card {
         .width(3)
         .height(38)
         .borderRadius(2)
-        .backgroundColor(item.color)
+        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
       // 时间列：开始时间在上、结束时间在下、中间竖线连接
       Column({ space: 2 }) {
         Text(item.time)
           .fontSize(10)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#333333')
+          .fontColor(item.isNow ? '#FF3B30' : '#333333')
         Column()
           .width(1.5)
           .layoutWeight(1)
@@ -116,10 +141,18 @@ struct Widget6x4Card {
       .height(38)
       Text(item.title)
         .fontSize(12)
-        .fontColor('#1A1A1A')
+        .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
+      if (item.isNow) {
+        Text('● 进行中')
+          .fontSize(9)
+          .fontColor('#FF3B30')
+          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+          .borderRadius(4)
+          .backgroundColor('#FFECEA')
+      }
       if (item.calName !== '') {
         Text(item.calName)
           .fontSize(9)
@@ -133,7 +166,7 @@ struct Widget6x4Card {
     .width('100%')
     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .borderRadius(8)
-    .backgroundColor('#F5F7FA')
+    .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
   }
 
   /** 卡片"打开 App"：点击日期区或日程列表触发；添加按钮是 header 行的兄弟节点，其点击不会冒泡到这里 */
@@ -192,10 +225,16 @@ struct Widget6x4Card {
                     .fontColor('#666666')
                     .width('100%')
                 }
+                if (item.showNowLine && !item.nowLineBelow) {
+                  this.nowLine()
+                }
                 if (item.time === '全天') {
                   this.buildAllDayRow(item)
                 } else {
                   this.buildTimedRow(item)
+                }
+                if (item.nowLineBelow) {
+                  this.nowLine()
                 }
               }
               .width('100%')
