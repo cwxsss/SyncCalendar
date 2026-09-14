@@ -38,15 +38,15 @@
     },
     {
       "name": "card_desc",
-      "value": "展示从今天开始的日程安排"
+      "value": "展示今天日期与正在进行中的日程"
     },
     {
       "name": "card_2x2_name",
-      "value": "下一条日程"
+      "value": "今日速览"
     },
     {
       "name": "card_2x4_name",
-      "value": "日程速览"
+      "value": "正在进行"
     },
     {
       "name": "card_4x4_name",

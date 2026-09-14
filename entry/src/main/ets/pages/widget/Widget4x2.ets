@@ -1,51 +1,51 @@
 // entry/src/main/ets/pages/widget/Widget4x2.ets
-// 2x4 服务卡片：日期 + 农历 + 未来几条日程（时间轴样式，按天分组）
+// 2x4 服务卡片：2x2 的横向扩展。左侧 = 日期/星期/农历 + 今日日程条数（与 2x2 一致）；
+// 右侧 = 当前正在进行（或下一个）的 1~3 条日程，不做滚动；整卡点击进入 App，右上角 ＋ 直接新建日程
 let storage2x4 = new LocalStorage();
 
+/** 与 eventsJson 同结构的卡片单条日程（本卡片只用到标题/时间/日历色/进行中标记） */
 class CardItem2x4 {
   title: string = '';
   time: string = '';
   endTime: string = '';
-  date: string = '';
-  showDate: boolean = false;
   calName: string = '';
   color: string = '#007DFF';
-  // 红线：startMs/endMs 实际起止；showNowLine 上方画红线；isNow 正在进行；nowLineBelow 画在底部
-  startMs: number = 0;
-  endMs: number = 0;
-  showNowLine: boolean = false;
   isNow: boolean = false;
-  nowLineBelow: boolean = false;
 }
 
 @Entry(storage2x4)
 @Component
 struct Widget4x2Card {
-  @LocalStorageProp('eventsJson') eventsJson: string = '[]';
+  @LocalStorageProp('dateMd') dateMd: string = '';
   @LocalStorageProp('dateText') dateText: string = '';
+  @LocalStorageProp('weekday') weekday: string = '';
   @LocalStorageProp('lunarText') lunarText: string = '';
+  @LocalStorageProp('todayCount') todayCount: number = 0;
+  @LocalStorageProp('ongoingCount') ongoingCount: number = 0;
+  @LocalStorageProp('ongoingJson') ongoingJson: string = '[]';
 
-  private parseItems(): CardItem2x4[] {
+  /** 右侧最多渲染 3 条（数据侧已裁剪，这里再兜底截断） */
+  private parseOngoing(): CardItem2x4[] {
     try {
-      const all: CardItem2x4[] = JSON.parse(this.eventsJson) as CardItem2x4[];
-      return all.slice(0, 4);
+      const all: CardItem2x4[] = JSON.parse(this.ongoingJson) as CardItem2x4[];
+      return all.slice(0, 3);
     } catch (err) {
       return [];
     }
   }
 
-  /** 右上角添加按钮：拉起 App 直接进入新建日程页（阻止冒泡，避免同时打开 App 首页） */
+  /** 右上角添加按钮：拉起 App 直接进入新建日程页（兄弟节点布局，点击不会冒泡到左侧日期区） */
   @Builder
   addButton() {
     Button() {
       Text('＋')
-        .fontSize(16)
+        .fontSize(20)
         .fontWeight(FontWeight.Medium)
         .fontColor('#FFFFFF')
     }
-    .width(26)
-    .height(26)
-    .borderRadius(13)
+    .width(30)
+    .height(30)
+    .borderRadius(15)
     .padding(0)
     .backgroundColor('#007DFF')
     .onClick(() => {
@@ -57,120 +57,7 @@ struct Widget4x2Card {
     })
   }
 
-  /** 全天事件行：圆角矩形 + 左侧日历色竖条 + 标题 + “全天”标记（无时间轴） */
-  @Builder
-  buildAllDayRow(item: CardItem2x4) {
-    Row({ space: 8 }) {
-      Column()
-        .width(3)
-        .height(16)
-        .borderRadius(2)
-        .backgroundColor(item.color)
-      Text(item.title)
-        .fontSize(12)
-        .fontColor('#1A1A1A')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-      Text('全天')
-        .fontSize(9)
-        .fontColor('#FFFFFF')
-        .backgroundColor(item.color)
-        .borderRadius(6)
-        .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-      if (item.calName !== '') {
-        Text(item.calName)
-          .fontSize(9)
-          .fontColor(item.color)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '25%' })
-      }
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-    .borderRadius(8)
-    .backgroundColor('#F5F7FA')
-  }
-
-  /** 当前时间红线标记：左侧红点 + 贯穿整行的红色细线 */
-  @Builder
-  nowLine() {
-    Row() {
-      Column()
-        .width(6)
-        .height(6)
-        .borderRadius(3)
-        .backgroundColor('#FF3B30')
-      Column()
-        .height(2)
-        .layoutWeight(1)
-        .backgroundColor('#FF3B30')
-        .borderRadius(1)
-    }
-    .width('100%')
-    .padding({ top: 3, bottom: 3 })
-  }
-
-  /** 有时间事件行（时间轴）：圆角矩形 + 左色竖条 + 开始时间(上)-竖线-结束时间(下) + 标题 */
-  @Builder
-  buildTimedRow(item: CardItem2x4) {
-    Row({ space: 8 }) {
-      Column()
-        .width(3)
-        .height(36)
-        .borderRadius(2)
-        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
-      // 时间列：开始时间在上、结束时间在下、中间竖线连接
-      Column({ space: 2 }) {
-        Text(item.time)
-          .fontSize(10)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(item.isNow ? '#FF3B30' : '#333333')
-        Column()
-          .width(1.5)
-          .layoutWeight(1)
-          .backgroundColor('#D8D8D8')
-          .borderRadius(1)
-        Text(item.endTime)
-          .fontSize(10)
-          .fontColor('#999999')
-      }
-      .width(38)
-      .alignItems(HorizontalAlign.Center)
-      .height(36)
-      Text(item.title)
-        .fontSize(12)
-        .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-      if (item.isNow) {
-        Text('● 进行中')
-          .fontSize(9)
-          .fontColor('#FF3B30')
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .borderRadius(4)
-          .backgroundColor('#FFECEA')
-      }
-      if (item.calName !== '') {
-        Text(item.calName)
-          .fontSize(9)
-          .fontColor(item.color)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '25%' })
-      }
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-    .borderRadius(8)
-    .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
-  }
-
-  /** 卡片"打开 App"：点击日期区或日程列表触发；添加按钮是 header 行的兄弟节点，其点击不会冒泡到这里 */
+  /** 卡片"打开 App"：点击左侧日期区、今日条数区、右侧日程区触发；添加按钮是 header 行兄弟节点，不冒泡 */
   private openApp(): void {
     postCardAction(this, {
       action: 'router',
@@ -179,72 +66,178 @@ struct Widget4x2Card {
     });
   }
 
+  /** 右侧"正在进行 / 下一个"单条：左色竖条 + 时间列 + 标题 + 日历本名；进行中用红色高亮 */
+  @Builder
+  ongoingRow(item: CardItem2x4) {
+    Row({ space: 7 }) {
+      Column()
+        .width(3)
+        .height(34)
+        .borderRadius(2)
+        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
+      Column({ space: 2 }) {
+        Text(item.time)
+          .fontSize(9)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(item.isNow ? '#FF3B30' : '#333333')
+          .maxLines(1)
+        if (item.endTime !== '' && item.endTime !== '全天') {
+          Text(item.endTime)
+            .fontSize(9)
+            .fontColor('#999999')
+            .maxLines(1)
+        }
+      }
+      .width(34)
+      .alignItems(HorizontalAlign.Start)
+      Column({ space: 2 }) {
+        Text(item.title)
+          .fontSize(12)
+          .fontWeight(item.isNow ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Row({ space: 4 }) {
+          if (item.isNow) {
+            Text('● 进行中')
+              .fontSize(8)
+              .fontColor('#FF3B30')
+              .padding({ left: 4, right: 4, top: 0, bottom: 0 })
+              .borderRadius(4)
+              .backgroundColor('#FFECEA')
+          } else {
+            Text('即将开始')
+              .fontSize(8)
+              .fontColor('#8A8A8A')
+              .padding({ left: 4, right: 4, top: 0, bottom: 0 })
+              .borderRadius(4)
+              .backgroundColor('#F0F1F3')
+          }
+          if (item.calName !== '') {
+            Text(item.calName)
+              .fontSize(8)
+              .fontColor(item.color)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: '55%' })
+          }
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .padding({ left: 7, right: 7, top: 4, bottom: 4 })
+    .borderRadius(8)
+    .backgroundColor(item.isNow ? '#FFF5F4' : '#F5F7FA')
+  }
+
+  /** 右侧空态：今日无日程 / 日程已全部结束 */
+  @Builder
+  emptyHint() {
+    Column() {
+      Text(this.todayCount === 0 ? '今日暂无日程' : '今日日程已结束')
+        .fontSize(12)
+        .fontColor('#8A8A8A')
+        .maxLines(2)
+        .textAlign(TextAlign.Center)
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => this.openApp())
+  }
+
   build() {
-    Column({ space: 4 }) {
-      Row({ space: 6 }) {
+    Row({ space: 10 }) {
+      // ===== 左半：与 2x2 一致（日期 / 星期 + 农历 / 今日条数大数字） =====
+      Column({ space: 6 }) {
         Row({ space: 6 }) {
-          Text(this.dateText)
-            .fontSize(14)
+          Column({ space: 2 }) {
+            Text(this.dateMd === '' ? this.dateText : this.dateMd)
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#1A1A1A')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(`${this.weekday === '' ? '' : this.weekday + '  '}${this.lunarText}`)
+              .fontSize(10)
+              .fontColor('#8A8A8A')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          .onClick(() => this.openApp())
+
+          this.addButton()
+        }
+        .width('100%')
+
+        Divider()
+          .strokeWidth(0.5)
+          .color('#E5E5E5')
+
+        Row({ space: 6 }) {
+          Text(`${this.todayCount}`)
+            .fontSize(38)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#1A1A1A')
-            .maxLines(1)
-          Text(this.lunarText)
-            .fontSize(11)
-            .fontColor('#8A8A8A')
-            .maxLines(1)
-        }
-        .onClick(() => this.openApp())
-        Blank()
-        this.addButton()
-      }
-      .width('100%')
-
-      Divider().strokeWidth(0.5).color('#E5E5E5')
-
-      if (this.parseItems().length === 0) {
-        Column() {
-          Text('暂无日程')
-            .fontSize(13)
-            .fontColor('#8A8A8A')
-        }
-        .width('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-        .onClick(() => this.openApp())
-      } else {
-        List({ space: 4 }) {
-          ForEach(this.parseItems(), (item: CardItem2x4, idx: number) => {
-            ListItem() {
-              Column({ space: 3 }) {
-                if (item.showDate) {
-                  Text(item.date)
-                    .fontSize(10)
-                    .fontWeight(FontWeight.Bold)
-                    .fontColor('#666666')
-                    .width('100%')
-                }
-                if (item.showNowLine && !item.nowLineBelow) {
-                  this.nowLine()
-                }
-                if (item.time === '全天') {
-                  this.buildAllDayRow(item)
-                } else {
-                  this.buildTimedRow(item)
-                }
-                if (item.nowLineBelow) {
-                  this.nowLine()
-                }
+            .fontColor('#007DFF')
+          Column({ space: 2 }) {
+            Row({ space: 4 }) {
+              if (this.ongoingCount > 0) {
+                Column()
+                  .width(7)
+                  .height(7)
+                  .borderRadius(4)
+                  .backgroundColor('#FF3B30')
               }
-              .width('100%')
+              Text(this.ongoingCount > 0 ? `进行中 ${this.ongoingCount}` : '今日日程')
+                .fontSize(11)
+                .fontColor(this.ongoingCount > 0 ? '#FF3B30' : '#1A1A1A')
+                .maxLines(1)
             }
-          }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}`)
+            Text(this.todayCount === 0 ? '点击添加' : '点击查看')
+              .fontSize(9)
+              .fontColor('#8A8A8A')
+              .maxLines(1)
+          }
+          .alignItems(HorizontalAlign.Start)
         }
         .width('100%')
         .layoutWeight(1)
-        .scrollBar(BarState.Off)
-        .cachedCount(4)
+        .alignItems(VerticalAlign.Center)
         .onClick(() => this.openApp())
       }
+      .layoutWeight(1)
+      .height('100%')
+
+      Divider()
+        .vertical(true)
+        .height('92%')
+        .strokeWidth(0.5)
+        .color('#E5E5E5')
+
+      // ===== 右半：正在进行 / 下一个（不滚动，最多 3 条）=====
+      Column() {
+        if (this.parseOngoing().length === 0) {
+          this.emptyHint()
+        } else {
+          Column({ space: 5 }) {
+            ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
+              this.ongoingRow(item)
+            }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}`)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => this.openApp())
+        }
+      }
+      .layoutWeight(1)
+      .height('100%')
     }
     .width('100%')
     .height('100%')

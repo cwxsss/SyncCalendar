@@ -36,6 +36,8 @@ export class CardData {
   weekday: string = '';
   todayCount: number = 0;
   ongoingCount: number = 0; // 此刻正在进行的日程条数（2x2 卡片红点提示用）
+  // 2x4 卡片右侧「正在进行」列表：与 eventsJson 同结构（CardItem[]），只含此刻进行中/下一个日程
+  ongoingJson: string = '[]';
 }
 
 export class CardDataService {
@@ -149,6 +151,8 @@ export class CardDataService {
       const dayKey = (ms: number): number => CardDataService.startOfDay(ms);
       const spansDays = (e: DisplayEvent): boolean =>
         dayKey(e.endTime) > dayKey(e.startTime);
+      // 已开始的跨天日程按全天展示（不参与时间轴定位）
+      const isDayLong = (e: DisplayEvent): boolean => e.isAllDay || spansDays(e);
       const groups = new Map<number, DisplayEvent[]>();
       for (const e of upcoming) {
         // 跨天且已开始：归今天；其余归开始日
@@ -244,7 +248,41 @@ export class CardDataService {
       data.eventsJson = JSON.stringify(items);
       // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
       data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;
-      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条`);
+
+      // ===== 2x4 卡片右侧：正在进行 / 下一个 日程（最多 3 条，作为 2x2 的右侧扩展）=====
+      // 规则：① 进行中或已开始未结束的（含全天/跨天，按 0 点起算）优先，最多 2 条；
+      //      ② 不足时用"今天还没开始的下一个有时间日程"补 1 条。全部按开始时间升序。
+      const floorMs = Math.max(nowMs, todayKey);
+      const ongoingAll: DisplayEvent[] = upcoming
+        .filter((e: DisplayEvent): boolean => e.startTime <= nowMs && e.endTime > floorMs)
+        .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+      let ongoingPick: DisplayEvent[] = ongoingAll.slice(0, 2);
+      if (ongoingPick.length < 2) {
+        const next: DisplayEvent | undefined = upcoming
+          .filter((e: DisplayEvent): boolean => !isDayLong(e) && e.startTime > nowMs)
+          .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime)[0];
+        if (next !== undefined) {
+          ongoingPick = ongoingPick.concat([next]);
+        }
+      }
+      const ongoingItems: CardItem[] = [];
+      for (const e of ongoingPick) {
+        const dayLong: boolean = isDayLong(e);
+        const ds = new Date(e.startTime);
+        const de = new Date(e.endTime);
+        const oi = new CardItem();
+        oi.title = e.title === '' ? '(无标题)' : e.title;
+        oi.time = dayLong ? '全天' : `${p(ds.getHours())}:${p(ds.getMinutes())}`;
+        oi.endTime = dayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
+        oi.calName = e.calName;
+        oi.color = e.color;
+        oi.startMs = e.startTime;
+        oi.endMs = e.endTime;
+        oi.isNow = e.startTime <= nowMs && e.endTime > nowMs;
+        ongoingItems.push(oi);
+      }
+      data.ongoingJson = JSON.stringify(ongoingItems);
+      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }
