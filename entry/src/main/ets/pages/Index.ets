@@ -32,6 +32,9 @@ class MonthCell {
 
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
+/** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
+const VIEW_ORDER: string[] = ['month', 'week', 'agenda'];
+
 @Entry
 @Component
 struct Index {
@@ -53,6 +56,7 @@ struct Index {
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
+  private navDir: number = 1; // 视图切换方向：1 前进（向下钻取），-1 后退（向上回退）
   private autoSyncTimer: number = -1;
   private nowTimer: number = -1; // 红线位置"播放"计时器（每 30s 刷新 nowMs）
   private agendaScroller: Scroller = new Scroller(); // 列表视图滚动控制器：加载后定位到"当前时刻（红线）"
@@ -1030,15 +1034,9 @@ struct Index {
       this.modeTab('month', '月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
-      this.modeTab('todo', '待办')
       Blank()
       if (this.mode === 'month') {
         Text(this.fmtMonthTitle())
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-      } else if (this.mode === 'todo') {
-        Text(`${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length} 项未完成`)
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
@@ -1068,12 +1066,64 @@ struct Index {
       })
   }
 
-  /** 切换视图：进入列表视图时按需加载（今天整天 ~ 未来2年，昨天之前已结束的不显示） */
+  /** 视图切换：进入列表视图时按需加载（今天整天 ~ 未来2年，昨天之前已结束的不显示）
+   *  切换带转场动画：按视图顺序决定"前进/后退"方向 */
   private async handleModeSwitch(key: string): Promise<void> {
-    this.mode = key;
+    if (key !== this.mode) {
+      this.navDir = VIEW_ORDER.indexOf(key) > VIEW_ORDER.indexOf(this.mode) ? 1 : -1;
+      this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, (): void => {
+        this.mode = key;
+      });
+    }
     if (key === 'agenda') {
       await this.ensureAgendaData();
       this.scrollAgendaToNow();
+    }
+  }
+
+  /** 带转场动画切换视图（手势用）：只处理 月↔周 */
+  private switchModeAnimated(target: string): void {
+    if (this.mode === target) {
+      return;
+    }
+    this.navDir = VIEW_ORDER.indexOf(target) > VIEW_ORDER.indexOf(this.mode) ? 1 : -1;
+    this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, (): void => {
+      this.mode = target;
+    });
+  }
+
+  /** 视图内容转场：前进时旧内容上移淡出、新内容自下而上淡入；后退则方向相反 */
+  private modeTransition(): TransitionEffect {
+    const fwd: boolean = this.navDir >= 0;
+    const appear: TransitionEffect = TransitionEffect.OPACITY.combine(
+      TransitionEffect.translate({ y: fwd ? 48 : -48 }));
+    const disappear: TransitionEffect = TransitionEffect.OPACITY.combine(
+      TransitionEffect.translate({ y: fwd ? -48 : 48 }));
+    return TransitionEffect.asymmetric(appear, disappear);
+  }
+
+  /** 判定"上滑"：兼容 angle 的 -180~180 与 0~360 两种取值区间 */
+  private isSwipeUp(event: GestureEvent): boolean {
+    const a: number = event.angle;
+    if (a >= -135 && a <= 135) {
+      return a < 0;
+    }
+    return a > 0;
+  }
+
+  /** 判定"左滑"（→ 前进/下一天/下一周） */
+  private isSwipeLeft(event: GestureEvent): boolean {
+    return Math.abs(event.angle) > 90;
+  }
+
+  /** 周视图：日程区左右滑 → 按天切换（一次 1 天）；跨月时重载该月数据 */
+  private switchDay(delta: number): void {
+    this.selectedDate += delta * 86400000;
+    const d = new Date(this.selectedDate);
+    if (d.getFullYear() !== this.displayYear || d.getMonth() !== this.displayMonth) {
+      this.displayYear = d.getFullYear();
+      this.displayMonth = d.getMonth();
+      this.reloadEvents();
     }
   }
 
@@ -1215,6 +1265,13 @@ struct Index {
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
+    // 上半区（周条）左右滑 → 按周切换（左滑下一周、右滑上一周）
+    .gesture(
+      SwipeGesture({ direction: SwipeDirection.Horizontal })
+        .onAction((event: GestureEvent) => {
+          this.switchWeek(this.isSwipeLeft(event) ? 1 : -1);
+        })
+    )
   }
 
   private weekStripDays(): MonthCell[] {
@@ -1263,6 +1320,7 @@ struct Index {
       }
       .width('100%')
       .layoutWeight(1)
+      .transition(this.modeTransition())
     } else {
       // 竖屏：月历在上、当日日程在下（保持原布局）
       Column() {
@@ -1273,6 +1331,7 @@ struct Index {
       }
       .width('100%')
       .layoutWeight(1)
+      .transition(this.modeTransition())
     }
   }
 
@@ -1321,6 +1380,15 @@ struct Index {
     .onChange((index: number) => {
       this.handleSwiperChange(index);
     })
+    // 上划月份网格 → 切到周视图（带动画）；水平滑动仍由 Swiper 负责翻月
+    .gesture(
+      SwipeGesture({ direction: SwipeDirection.Vertical })
+        .onAction((event: GestureEvent) => {
+          if (this.isSwipeUp(event)) {
+            this.switchModeAnimated('week');
+          }
+        })
+    )
   }
 
   /** 当日日程标题行（长按可触发重复日程调试） */
@@ -1537,6 +1605,15 @@ struct Index {
         }
         .layoutWeight(1)
         .height('100%')
+        // 左栏整块（"本周"行 + 一周日期）下滑 → 回到月视图（带动画）
+        .gesture(
+          SwipeGesture({ direction: SwipeDirection.Vertical })
+            .onAction((event: GestureEvent) => {
+              if (!this.isSwipeUp(event)) {
+                this.switchModeAnimated('month');
+              }
+            })
+        )
 
         Divider()
           .vertical(true)
@@ -1553,60 +1630,53 @@ struct Index {
       }
       .width('100%')
       .layoutWeight(1)
-      .gesture(
-        SwipeGesture({ direction: SwipeDirection.Horizontal })
-          .onAction((event: GestureEvent) => {
-            if (Math.abs(event.angle) > 90) {
-              this.switchWeek(1);
-            } else {
-              this.switchWeek(-1);
-            }
-          })
-      )
+      .transition(this.modeTransition())
     } else {
       // 竖屏：保持原上下结构
       Column() {
-        Row({ space: 16 }) {
-          Blank()
-          Text('本周')
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_primary'))
-            .onClick(() => {
-              this.goThisWeek();
+        // 顶部整块（"本周"行 + 一周七天 + 日期行）下滑 → 回到月视图（带动画）
+        Column() {
+          Row({ space: 16 }) {
+            Blank()
+            Text('本周')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_primary'))
+              .onClick(() => {
+                this.goThisWeek();
+              })
+            Blank()
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 4, bottom: 4 })
+
+          this.weekStrip()
+
+          Row({ space: 8 }) {
+            Text(this.fmtDateCn(this.selectedDate))
+              .fontSize(13)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.text_secondary'))
+            Blank()
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 8 })
+        }
+        .width('100%')
+        .gesture(
+          SwipeGesture({ direction: SwipeDirection.Vertical })
+            .onAction((event: GestureEvent) => {
+              if (!this.isSwipeUp(event)) {
+                this.switchModeAnimated('month');
+              }
             })
-          Blank()
-        }
-        .width('100%')
-        .padding({ left: 20, right: 20, top: 4, bottom: 4 })
-
-        this.weekStrip()
-
-        Row({ space: 8 }) {
-          Text(this.fmtDateCn(this.selectedDate))
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.text_secondary'))
-          Blank()
-        }
-        .width('100%')
-        .padding({ left: 20, right: 20, top: 8 })
+        )
 
         this.eventList()
       }
       .width('100%')
       .layoutWeight(1)
-      .gesture(
-        SwipeGesture({ direction: SwipeDirection.Horizontal })
-          .onAction((event: GestureEvent) => {
-            // 左滑角度约 ±180（|angle|>90）→ 下一周；右滑约 0° → 上一周（与月视图 Swiper 方向一致）
-            if (Math.abs(event.angle) > 90) {
-              this.switchWeek(1);
-            } else {
-              this.switchWeek(-1);
-            }
-          })
-      )
+      .transition(this.modeTransition())
     }
   }
 
@@ -1657,6 +1727,13 @@ struct Index {
     .align(Alignment.Top)
     .width('100%')
     .layoutWeight(1)
+    // 上半区（左侧周条）左右滑 → 按周切换
+    .gesture(
+      SwipeGesture({ direction: SwipeDirection.Horizontal })
+        .onAction((event: GestureEvent) => {
+          this.switchWeek(this.isSwipeLeft(event) ? 1 : -1);
+        })
+    )
   }
 
   /** 单日竖向时间轴滚动区（周视图 / 月视图下方共用）；DayTimelineView 自身带 Scroll 并自动定位到当前时刻 */
@@ -1683,6 +1760,16 @@ struct Index {
     .width('100%')
     .padding({ left: 12, right: 16, top: 4, bottom: 24 })
     .alignItems(HorizontalAlign.Start)
+    // 下半区（日程展示区）左右滑 → 按天切换（一次 1 天），仅周视图生效
+    .gesture(
+      SwipeGesture({ direction: SwipeDirection.Horizontal })
+        .onAction((event: GestureEvent) => {
+          if (this.mode !== 'week') {
+            return;
+          }
+          this.switchDay(this.isSwipeLeft(event) ? 1 : -1);
+        })
+    )
   }
 
   @Builder
