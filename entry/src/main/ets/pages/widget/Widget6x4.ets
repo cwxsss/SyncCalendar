@@ -27,6 +27,29 @@ struct Widget6x4Card {
     }
   }
 
+  /** 右上角添加按钮：拉起 App 直接进入新建日程页（阻止冒泡，避免同时打开 App 首页） */
+  @Builder
+  addButton() {
+    Button() {
+      Text('＋')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#FFFFFF')
+    }
+    .width(26)
+    .height(26)
+    .borderRadius(13)
+    .padding(0)
+    .backgroundColor('#007DFF')
+    .onClick(() => {
+      postCardAction(this, {
+        action: 'router',
+        abilityName: 'EntryAbility',
+        params: { widgetAction: 'add' }
+      });
+    })
+  }
+
   /** 全天事件行：圆角矩形 + 左侧日历色竖条 + 标题 + “全天”标记（无时间轴） */
   @Builder
   buildAllDayRow(item: CardItem6x4) {
@@ -113,20 +136,33 @@ struct Widget6x4Card {
     .backgroundColor('#F5F7FA')
   }
 
+  /** 卡片"打开 App"：点击日期区或日程列表触发；添加按钮是 header 行的兄弟节点，其点击不会冒泡到这里 */
+  private openApp(): void {
+    postCardAction(this, {
+      action: 'router',
+      abilityName: 'EntryAbility',
+      params: {}
+    });
+  }
+
   build() {
     Column({ space: 6 }) {
       Row({ space: 6 }) {
-        Text(this.dateText)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#1A1A1A')
-        Text(this.lunarText)
-          .fontSize(12)
-          .fontColor('#8A8A8A')
+        Row({ space: 6 }) {
+          Text(this.dateText)
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#1A1A1A')
+          Text(this.lunarText)
+            .fontSize(12)
+            .fontColor('#8A8A8A')
+        }
+        .onClick(() => this.openApp())
         Blank()
         Text('同步日历')
           .fontSize(10)
           .fontColor('#B0B0B0')
+        this.addButton()
       }
       .width('100%')
 
@@ -143,6 +179,7 @@ struct Widget6x4Card {
         .width('100%')
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
+        .onClick(() => this.openApp())
       } else {
         List({ space: 4 }) {
           ForEach(this.parseItems(), (item: CardItem6x4, idx: number) => {
@@ -169,6 +206,7 @@ struct Widget6x4Card {
         .layoutWeight(1)
         .scrollBar(BarState.Auto)
         .cachedCount(12)
+        .onClick(() => this.openApp())
       }
     }
     .width('100%')
@@ -176,12 +214,5 @@ struct Widget6x4Card {
     .padding(14)
     .backgroundColor('#FFFFFF')
     .borderRadius(16)
-    .onClick(() => {
-      postCardAction(this, {
-        action: 'router',
-        abilityName: 'EntryAbility',
-        params: {}
-      });
-    })
   }
 }

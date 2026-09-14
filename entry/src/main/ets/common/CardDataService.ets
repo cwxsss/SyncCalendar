@@ -24,6 +24,10 @@ export class CardData {
   eventsJson: string = '[]';
   dateText: string = '';
   lunarText: string = '';
+  // 2x2 卡片强化：月-日（x月x日，年份冗余故省略）/ 星期 / 今日日程条数
+  dateMd: string = '';
+  weekday: string = '';
+  todayCount: number = 0;
 }
 
 export class CardDataService {
@@ -110,13 +114,17 @@ export class CardDataService {
 
   /** 组装卡片数据（异步：查询本地库） */
   static async buildCardData(context: common.Context): Promise<CardData> {
-    const data = new CardData();
-    try {
-      LogUtil.init(context);
-      const now = new Date();
-      const weekCn: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-      data.dateText = `${now.getMonth() + 1}月${now.getDate()}日 ${weekCn[now.getDay()]}`;
-      data.lunarText = LunarUtil.lunarDayText(now.getTime());
+      const data = new CardData();
+      try {
+        LogUtil.init(context);
+        const now = new Date();
+        const weekCn: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+        const fullWeekCn: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+        data.dateText = `${now.getMonth() + 1}月${now.getDate()}日 ${weekCn[now.getDay()]}`;
+        data.lunarText = LunarUtil.lunarDayText(now.getTime());
+        // 2x2 卡片强化字段：月-日（x月x日，年份冗余省略）、星期全名、今日日程条数
+        data.dateMd = `${now.getMonth() + 1}月${now.getDate()}日`;
+        data.weekday = fullWeekCn[now.getDay()];
       const start: number = CardDataService.startOfDay(now.getTime());
       const end: number = start + 60 * 86400000;
       const sources = await CalendarDataService.loadSources(context);
@@ -188,7 +196,9 @@ export class CardDataService {
         }
       }
       data.eventsJson = JSON.stringify(items);
-      LogUtil.write(`卡片数据刷新：${items.length} 条`);
+      // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
+      data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;
+      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }

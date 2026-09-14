@@ -58,6 +58,8 @@ struct Index {
   private permissionAsked: boolean = false;
   @State detailShow: boolean = false; // 只读日程详情半屏弹层
   @State detailEvent: DisplayEvent | null = null;
+  // 服务卡片"添加"按钮深链：EntryAbility 写入，本页读取后拉起新建日程页
+  @Watch('onWidgetActionChange') @StorageLink('widgetAction') widgetAction: string = '';
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -97,9 +99,25 @@ struct Index {
 
   /** 从设置页/账号页返回时刷新（同步间隔、系统日历开关立即生效），并处理编辑账号后的待同步 */
   onPageShow(): void {
+    // 卡片"添加"按钮深链：首次冷启动经 onCreate→AppStorage 落到这里消费
+    this.consumeWidgetAction();
     // 无条件刷新：之前"列表为空就跳过"的条件会导致账号列表卡死在空状态，
     // 同步时误报"没有可同步的账号"
     this.reloadAll().then((): Promise<void> => this.handlePendingSync());
+  }
+
+  /** 卡片深链监听（App 已在后台运行时，onNewWant 改写 AppStorage 触发） */
+  private onWidgetActionChange(): void {
+    this.consumeWidgetAction();
+  }
+
+  /** 消费卡片"添加"深链：拉起新建日程页并立即清除标记，避免重复触发 */
+  private consumeWidgetAction(): void {
+    const action: string = AppStorage.get<string>('widgetAction') ?? '';
+    if (action === 'add') {
+      AppStorage.setOrCreate<string>('widgetAction', '');
+      this.addEvent();
+    }
   }
 
   private async handlePendingSync(): Promise<void> {

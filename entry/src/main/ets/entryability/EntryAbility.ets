@@ -16,6 +16,8 @@ export default class EntryAbility extends UIAbility {
     LogUtil.write('---- App 启动 ----');
     // 后台同步：注册延迟任务兜底 + 按设置恢复长时任务
     BackgroundSyncService.initOnLaunch(this.context);
+    // 服务卡片"添加"按钮跳转：把 widgetAction=add 透传给主页面（在 AppStorage 中暂存）
+    this.handleWidgetParam(want);
     // 申请通知权限：日程提醒、后台同步常驻通知都依赖它（系统只弹一次授权框）
     notificationManager.isNotificationEnabled()
       .then((enabled: boolean): Promise<void> => {
@@ -30,6 +32,24 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
+  }
+
+  /** 卡片"添加"按钮已在后台运行时再次点击：同样把 widgetAction 透传给主页面 */
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onNewWant');
+    this.handleWidgetParam(want);
+  }
+
+  /** 读取卡片深链参数：widgetAction=add 时写入 AppStorage，供 Index 页面拉起新建日程页 */
+  private handleWidgetParam(want: Want): void {
+    const params = want.parameters;
+    if (params !== undefined) {
+      const raw = params['widgetAction'];
+      if (typeof raw === 'string' && raw === 'add') {
+        AppStorage.setOrCreate<string>('widgetAction', 'add');
+        LogUtil.write('卡片添加入口：已设置 widgetAction=add');
+      }
+    }
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
