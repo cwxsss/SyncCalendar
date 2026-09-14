@@ -7,6 +7,7 @@ import { preferences } from '@kit.ArkData';
 import { CalendarDataService, DisplayEvent } from './CalendarDataService';
 import { LunarUtil } from './LunarUtil';
 import { LogUtil } from './LogUtil';
+import { TimelineUtil, DayTimeline } from './TimelineUtil';
 
 /** 卡片单条日程（按天分组：组内全天事件在前、有时间的按开始时间排序） */
 export class CardItem {
@@ -26,6 +27,14 @@ export class CardItem {
   nowLineBelow: boolean = false; // 今天所有有时间日程已结束：红线画在最后一条下方
 }
 
+/** 卡片「全天/跨天」日程（**必须带 eventKey**，否则卡片侧 ForEach 的 key 会重复 → 只渲染出第一条） */
+export class CardAllDay {
+  eventKey: string = '';
+  title: string = '';
+  color: string = '#007DFF';
+  isAllDay: boolean = true;
+}
+
 /** 卡片整体数据 */
 export class CardData {
   eventsJson: string = '[]';
@@ -38,6 +47,15 @@ export class CardData {
   ongoingCount: number = 0; // 此刻正在进行的日程条数（2x2 卡片红点提示用）
   // 2x4 卡片右侧「正在进行」列表：与 eventsJson 同结构（CardItem[]），只含此刻进行中/下一个日程
   ongoingJson: string = '[]';
+  // 4x4 / 6x4 卡片：今日 0-23 时间轴（TimelineBlock[] JSON）与当前时间纵向比例
+  timelineJson: string = '[]';
+  nowRatio: number = 0;    // 当前时间在当天时间轴上的比例（0~1），卡片画红线用
+  nowLabel: string = '';   // 当前时间文字（如 '14:05'）
+  allDayJson: string = '[]'; // 全天/跨天日程（CardAllDay[] JSON，卡片画在最上方）
+  // ===== 卡片翻页（上一天 / 下一天 / 回到今天）=====
+  dayOffset: number = 0;    // 相对今天的天数偏移（0=今天）
+  isToday: boolean = true;  // 当前显示的是否为今天（非今天不画红线）
+  dayCount: number = 0;     // 当前显示日的日程条数（含全天）
 }
 
 export class CardDataService {
@@ -47,6 +65,19 @@ export class CardDataService {
   // formIds 持久化（App 重启后内存注册表会清空，从 preferences 恢复，保证推送不丢卡片）
   private static readonly PREF_STORE: string = 'card_form_ids';
   private static readonly PREF_KEY: string = 'form_ids';
+  // 每张卡片的"翻页偏移"（formId → 相对今天的天数）。卡片不能滚动，靠翻页看别的日期。
+  // 放在这里是为了让 FormExtension（按钮翻页）与 App 内刷新共用同一份状态。
+  private static offsets: Map<string, number> = new Map<string, number>();
+
+  static setDayOffset(formId: string, off: number): void {
+    CardDataService.offsets.set(formId, off);
+  }
+  static getDayOffset(formId: string): number {
+    return CardDataService.offsets.get(formId) ?? 0;
+  }
+  static clearDayOffset(formId: string): void {
+    CardDataService.offsets.delete(formId);
+  }
 
   /** 注册卡片：内存 + 持久化 */
   static async registerForm(context: common.Context, formId: string): Promise<void> {
@@ -96,11 +127,21 @@ export class CardDataService {
     if (CardDataService.formIds.length === 0) {
       return;
     }
-    const data: CardData = await CardDataService.buildCardData(context);
-    const binding: formBindingData.FormBindingData =
-      formBindingData.createFormBindingData(data);
+    // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
+    const cache: Map<number, formBindingData.FormBindingData> =
+      new Map<number, formBindingData.FormBindingData>();
+    const fallback: formBindingData.FormBindingData =
+      formBindingData.createFormBindingData(await CardDataService.buildCardData(context, 0));
+    cache.set(0, fallback);
     const stale: string[] = [];
     for (const formId of CardDataService.formIds) {
+      const off: number = CardDataService.getDayOffset(formId);
+      let binding: formBindingData.FormBindingData | undefined = cache.get(off);
+      if (binding === undefined) {
+        binding = formBindingData.createFormBindingData(
+          await CardDataService.buildCardData(context, off));
+        cache.set(off, binding);
+      }
       try {
         await formProvider.updateForm(formId, binding);
       } catch (err) {
@@ -123,20 +164,29 @@ export class CardDataService {
   }
 
   /** 组装卡片数据（异步：查询本地库） */
-  static async buildCardData(context: common.Context): Promise<CardData> {
+  /** 构建卡片数据。
+   *  @param dayOffset 相对"今天"的天数偏移（卡片翻页用：负数=过去，0=今天，正数=未来）
+   *                   非今天时不输出 nowRatio（红线不显示）。 */
+  static async buildCardData(context: common.Context, dayOffset: number = 0): Promise<CardData> {
       const data = new CardData();
       try {
         LogUtil.init(context);
         const now = new Date();
         const weekCn: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
         const fullWeekCn: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-        data.dateText = `${now.getMonth() + 1}月${now.getDate()}日 ${weekCn[now.getDay()]}`;
-        data.lunarText = LunarUtil.lunarDayText(now.getTime());
-        // 2x2 卡片强化字段：月-日（x月x日，年份冗余省略）、星期全名、今日日程条数
-        data.dateMd = `${now.getMonth() + 1}月${now.getDate()}日`;
-        data.weekday = fullWeekCn[now.getDay()];
-      const start: number = CardDataService.startOfDay(now.getTime());
-      const end: number = start + 60 * 86400000;
+        const todayStart: number = CardDataService.startOfDay(now.getTime());
+        const baseStart: number = todayStart + dayOffset * 86400000; // 当前卡片显示的"那一天"0 点
+        const base: Date = new Date(baseStart);
+        const prefix: string = dayOffset === 0 ? '今天 ' : (dayOffset === 1 ? '明天 ' :
+          (dayOffset === -1 ? '昨天 ' : ''));
+        data.dateText = `${prefix}${base.getMonth() + 1}月${base.getDate()}日 ${weekCn[base.getDay()]}`;
+        data.lunarText = LunarUtil.lunarDayText(baseStart);
+        data.dateMd = `${base.getMonth() + 1}月${base.getDate()}日`;
+        data.weekday = fullWeekCn[base.getDay()];
+        data.dayOffset = dayOffset;
+        data.isToday = dayOffset === 0;
+      const start: number = baseStart < todayStart ? baseStart : todayStart;
+      const end: number = (baseStart > todayStart ? baseStart : todayStart) + 60 * 86400000;
       const sources = await CalendarDataService.loadSources(context);
       const events: DisplayEvent[] = await CalendarDataService.loadEvents(context, start, end, sources);
       // 1) 过滤：保留"今天 0 点以来"的日程（今天已结束的也显示，否则重复日程的
@@ -249,22 +299,14 @@ export class CardDataService {
       // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
       data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;
 
-      // ===== 2x4 卡片右侧：正在进行 / 下一个 日程（最多 3 条，作为 2x2 的右侧扩展）=====
-      // 规则：① 进行中或已开始未结束的（含全天/跨天，按 0 点起算）优先，最多 2 条；
-      //      ② 不足时用"今天还没开始的下一个有时间日程"补 1 条。全部按开始时间升序。
-      const floorMs = Math.max(nowMs, todayKey);
-      const ongoingAll: DisplayEvent[] = upcoming
-        .filter((e: DisplayEvent): boolean => e.startTime <= nowMs && e.endTime > floorMs)
+      // ===== 2x4 卡片右侧：**当前时间之后最近的 2 条**日程 =====
+      // 规则：只取"还没开始"的有时间日程（startTime >= now），
+      //      **排除全天 / 跨天**，按开始时间升序取前 2 条。
+      //      不再区分"进行中 / 即将开始" —— 卡片上不再显示这些字样。
+      const upcomingNext: DisplayEvent[] = upcoming
+        .filter((e: DisplayEvent): boolean => !isDayLong(e) && e.startTime >= nowMs)
         .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
-      let ongoingPick: DisplayEvent[] = ongoingAll.slice(0, 2);
-      if (ongoingPick.length < 2) {
-        const next: DisplayEvent | undefined = upcoming
-          .filter((e: DisplayEvent): boolean => !isDayLong(e) && e.startTime > nowMs)
-          .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime)[0];
-        if (next !== undefined) {
-          ongoingPick = ongoingPick.concat([next]);
-        }
-      }
+      const ongoingPick: DisplayEvent[] = upcomingNext.slice(0, 2);
       const ongoingItems: CardItem[] = [];
       for (const e of ongoingPick) {
         const dayLong: boolean = isDayLong(e);
@@ -278,11 +320,33 @@ export class CardDataService {
         oi.color = e.color;
         oi.startMs = e.startTime;
         oi.endMs = e.endTime;
-        oi.isNow = e.startTime <= nowMs && e.endTime > nowMs;
+        oi.isNow = false;
         ongoingItems.push(oi);
       }
       data.ongoingJson = JSON.stringify(ongoingItems);
-      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条`);
+      // ===== 4x4 / 6x4 卡片：**当前显示日**的时间轴（色块按时间平铺，冲突分列）=====
+      const dayEvents: DisplayEvent[] = events.filter((e: DisplayEvent): boolean =>
+        e.startTime < baseStart + 86400000 && e.endTime > baseStart);
+      const tl: DayTimeline = TimelineUtil.build(dayEvents, baseStart);
+      TimelineUtil.markNow(tl.blocks, nowMs);
+      data.timelineJson = JSON.stringify(tl.blocks);
+      // 注意：不能直接 stringify(DisplayEvent) —— 它没有 eventKey 字段，
+      // 卡片侧 ForEach 会拿到 undefined 导致 key 重复（表现为"全天只显示一条"）
+      const allDayItems: CardAllDay[] = [];
+      for (const e of tl.allDay) {
+        const ad = new CardAllDay();
+        ad.eventKey = TimelineUtil.keyOf(e);
+        ad.title = e.title === '' ? '(无标题)' : e.title;
+        ad.color = e.color;
+        ad.isAllDay = e.isAllDay;
+        allDayItems.push(ad);
+      }
+      data.allDayJson = JSON.stringify(allDayItems);
+      // 只有"今天"才给红线比例；翻到别的日期时给 -1（卡片侧 nowR<0 → 不画红线）
+      data.nowRatio = data.isToday ? TimelineUtil.nowRatio(nowMs) : -1;
+      data.nowLabel = TimelineUtil.nowLabel(nowMs);
+      data.dayCount = tl.blocks.length + tl.allDay.length;
+      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }

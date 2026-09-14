@@ -3,7 +3,7 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { DavAccount, AccountStore, TYPE_KEYS, TYPE_CALDAV, TYPE_CARDDAV, TYPE_WEBDAV } from '../common/AccountStore';
+import { DavAccount, AccountStore, TYPE_KEYS, TYPE_CALDAV, TYPE_CARDDAV } from '../common/AccountStore';
 import { SyncEngine } from '../common/SyncEngine';
 import { EditNavParams } from './EditAccountPage';
 import { EventDb } from '../common/EventDb';
@@ -15,7 +15,6 @@ import { ScreenKeeper } from '../common/ScreenKeeper';
 @Component
 struct AccountsPage {
   @State accounts: DavAccount[] = [];
-  @State showTypeMenu: boolean = false;
   @State syncing: boolean = false;
   @State syncingId: string = '';
 
@@ -103,9 +102,9 @@ struct AccountsPage {
     }
   }
 
-  private openAddPage(type: string): void {
-    this.showTypeMenu = false;
-    AppStorage.setOrCreate<string>('pendingAccountType', type);
+  private openAddPage(): void {
+    // 目前只支持 CalDAV：点 + 直接进入添加 CalDAV 账号页（不再弹类型选择菜单）
+    AppStorage.setOrCreate<string>('pendingAccountType', TYPE_CALDAV);
     router.pushUrl({ url: 'pages/AddAccountPage' });
   }
 
@@ -230,29 +229,6 @@ struct AccountsPage {
       .height('100%')
       .backgroundColor($r('app.color.page_bg'))
 
-      if (this.showTypeMenu) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .onClick(() => {
-            this.showTypeMenu = false;
-          })
-      }
-
-      if (this.showTypeMenu) {
-        Column({ space: 10 }) {
-          this.menuItem('日', 'CalDAV', '日历同步', TYPE_CALDAV)
-          this.menuItem('人', 'CardDAV', '通讯录同步', TYPE_CARDDAV)
-          this.menuItem('文', 'WebDAV', '文件访问', TYPE_WEBDAV)
-        }
-        .width(220)
-        .padding(10)
-        .borderRadius(16)
-        .backgroundColor($r('app.color.card_bg'))
-        .shadow({ radius: 16, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 4 })
-        .margin({ right: 24, bottom: 156 })
-      }
-
       Button() {
         Text('＋')
           .fontSize(26)
@@ -266,7 +242,7 @@ struct AccountsPage {
       .shadow({ radius: 8, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 2 })
       .margin(24)
       .onClick(() => {
-        this.showTypeMenu = !this.showTypeMenu;
+        this.openAddPage();
       })
     }
     .width('100%')
@@ -285,11 +261,11 @@ struct AccountsPage {
         .borderRadius(20)
         .backgroundColor($r('app.color.card_bg'))
         .border({ width: 1.5, color: $r('app.color.shadow_color') })
-      Text('还没有任何 DAV 账号')
+      Text('还没有任何 CalDAV 账号')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.text_primary'))
-      Text('点击右下角 + 添加 CalDAV / CardDAV / WebDAV 账号')
+      Text('点击右下角 + 添加 CalDAV 账号')
         .fontSize(13)
         .fontColor($r('app.color.text_secondary'))
         .textAlign(TextAlign.Center)
@@ -297,38 +273,6 @@ struct AccountsPage {
     .width('100%')
     .layoutWeight(1)
     .justifyContent(FlexAlign.Center)
-  }
-
-  @Builder
-  menuItem(badge: string, title: string, desc: string, type: string) {
-    Row({ space: 12 }) {
-      Text(badge)
-        .fontSize(16)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.brand'))
-        .width(40)
-        .height(40)
-        .textAlign(TextAlign.Center)
-        .borderRadius(10)
-        .backgroundColor($r('app.color.input_bg'))
-      Column({ space: 2 }) {
-        Text(title)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-        Text(desc)
-          .fontSize(12)
-          .fontColor($r('app.color.text_secondary'))
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding(8)
-    .borderRadius(10)
-    .onClick(() => {
-      this.openAddPage(type);
-    })
   }
 }
 

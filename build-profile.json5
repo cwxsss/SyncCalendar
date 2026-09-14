@@ -7,11 +7,11 @@
         "material": {
           "certpath": "C:\\Users\\Yongquan\\.ohos\\config\\default_SyncCalendar_0sxf9mFmzO-SlvjrtFdry7WYo0XNlBNQv53r6bYgUXU=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B33AD9F6D120B4EECB746F81D96D510F30604A697D2B980246F99EE96912DFC3993DD956CD73E60",
+          "keyPassword": "0000001B2A717AAE3B463934D7117A852F00EE5A851BE39B576A32220F81D791848450D464F2E017471F64",
           "profile": "C:\\Users\\Yongquan\\.ohos\\config\\default_SyncCalendar_0sxf9mFmzO-SlvjrtFdry7WYo0XNlBNQv53r6bYgUXU=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "C:\\Users\\Yongquan\\.ohos\\config\\default_SyncCalendar_0sxf9mFmzO-SlvjrtFdry7WYo0XNlBNQv53r6bYgUXU=.p12",
-          "storePassword": "0000001B34494825D65DEA8FE982119843372F798BDED6A2A483601114F60B9C3A947B6E08F85DB9F3BA15"
+          "storePassword": "0000001B354C1491B727A5491186A36C464DDCD646FA5ECCF62F29785D3444143FDD089E52B2A4359B8F4F"
         }
       }
     ],

@@ -32,6 +32,7 @@ struct SettingsPage {
   @State notifyEnabled: boolean = true; // 通知权限状态（提醒依赖）
   @State showFeatures: boolean = false; // 软件特性弹层
   @State showHelp: boolean = false;     // 使用帮助弹层
+  @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -57,6 +58,9 @@ struct SettingsPage {
     });
     AppSettings.getMutedReminderKeys(ctx).then((v: string[]): void => {
       this.mutedKeys = v;
+    });
+    AppSettings.getDefaultView(ctx).then((v: string): void => {
+      this.defaultView = v;
     });
     this.refreshNotifyState();
     this.loadBackupSettings();
@@ -205,8 +209,7 @@ struct SettingsPage {
       .showToast({ message: '备份目标已更新，下次同步生效' });
   }
 
-  private async saveShowSystem(value: boolean): Promise<void> {
-    if (this.context === undefined) {
+  private async saveShowSystem(value: boolean): Promise<void> {    if (this.context === undefined) {
       return;
     }
     await AppSettings.setShowSystemCalendar(this.context, value);
@@ -242,6 +245,22 @@ struct SettingsPage {
         ? (err as BusinessError).message : '请重试';
       this.getUIContext().getPromptAction().showToast({ message: `开启失败：${msg}` });
     }
+  }
+
+  private async saveDefaultView(view: string): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    this.defaultView = view;
+    await AppSettings.setDefaultView(this.context, view);
+    const label: string = view === 'month' ? '月视图' : (view === 'week' ? '周视图' : '列表视图');
+    this.getUIContext().getPromptAction()
+      .showToast({ message: `默认视图已设为「${label}」，下次打开 App 生效` });
+  }
+
+  private defaultViewLabel(): string {
+    return this.defaultView === 'month' ? '月视图'
+      : (this.defaultView === 'week' ? '周视图' : '列表视图');
   }
 
   private intervalLabel(minutes: number): string {
@@ -382,6 +401,43 @@ struct SettingsPage {
                   })
               }
             }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 默认视图：打开 App 后默认展示的视图（月/周/列表）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('默认视图')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('打开 App 后默认展示的视图（月 / 周 / 列表）')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Select([{ value: '月视图' }, { value: '周视图' }, { value: '列表视图' }] as SelectOption[])
+                .selected(this.defaultView === 'month' ? 0 : (this.defaultView === 'week' ? 1 : 2))
+                .value(this.defaultViewLabel())
+                .fontColor($r('app.color.text_primary'))
+                .font({ size: 14 })
+                .optionFont({ size: 14 })
+                .selectedOptionFont({ size: 14 })
+                .onSelect((index: number) => {
+                  const v: string = index === 0 ? 'month' : (index === 1 ? 'week' : 'agenda');
+                  if (v !== this.defaultView) {
+                    this.saveDefaultView(v);
+                  }
+                })
+            }
+            .width('100%')
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')

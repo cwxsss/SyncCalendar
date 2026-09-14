@@ -16,6 +16,31 @@ export class AppSettings {
   private static readonly KEY_MUTED_REMINDER: string = 'muted_reminder_keys';  // 提醒静音的 calKey
   private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
+  private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
+
+  /** 打开 App 后默认展示的视图：'month' | 'week' | 'agenda'（默认 month） */
+  static async getDefaultView(context: common.Context): Promise<string> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const v: string = await store.get(AppSettings.KEY_DEFAULT_VIEW, 'month') as string;
+      return (v === 'week' || v === 'agenda') ? v : 'month';
+    } catch (err) {
+      return 'month';
+    }
+  }
+
+  static async setDefaultView(context: common.Context, view: string): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_DEFAULT_VIEW, view);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存默认视图失败: ${e.message}`);
+    }
+  }
 
   /**
    * 是否还需要一次性全量重拉：修复历史同步（REPORT 剥离 VALARM 时期）落库的残缺数据。

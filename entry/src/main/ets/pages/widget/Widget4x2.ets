@@ -1,6 +1,7 @@
 // entry/src/main/ets/pages/widget/Widget4x2.ets
 // 2x4 服务卡片：2x2 的横向扩展。左侧 = 日期/星期/农历 + 今日日程条数（与 2x2 一致）；
-// 右侧 = 当前正在进行（或下一个）的 1~3 条日程，不做滚动；整卡点击进入 App，右上角 ＋ 直接新建日程
+// 右侧 = **当前时间之后最近的两条**日程（不含全天/跨天，不显示"进行中"等字样，不显示日历本名）；
+// 整卡点击进入 App，右上角 ＋ 直接新建日程
 let storage2x4 = new LocalStorage();
 
 /** 与 eventsJson 同结构的卡片单条日程（本卡片只用到标题/时间/日历色/进行中标记） */
@@ -21,14 +22,13 @@ struct Widget4x2Card {
   @LocalStorageProp('weekday') weekday: string = '';
   @LocalStorageProp('lunarText') lunarText: string = '';
   @LocalStorageProp('todayCount') todayCount: number = 0;
-  @LocalStorageProp('ongoingCount') ongoingCount: number = 0;
   @LocalStorageProp('ongoingJson') ongoingJson: string = '[]';
 
-  /** 右侧最多渲染 3 条（数据侧已裁剪，这里再兜底截断） */
+  /** 右侧最多渲染 2 条（数据侧已裁剪，这里再兜底截断） */
   private parseOngoing(): CardItem2x4[] {
     try {
       const all: CardItem2x4[] = JSON.parse(this.ongoingJson) as CardItem2x4[];
-      return all.slice(0, 3);
+      return all.slice(0, 2);
     } catch (err) {
       return [];
     }
@@ -66,20 +66,21 @@ struct Widget4x2Card {
     });
   }
 
-  /** 右侧"正在进行 / 下一个"单条：左色竖条 + 时间列 + 标题 + 日历本名；进行中用红色高亮 */
+  /** 右侧单条：左色竖条 + 起止时间 + 标题。
+   *  不显示"进行中 / 即将开始"字样，也不显示日历本名 */
   @Builder
   ongoingRow(item: CardItem2x4) {
-    Row({ space: 7 }) {
+    Row({ space: 8 }) {
       Column()
         .width(3)
-        .height(34)
+        .height(40)
         .borderRadius(2)
-        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
+        .backgroundColor(item.color)
       Column({ space: 2 }) {
         Text(item.time)
-          .fontSize(9)
+          .fontSize(10)
           .fontWeight(FontWeight.Medium)
-          .fontColor(item.isNow ? '#FF3B30' : '#333333')
+          .fontColor('#333333')
           .maxLines(1)
         if (item.endTime !== '' && item.endTime !== '全天') {
           Text(item.endTime)
@@ -88,50 +89,20 @@ struct Widget4x2Card {
             .maxLines(1)
         }
       }
-      .width(34)
+      .width(36)
       .alignItems(HorizontalAlign.Start)
-      Column({ space: 2 }) {
-        Text(item.title)
-          .fontSize(12)
-          .fontWeight(item.isNow ? FontWeight.Medium : FontWeight.Normal)
-          .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Row({ space: 4 }) {
-          if (item.isNow) {
-            Text('● 进行中')
-              .fontSize(8)
-              .fontColor('#FF3B30')
-              .padding({ left: 4, right: 4, top: 0, bottom: 0 })
-              .borderRadius(4)
-              .backgroundColor('#FFECEA')
-          } else {
-            Text('即将开始')
-              .fontSize(8)
-              .fontColor('#8A8A8A')
-              .padding({ left: 4, right: 4, top: 0, bottom: 0 })
-              .borderRadius(4)
-              .backgroundColor('#F0F1F3')
-          }
-          if (item.calName !== '') {
-            Text(item.calName)
-              .fontSize(8)
-              .fontColor(item.color)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .constraintSize({ maxWidth: '55%' })
-          }
-        }
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
+      Text(item.title)
+        .fontSize(13)
+        .fontColor('#1A1A1A')
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 7, right: 7, top: 4, bottom: 4 })
+    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .borderRadius(8)
-    .backgroundColor(item.isNow ? '#FFF5F4' : '#F5F7FA')
+    .backgroundColor('#F5F7FA')
   }
 
   /** 右侧空态：今日无日程 / 日程已全部结束 */
@@ -187,16 +158,9 @@ struct Widget4x2Card {
             .fontColor('#007DFF')
           Column({ space: 2 }) {
             Row({ space: 4 }) {
-              if (this.ongoingCount > 0) {
-                Column()
-                  .width(7)
-                  .height(7)
-                  .borderRadius(4)
-                  .backgroundColor('#FF3B30')
-              }
-              Text(this.ongoingCount > 0 ? `进行中 ${this.ongoingCount}` : '今日日程')
+              Text('今日日程')
                 .fontSize(11)
-                .fontColor(this.ongoingCount > 0 ? '#FF3B30' : '#1A1A1A')
+                .fontColor('#1A1A1A')
                 .maxLines(1)
             }
             Text(this.todayCount === 0 ? '点击添加' : '点击查看')
@@ -220,12 +184,12 @@ struct Widget4x2Card {
         .strokeWidth(0.5)
         .color('#E5E5E5')
 
-      // ===== 右半：正在进行 / 下一个（不滚动，最多 3 条）=====
+      // ===== 右半：当前时间之后最近的两条日程（不滚动）=====
       Column() {
         if (this.parseOngoing().length === 0) {
           this.emptyHint()
         } else {
-          Column({ space: 5 }) {
+          Column({ space: 6 }) {
             ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
               this.ongoingRow(item)
             }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}`)

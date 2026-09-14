@@ -38,7 +38,7 @@
     },
     {
       "name": "card_desc",
-      "value": "展示今天日期与正在进行中的日程"
+      "value": "按时间轴展示今天的日程"
     },
     {
       "name": "card_2x2_name",
@@ -50,11 +50,11 @@
     },
     {
       "name": "card_4x4_name",
-      "value": "日程列表"
+      "value": "今日时间轴"
     },
     {
       "name": "card_6x4_name",
-      "value": "日程大全"
+      "value": "全天时间轴"
     },
     {
       "name": "sync_work_desc",

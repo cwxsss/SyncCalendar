@@ -19,6 +19,7 @@ import { IcsUtil } from '../common/IcsUtil';
 import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { ScreenKeeper } from '../common/ScreenKeeper';
+import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -37,11 +38,10 @@ struct Index {
   @State mode: string = 'month'; // month | week | agenda | todo
   @State displayYear: number = 2026;
   @State displayMonth: number = 0; // 0-11
-  @State selectedDate: number = 0; // 当天 0 点毫秒
+  @Watch('onSelectedDateChange') @State selectedDate: number = 0; // 当天 0 点毫秒
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
-  @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（过去1年~未来2年）
-  @State agendaGroupsData: AgendaGroup[] = []; // 预计算分组（避免 build 中重算卡顿）
+  @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
   @State syncing: boolean = false;
@@ -55,6 +55,9 @@ struct Index {
   private swiperGuard: boolean = false;
   private autoSyncTimer: number = -1;
   private nowTimer: number = -1; // 红线位置"播放"计时器（每 30s 刷新 nowMs）
+  private agendaScroller: Scroller = new Scroller(); // 列表视图滚动控制器：加载后定位到"当前时刻（红线）"
+  @State private agendaViewportH: number = 0;        // 列表视口高度（实测，用于把红线滚到屏幕中间）
+  private agendaScrollPending: boolean = false;      // 还未拿到真实视口高度 → 等实测后再校正一次
   private lastSyncTime: number = 0;
   private permissionAsked: boolean = false;
   @State detailShow: boolean = false; // 只读日程详情半屏弹层
@@ -62,6 +65,9 @@ struct Index {
   // 服务卡片"添加"按钮深链：EntryAbility 写入，本页读取后拉起新建日程页
   @Watch('onWidgetActionChange') @StorageLink('widgetAction') widgetAction: string = '';
   @State nowMs: number = Date.now(); // 当前时刻毫秒（驱动红线"播放"位置，每 30s 更新）
+  // 时间轴视图（月/周/列表共用）：按天预计算好色块布局，避免 build 中重算
+  @State dayTimeline: DayTimeline = new DayTimeline();            // 选中日（月/周视图用）
+  @State agendaTimelines: AgendaTimelineGroup[] = [];             // 列表视图：每天一条时间轴
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -76,9 +82,19 @@ struct Index {
     this.rebuildPages();
     this.initLandscapeListener();
     this.initPermissionAndLoad();
-    // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进
+    // 读取"默认视图"设置：打开 App 后按用户选择展示（月/周/列表，默认月）
+    if (ctx !== undefined) {
+      AppSettings.getDefaultView(ctx).then((v: string): void => {
+        this.mode = v;
+        if (v === 'agenda') {
+          this.ensureAgendaData();
+        }
+      });
+    }
+    // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进（同时刷新色块"进行中"标记）
     this.nowTimer = setInterval((): void => {
       this.nowMs = Date.now();
+      this.refreshNowMarks();
     }, 30000);
   }
 
@@ -238,8 +254,9 @@ struct Index {
     this.loading = true;
     this.agendaStale = true; // 数据可能变化，列表视图需要重新加载
     const monthStart: number = new Date(this.displayYear, this.displayMonth, 1).getTime();
-    const rangeStart: number = monthStart - 7 * 86400000;
-    const rangeEnd: number = monthStart + 32 * 86400000 + 60 * 86400000;
+    // 覆盖：上月尾 7 天 + 本月 + 下月，并确保选中日始终在区间内（跨月点选不漏数据）
+    const rangeStart: number = Math.min(monthStart - 7 * 86400000, this.selectedDate - 7 * 86400000);
+    const rangeEnd: number = Math.max(monthStart + 62 * 86400000, this.selectedDate + 8 * 86400000);
     this.events = await CalendarDataService.loadEvents(context, rangeStart, rangeEnd, this.sources);
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
@@ -282,6 +299,37 @@ struct Index {
       this.buildMonthCells(this.displayYear, this.displayMonth),
       this.buildMonthCells(next[0], next[1])
     ];
+    this.rebuildDayTimeline();
+  }
+
+  /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
+  private rebuildDayTimeline(): void {
+    const dayEvents: DisplayEvent[] = this.eventsOfDate(this.selectedDate);
+    const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
+    TimelineUtil.markNow(tl.blocks, this.nowMs);
+    this.dayTimeline = tl;
+    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
+  }
+
+  /** 选中日期变化（点月格/周条）→ 重算该日时间轴 */
+  private onSelectedDateChange(): void {
+    this.rebuildDayTimeline();
+  }
+
+  /** 心跳刷新"进行中"标记（每 30s）：只重算标记，不重建布局，避免整页重绘 */
+  private refreshNowMarks(): void {
+    TimelineUtil.markNow(this.dayTimeline.blocks, this.nowMs);
+    for (const day of this.agendaTimelines) {
+      TimelineUtil.markNow(day.timeline.blocks, this.nowMs);
+    }
+    // 触发 @State 更新（TimelineBlock 非 @Observed，需整体重新赋值）
+    const d = new DayTimeline();
+    d.dateKey = this.dayTimeline.dateKey;
+    d.allDay = this.dayTimeline.allDay;
+    d.blocks = this.dayTimeline.blocks;
+    d.hasTimed = this.dayTimeline.hasTimed;
+    this.dayTimeline = d;
+    this.agendaTimelines = this.agendaTimelines.slice();
   }
 
   private eventsOfDate(dateMs: number): DisplayEvent[] {
@@ -289,48 +337,9 @@ struct Index {
       this.startOfDay(e.startTime) <= dateMs && e.endTime >= dateMs);
   }
 
-  /** 红线日程唯一 key（与 ForEach key 保持一致） */
+  /** 红线日程唯一 key（与时间轴色块 key 保持一致） */
   private nowLineKey(e: DisplayEvent): string {
-    return `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}`;
-  }
-
-  /** 计算某日列表中"当前时间红线"位置：返回应画在上方/下方的日程 key，及正在进行的日程 key 集合。
-   *  仅 isToday 为 true 时生效（红线表达的是"此刻"，非今天无意义）。 */
-  private computeNowLine(list: DisplayEvent[], isToday: boolean): NowLineInfo {
-    const res: NowLineInfo = new NowLineInfo();
-    if (!isToday) {
-      return res;
-    }
-    const now: number = this.nowMs;
-    const timed: DisplayEvent[] = list
-      .filter((e: DisplayEvent): boolean => !e.isAllDay && !this.spansDays(e))
-      .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
-    // 1) 正在进行的（start<=now<end）→ 红线画在其上方
-    let firstNow: DisplayEvent | undefined = undefined;
-    for (const e of timed) {
-      if (e.startTime <= now && now < e.endTime) {
-        res.nowKeys.add(this.nowLineKey(e));
-        if (firstNow === undefined) {
-          firstNow = e;
-        }
-      }
-    }
-    if (firstNow !== undefined) {
-      res.aboveKey = this.nowLineKey(firstNow);
-      return res;
-    }
-    // 2) 下一个尚未开始的 → 红线画在其上方
-    for (const e of timed) {
-      if (e.startTime > now) {
-        res.aboveKey = this.nowLineKey(e);
-        return res;
-      }
-    }
-    // 3) 全部已结束 → 红线画在最后一条下方
-    if (timed.length > 0) {
-      res.belowKey = this.nowLineKey(timed[timed.length - 1]);
-    }
-    return res;
+    return TimelineUtil.keyOf(e);
   }
 
   private switchMonth(delta: number): void {
@@ -1064,6 +1073,7 @@ struct Index {
     this.mode = key;
     if (key === 'agenda') {
       await this.ensureAgendaData();
+      this.scrollAgendaToNow();
     }
   }
 
@@ -1077,21 +1087,96 @@ struct Index {
     }
     this.loading = true;
     const now: number = Date.now();
-    const start: number = this.startOfDay(now);
+    const today: number = this.startOfDay(now);
+    // 只从"今天"开始显示：不再回看过去的日期
+    const start: number = today;
     const end: number = now + 730 * 86400000;
     try {
       const raw: DisplayEvent[] = await CalendarDataService.loadEvents(context, start, end, this.sources);
-      // 保留"今天 0 点以来"的全部日程：今天已结束的也显示（否则重复日程的第一次发生会被隐藏），
-      // 昨天及更早且已结束的不显示；跨天进行中的归到今天，与卡片一致
+      // 保留：今天还没结束的（含进行中）+ 未来全部
       this.agendaEvents = raw.filter((e: DisplayEvent): boolean => e.endTime >= start);
-      this.agendaGroupsData = this.buildAgendaGroups(this.agendaEvents);
+      this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
       this.agendaStale = false;
-      LogUtil.write(`列表视图加载：${this.agendaEvents.length} 条（今天~未来2年），分组 ${this.agendaGroupsData.length} 组`);
+      LogUtil.write(`列表视图加载：${this.agendaEvents.length} 条（今天~未来2年），时间轴 ${this.agendaTimelines.length} 天`);
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`列表视图加载失败：${e.message}`);
     }
     this.loading = false;
+    this.scrollAgendaToNow();
+  }
+
+  /** 列表视图加载完成后定位到**今天当前时刻（红线）**，并让红线大致落在屏幕中间。
+   *  不再用 scrollToIndex（那只会对齐到卡片顶部，看到的是最早那条日程）。
+   *  做法：累加今天之前各天卡片高度（用与渲染一致的公式算），再加上红线在"今天"卡片内的偏移，
+   *  最后减半屏高度 → 红线居中。 */
+  private scrollAgendaToNow(): void {
+    if (this.mode !== 'agenda') {
+      return;
+    }
+    this.agendaScrollPending = true;
+    setTimeout((): void => {
+      this.doAgendaScroll();
+    }, 80);
+  }
+
+  /** 真正执行滚动：视口高度还没实测到时先用估算值滚一次，等 onAreaChange 拿到真实高度再校正 */
+  private doAgendaScroll(): void {
+    if (!this.agendaScrollPending) {
+      return;
+    }
+    const idx: number = this.agendaTimelines.findIndex((d: AgendaTimelineGroup): boolean => d.isToday);
+    if (idx < 0) {
+      // 今天没有日程：直接回到列表顶部
+      this.agendaScroller.scrollToIndex(0);
+      this.agendaScrollPending = false;
+      return;
+    }
+    // List 顶部 padding 6 + 每项之间 space 10
+    let cardTop: number = 6;
+    for (let i = 0; i < idx; i++) {
+      cardTop = cardTop + this.agendaCardH(this.agendaTimelines[i]) + 10;
+    }
+    const d: AgendaTimelineGroup = this.agendaTimelines[idx];
+    const vp: number = this.agendaViewportH > 0 ? this.agendaViewportH : 600;
+    // 今天定时日程已全部结束 → 红线不显示，直接定位到今天卡片顶部（不再按"当前时刻"居中）
+    let target: number = cardTop - 6;
+    if (!TimelineUtil.allTimedEnded(d.timeline.blocks, this.nowMs)) {
+      // 卡片内：padding 10 + 日期头 + space 6 + 全天区 + 红线在视窗内的偏移
+      let y: number = cardTop + 10 + this.agendaHeaderH() + 6 + this.agendaAllDayH(d.timeline);
+      const rg: ViewRange = TimelineUtil.viewRange(d.timeline.blocks, true, this.nowMs);
+      y = y + (TimelineUtil.nowRatio(this.nowMs) - rg.startHour / 24) * TimelineUtil.HOUR_UNIT * 24;
+      target = y - vp / 2;
+    }
+    this.agendaScroller.scrollTo({ xOffset: 0, yOffset: target < 0 ? 0 : target });
+    // 只有拿到真实视口高度后才算完成；否则等 onAreaChange 再校正一次
+    if (this.agendaViewportH > 0) {
+      this.agendaScrollPending = false;
+    }
+  }
+
+  /** 列表某天卡片的总高度（必须与 agendaBody 里的实际布局保持一致） */
+  private agendaCardH(d: AgendaTimelineGroup): number {
+    // 上下 padding 10 + 日期头 + Column space 6 + 时间轴（全天区 + 视窗高）；border 画在组件内不占高
+    return 10 + this.agendaHeaderH() + 6 + this.agendaTimelineH(d) + 10;
+  }
+  /** 日期头高度：padding top 4 + 14 号文字行高约 20 */
+  private agendaHeaderH(): number {
+    return 24;
+  }
+  /** 全天区高度：每条 26 + 间隔 4 + 底部 padding 6 */
+  private agendaAllDayH(tl: DayTimeline): number {
+    if (tl.allDay.length === 0) {
+      return 0;
+    }
+    return tl.allDay.length * 26 + (tl.allDay.length - 1) * 4 + 6;
+  }
+  /** 某天时间轴高度 = 全天区 + 视窗小时数 × 每小时 vp
+   *  （视窗的"是否并入当前小时"必须与 DayTimelineView 完全一致，否则卡片高度算错） */
+  private agendaTimelineH(d: AgendaTimelineGroup): number {
+    const incNow: boolean = d.isToday && !TimelineUtil.allTimedEnded(d.timeline.blocks, this.nowMs);
+    const rg: ViewRange = TimelineUtil.viewRange(d.timeline.blocks, incNow, this.nowMs);
+    return this.agendaAllDayH(d.timeline) + (rg.endHour - rg.startHour) * TimelineUtil.HOUR_UNIT;
   }
 
   /** 周条：周一到周日（周视图顶部 / 复用） */
@@ -1574,48 +1659,35 @@ struct Index {
     .layoutWeight(1)
   }
 
-  /** 单日日程列表（周视图使用） */
+  /** 单日竖向时间轴滚动区（周视图 / 月视图下方共用）；DayTimelineView 自身带 Scroll 并自动定位到当前时刻 */
   @Builder
   eventList() {
-    Scroll() {
-      Column({ space: 8 }) {
-        ForEach(this.eventsOfDate(this.selectedDate), (e: DisplayEvent) => {
-          Column() {
-            if (this.computeNowLine(this.eventsOfDate(this.selectedDate),
-                this.selectedDate === this.startOfDay(this.nowMs)).aboveKey === this.nowLineKey(e)) {
-              NowLineMarker()
-            }
-            this.eventRow(e, this.computeNowLine(this.eventsOfDate(this.selectedDate),
-                this.selectedDate === this.startOfDay(this.nowMs)).nowKeys.has(this.nowLineKey(e)))
-            if (this.computeNowLine(this.eventsOfDate(this.selectedDate),
-                this.selectedDate === this.startOfDay(this.nowMs)).belowKey === this.nowLineKey(e)) {
-              NowLineMarker()
-            }
-          }
+    Column() {
+      DayTimelineView({
+        timeline: this.dayTimeline,
+        nowMs: this.nowMs,
+        showNowLine: this.selectedDate === this.startOfDay(this.nowMs),
+        scrollable: true,
+        onPick: (e: DisplayEvent): void => this.openEvent(e)
+      })
+      if (!this.dayTimeline.hasTimed && this.dayTimeline.allDay.length === 0 && !this.loading) {
+        Text('当天没有日程')
+          .fontSize(13)
+          .fontColor($r('app.color.text_hint'))
           .width('100%')
-        }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}`)
-        if (this.eventsOfDate(this.selectedDate).length === 0 && !this.loading) {
-          Text('当天没有日程')
-            .fontSize(13)
-            .fontColor($r('app.color.text_hint'))
-            .width('100%')
-            .textAlign(TextAlign.Center)
-            .padding(20)
-        }
+          .textAlign(TextAlign.Center)
+          .padding(20)
       }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 4, bottom: 24 })
-      .constraintSize({ minHeight: '100%' })
     }
     .layoutWeight(1)
-    .scrollBar(BarState.Off)
-    .edgeEffect(EdgeEffect.Spring)
-    .align(Alignment.Top)
+    .width('100%')
+    .padding({ left: 12, right: 16, top: 4, bottom: 24 })
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
   agendaBody() {
-    List({ space: 6 }) {
+    List({ space: 10, scroller: this.agendaScroller }) {
       ListItem() {
         Row({ space: 8 }) {
           if (this.loading) {
@@ -1624,7 +1696,8 @@ struct Index {
               .height(24)
               .color($r('app.color.brand'))
           }
-          Text(this.loading ? '正在加载全部日程…' : `共 ${this.agendaEvents.length} 条`)
+          Text(this.loading ? '正在加载全部日程…' : `共 ${this.agendaEvents.length} 条` +
+            `，${this.agendaTimelines.length} 天`)
             .fontSize(12)
             .fontColor($r('app.color.text_hint'))
         }
@@ -1632,77 +1705,115 @@ struct Index {
         .padding({ top: 2, bottom: 2 })
       }
 
-      ForEach(this.agendaGroupsData, (group: AgendaGroup) => {
+      // 每一天：日期头 + 该日一条竖向时间轴（0-23 格，色块按时间平铺，冲突平分宽度）
+      ForEach(this.agendaTimelines, (day: AgendaTimelineGroup) => {
         ListItem() {
-          Text(group.label)
-            .fontSize(13)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .padding({ top: 6, bottom: 2 })
-        }
-        ForEach(group.items, (e: DisplayEvent) => {
-          ListItem() {
-            Column() {
-              if (this.computeNowLine(group.items, group.label === '今天').aboveKey === this.nowLineKey(e)) {
-                NowLineMarker()
+          Column({ space: 6 }) {
+            Row({ space: 8 }) {
+              Text(day.label)
+                .fontSize(14)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))
+              if (day.isToday) {
+                Text('今天')
+                  .fontSize(10)
+                  .fontColor($r('app.color.button_text'))
+                  .backgroundColor($r('app.color.brand'))
+                  .borderRadius(6)
+                  .padding({ left: 6, right: 6, top: 1, bottom: 1 })
               }
-              this.eventRow(e, this.computeNowLine(group.items, group.label === '今天')
-                .nowKeys.has(this.nowLineKey(e)))
-              if (this.computeNowLine(group.items, group.label === '今天').belowKey === this.nowLineKey(e)) {
-                NowLineMarker()
-              }
+              Blank()
+              Text(`${day.timeline.blocks.length + day.timeline.allDay.length} 条`)
+                .fontSize(11)
+                .fontColor($r('app.color.text_hint'))
             }
             .width('100%')
+            .padding({ top: 4 })
+
+            DayTimelineView({
+              timeline: day.timeline,
+              nowMs: this.nowMs,
+              showNowLine: day.isToday,
+              scrollable: false,
+              onPick: (e: DisplayEvent): void => this.openEvent(e)
+            })
           }
-        }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
-      }, (group: AgendaGroup) => group.label)
+          .width('100%')
+          .padding(10)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+        }
+      }, (day: AgendaTimelineGroup) => `day_${day.dateMs}`)
     }
     .width('100%')
     .layoutWeight(1)
     .scrollBar(BarState.Auto)
     .edgeEffect(EdgeEffect.Spring)
-    .padding({ left: 20, right: 20, top: 6, bottom: 24 })
-    .cachedCount(8)
+    .padding({ left: 12, right: 12, top: 6, bottom: 24 })
+    .cachedCount(4)
+    .onAreaChange((oldVal: Area, newVal: Area): void => {
+      const h: number = Number(newVal.height);
+      if (h > 0 && (h - this.agendaViewportH > 1 || h - this.agendaViewportH < -1)) {
+        this.agendaViewportH = h;
+        if (this.agendaScrollPending) {
+          this.doAgendaScroll();
+        }
+      }
+    })
   }
 
-  /** 列表视图分组：今天 ~ 未来的日程（跨天进行中的归今天，与卡片一致）。
-   *  结果预计算到 @State，避免每次 build 重算导致卡顿 */
-  private buildAgendaGroups(events: DisplayEvent[]): AgendaGroup[] {
-    const map: Map<number, DisplayEvent[]> = new Map();
+  /** 列表视图：把每天的分组转成"一天一条竖向时间轴"
+   *  多日/跨天日程会**展开到它覆盖的每一天**（起始日记为跨天，中间日整天），
+   *  确保列表里每天的数据完整，而不是只挂在第一天。 */
+  private buildAgendaTimelines(events: DisplayEvent[]): AgendaTimelineGroup[] {
     const today: number = this.startOfDay(Date.now());
-    for (const e of events) {
-      const spans: boolean = this.startOfDay(e.endTime) > this.startOfDay(e.startTime);
-      // 跨天且已开始：归今天；其余归开始日
-      const key: number = spans && this.startOfDay(e.startTime) < today
-        ? today : this.startOfDay(e.startTime);
+    const map: Map<number, DisplayEvent[]> = new Map();
+    const push = (key: number, e: DisplayEvent): void => {
+      // 列表视图只显示"今天及以后"：跨天日程展开时也不往前补日期
+      if (key < today) {
+        return;
+      }
       let arr: DisplayEvent[] | undefined = map.get(key);
       if (arr === undefined) {
         arr = [];
         map.set(key, arr);
       }
       arr.push(e);
+    };
+    for (const e of events) {
+      const sDay: number = this.startOfDay(e.startTime);
+      let eDay: number = this.startOfDay(e.endTime);
+      // 结束时刻恰好在 0 点 → 实际只到前一天（对齐常见日历约定）
+      if (e.endTime <= eDay && eDay > sDay) {
+        eDay = eDay - 86400000;
+      }
+      const spans: boolean = eDay > sDay;
+      if (!spans) {
+        push(sDay, e);
+        continue;
+      }
+      // 跨多天：逐天挂上（中间日同样展示，避免"这天什么都没有"）
+      const days: number = Math.round((eDay - sDay) / 86400000);
+      const maxDays: number = 60; // 防御：异常超长日程最多展开 60 天
+      const n: number = days > maxDays ? maxDays : days;
+      for (let i = 0; i <= n; i++) {
+        push(sDay + i * 86400000, e);
+      }
     }
     const keys: number[] = Array.from(map.keys()).sort((a: number, b: number): number => a - b);
-    const groups: AgendaGroup[] = [];
+    const out: AgendaTimelineGroup[] = [];
     for (const key of keys) {
-      const items: DisplayEvent[] = map.get(key) ?? [];
-      items.sort((a: DisplayEvent, b: DisplayEvent): number => {
-        const aAll: boolean = a.isAllDay ||
-          this.startOfDay(a.endTime) > this.startOfDay(a.startTime);
-        const bAll: boolean = b.isAllDay ||
-          this.startOfDay(b.endTime) > this.startOfDay(b.startTime);
-        if (aAll !== bAll) {
-          return aAll ? -1 : 1;
-        }
-        return a.startTime - b.startTime;
-      });
-      const g = new AgendaGroup();
+      const g = new AgendaTimelineGroup();
+      g.dateMs = key;
       g.label = key === today ? '今天' : this.fmtDateCn(key);
-      g.items = items;
-      groups.push(g);
+      g.isToday = key === today;
+      const tl: DayTimeline = TimelineUtil.build(map.get(key) ?? [], key);
+      TimelineUtil.markNow(tl.blocks, this.nowMs);
+      g.timeline = tl;
+      out.push(g);
     }
-    return groups;
+    return out;
   }
 
   // ---------- 待办（VTODO） ----------
@@ -1820,88 +1931,6 @@ struct Index {
   }
 
   @Builder
-  eventRow(e: DisplayEvent, isNow: boolean = false) {
-    Row({ space: 10 }) {
-      Column()
-        .width(4)
-        .height(38)
-        .borderRadius(2)
-        .backgroundColor(isNow ? '#FF3B30' : e.color)
-      Column({ space: 3 }) {
-        Text(e.title === '' ? '(无标题)' : e.title)
-          .fontSize(15)
-          .fontColor(isNow ? '#FF3B30' : $r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Row({ space: 6 }) {
-          Text(e.isAllDay || this.spansDays(e)
-            ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
-            .fontSize(12)
-            .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
-          if (e.recurring) {
-            Text('↻ 重复')
-              .fontSize(10)
-              .fontColor($r('app.color.text_hint'))
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor($r('app.color.chip_off_bg'))
-          }
-          if (isNow) {
-            Text('● 进行中')
-              .fontSize(10)
-              .fontColor('#FF3B30')
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor('#FFECEA')
-          }
-        }
-        if (e.location !== '') {
-          Row({ space: 4 }) {
-            Text('📍')
-              .fontSize(11)
-              .fontColor($r('app.color.text_hint'))
-            Text(e.location)
-              .fontSize(12)
-              .fontColor($r('app.color.text_hint'))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-        }
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      if (e.isSystem) {
-        Text('系统')
-          .fontSize(10)
-          .fontColor($r('app.color.text_hint'))
-          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-          .borderRadius(6)
-          .backgroundColor($r('app.color.chip_off_bg'))
-      }
-      // 所属日历本：最右侧、垂直居中，颜色同日历本；只读日历本加删除线标识
-      if (e.calName !== '') {
-        Text(e.calName)
-          .fontSize(11)
-          .fontColor(e.color)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '30%' })
-          .decoration({ type: e.writable ? TextDecorationType.None : TextDecorationType.LineThrough })
-      }
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .padding(10)
-    .borderRadius(12)
-    .backgroundColor($r('app.color.card_bg'))
-    .border({ width: 1, color: $r('app.color.shadow_color') })
-    .onClick(() => {
-      this.openEvent(e);
-    })
-  }
-
-  @Builder
   dayCell(cell: MonthCell) {
     Column({ space: 2 }) {
       Text(String(cell.day))
@@ -1952,56 +1981,443 @@ struct Index {
   }
 }
 
-/** 日程列表的按日分组 */
-class AgendaGroup {
+/** 列表视图的一天：日期标签 + 该日的时间轴布局 */
+class AgendaTimelineGroup {
+  dateMs: number = 0;
   label: string = '';
-  items: DisplayEvent[] = [];
+  isToday: boolean = false;
+  timeline: DayTimeline = new DayTimeline();
 }
 
-/** 某日列表中"当前时间红线"位置信息（避免内联对象字面量类型，ArkTS 不允许） */
-class NowLineInfo {
-  aboveKey: string = '';   // 红线画在该 key 对应日程的上方
-  belowKey: string = '';   // 今天所有有时间日程已结束：红线画在该 key 对应日程的下方
-  nowKeys: Set<string> = new Set<string>(); // 正在进行的日程 key 集合
+/** 日程层纵向序列中的一行：空隙 / 冲突组。整点线与红线已移到另外两层，本层不含任何"线"。
+ *  topRatio~botRatio = 该行覆盖的当日比例区间（0~1，乘整日高得 vp）。 */
+class TimeRow {
+  kind: number = 0; // 0=空隙 1=冲突组行
+  h: number = 0;    // 备用（行高，当前未使用）
+  topRatio: number = 0;
+  botRatio: number = 0;
+  group: TimelineGroup = new TimelineGroup(); // kind=1 时有效
+  key: string = '';
 }
 
-/** 当前时间红线标记（带呼吸/播放效果）：左侧红点 + 贯穿整行的红色细线。
- *  自带动画（opacity 往复），不依赖外部状态刷新，避免整页重绘。 */
+/** 单日竖向时间轴：左侧 0-23 刻度，右侧按"冲突组"分行、组内每条日程占一列（lane）按时间纵向定位。
+ *  每条日程 = 一个独立色块（跨整点也不再拆分、名字只出现一次）；冲突日程左右并排、不重叠。
+ *  scrollable=true 时自带 Scroll+Scroller，并在"今天"自动定位到当前时刻（eventList 月/周视图用）；
+ *  scrollable=false 时整页平铺（列表视图的今天卡片用，避免 Scroll 嵌套进 List）。 */
 @Component
-struct NowLineMarker {
-  @State private dim: boolean = false;
-  private timer: number = -1;
+struct DayTimelineView {
+  @Prop timeline: DayTimeline;
+  @Prop nowMs: number;   // 当前时刻（drawLine 时定位红线）
+  @Watch('onShowNowLine') @Prop showNowLine: boolean = false; // 仅"今天"显示红线 + 触发自动定位
+  @Prop scrollable: boolean = false; // 是否自带可滚动容器（月/周视图日时间轴=true；列表视图卡片=false）
+  hourUnit: number = TimelineUtil.HOUR_UNIT;
+  onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {};
+  private scroller: Scroller = new Scroller();
+  @State private viewportH: number = 0; // 滚动视口高度（由 Scroll 实测，用于把"当前时刻"居中）
+  @State private allDayH: number = 0;   // 顶部"全天/跨天"区高度（它现在随内容滚动，居中定位要加上）
+  private pendingScroll: boolean = false;
 
   aboutToAppear(): void {
-    // 每 ~1.1s 切换一次，配合 .animation 形成呼吸式"播放"效果
-    this.timer = setInterval((): void => {
-      this.dim = !this.dim;
-    }, 1100);
+    this.scrollToNow();
   }
 
-  aboutToDisappear(): void {
-    if (this.timer !== -1) {
-      clearInterval(this.timer);
-      this.timer = -1;
+  /** 显示日变为"今天"（或从今天切走）时触发；切到今天则自动定位到当前时刻 */
+  private onShowNowLine(): void {
+    this.scrollToNow();
+  }
+
+  /** 自动滚动：把"当前时刻红线"定位到可视区**垂直居中**
+   *  （目标 y = nowRatio * 整日高 − 视口高/2，夹取 ≥0）。仅今天且自带滚动时生效。
+   *  首帧视口高度未知 → 先用估算值滚一次，等 onAreaChange 实测到高度后再校正一次。 */
+  private scrollToNow(): void {
+    // 只有"红线会显示"时才需要自动定位到当前时刻；日程已全部结束时视窗已截断，不再滚动
+    if (!this.scrollable || !this.includeNowHour()) {
+      return;
     }
+    this.pendingScroll = true;
+    this.tryScroll();
+  }
+  private tryScroll(): void {
+    if (!this.pendingScroll) {
+      return;
+    }
+    const vp: number = this.viewportH > 0 ? this.viewportH : this.hourUnit * 8;
+    // 内容顶部还有"全天/跨天"区（allDayH），且时间轴只从 viewTop 开始 → 都要计入偏移
+    const y: number = this.allDayH + (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - vp / 2;
+    setTimeout((): void => {
+      this.scroller.scrollTo({ xOffset: 0, yOffset: y < 0 ? 0 : y });
+    }, 60);
+    if (this.viewportH > 0) {
+      this.pendingScroll = false;
+    }
+  }
+
+  private hourText(h: number): string {
+    return h < 10 ? `0${h}:00` : `${h}:00`;
+  }
+
+  /** 是否把"当前小时"并入视窗：
+   *  仅当"今天 + 还有未结束的定时日程"（即红线会显示）时才需要，保证红线可见。
+   *  若今天定时日程已全部结束（红线已隐藏），则**不再并入当前小时** → 时间刻度直接截断到最晚日程。 */
+  private includeNowHour(): boolean {
+    return this.showNowLine && !this.allTimedEnded();
+  }
+  /** 视窗起始小时（统一走 TimelineUtil.viewRange，与列表视图高度计算共用同一份逻辑） */
+  private viewStartHour(): number {
+    return TimelineUtil.viewRange(this.timeline.blocks, this.includeNowHour(), this.nowMs).startHour;
+  }
+  /** 视窗结束小时 */
+  private viewEndHour(): number {
+    return TimelineUtil.viewRange(this.timeline.blocks, this.includeNowHour(), this.nowMs).endHour;
+  }
+  /** 视窗上/下边界（当日比例 0~1） */
+  private viewTop(): number {
+    return this.viewStartHour() / 24;
+  }
+  private viewBot(): number {
+    return this.viewEndHour() / 24;
+  }
+  /** 视窗总高（vp）：三层堆叠区与左侧刻度都按这个高度对齐 */
+  private viewH(): number {
+    return (this.viewEndHour() - this.viewStartHour()) * this.hourUnit;
+  }
+  /** 当前选中日：定时日程是否已全部结束（统一走 TimelineUtil，供"隐藏红线/截断视窗"共用） */
+  private allTimedEnded(): boolean {
+    return TimelineUtil.allTimedEnded(this.timeline.blocks, this.nowMs);
+  }
+  /** 当前时间红线是否显示（今天 + 今天还有未结束的定时日程 + 当前时刻落在视窗内） */
+  private nowVisible(): boolean {
+    const r: number = TimelineUtil.nowRatio(this.nowMs);
+    return this.showNowLine && !this.allTimedEnded()
+      && r >= this.viewTop() - 0.0001 && r <= this.viewBot() + 0.0001;
+  }
+  /** 红线距层顶的偏移（vp）：减 1vp 让 2vp 高的线正好压在"现在"这一刻 */
+  private nowOffsetVp(): number {
+    const y: number = (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - 1;
+    return y < 0 ? 0 : y;
+  }
+  /** 左侧小时刻度：只渲染视窗内的小时 */
+  private hourLabels(): number[] {
+    const arr: number[] = [];
+    for (let h = this.viewStartHour(); h < this.viewEndHour(); h++) {
+      arr.push(h);
+    }
+    return arr;
+  }
+
+  // ---- 布局换算：整日 = 24 小时竖向；横向按"冲突组"分列（lane），组内每条日程占一列 ----
+  /** 整日高度（vp） */
+  private totalH(): number {
+    return this.hourUnit * 24;
+  }
+  /** 由色块重建冲突分组（组内按列并排） */
+  private groups(): TimelineGroup[] {
+    return TimelineUtil.groupsOf(this.timeline.blocks);
+  }
+  /** 冲突组这一行的高度（vp）= 该组的时间跨度 */
+  private bandH(g: TimelineGroup): number {
+    return (g.endRatio - g.startRatio) * this.totalH();
+  }
+  /** 某一列（lane）中、与本行窗口 [topRatio,botRatio] 有交集的色块（窗口外的整块跳过） */
+  private laneBlocks(r: TimeRow, lane: TimelineBlock[]): TimelineBlock[] {
+    const out: TimelineBlock[] = [];
+    for (const b of lane) {
+      const be: number = b.topRatio + b.heightRatio;
+      if (be > r.topRatio + 0.0001 && b.topRatio < r.botRatio - 0.0001) {
+        out.push(b);
+      }
+    }
+    return out;
+  }
+  /** 列内第 index 个色块之前需要空出的高度（vp）= 本块顶 − 上一块底（都夹紧在窗口内，≥0） */
+  private lanePadH(r: TimeRow, lane: TimelineBlock[], index: number): number {
+    const arr: TimelineBlock[] = this.laneBlocks(r, lane);
+    let prevEnd: number = r.topRatio;
+    if (index > 0) {
+      const p: TimelineBlock = arr[index - 1];
+      const pe: number = p.topRatio + p.heightRatio;
+      prevEnd = pe > r.topRatio ? pe : r.topRatio;
+    }
+    const b: TimelineBlock = arr[index];
+    const top: number = b.topRatio > r.topRatio ? b.topRatio : r.topRatio;
+    const d: number = (top - prevEnd) * this.totalH();
+    return d < 0 ? 0 : d;
+  }
+  /** 色块高度（vp）：按实际时长换算，至少 14vp 保证短日程也可见（超出组行的部分由列裁切） */
+  private blockH(b: TimelineBlock): number {
+    const h: number = b.heightRatio * this.totalH();
+    return h < 14 ? 14 : h;
+  }
+  // 整点灰线由第 1 层（网格层）画、红线由第 3 层画 → 日程层不再为它们切段。
+  /** 左侧刻度：当前小时是否高亮（仅今天） */
+  private isNowHour(h: number): boolean {
+    return this.showNowLine && Math.floor(TimelineUtil.nowRatio(this.nowMs) * 24) === h;
+  }
+  /** 组装"日程层"的纵向序列：只渲染视窗 [viewTop,viewBot] 内的时间。
+   *  **本层只有两样东西：空隙（Blank）与冲突组行**，不再为整点线 / 红线切段 ——
+   *  线与网格都交给另外两层去画，所以每条日程永远是一个完整、连续的色块。
+   *  注意：所有 key 都带 dateKey + 视窗 + 内容签名 → 切换日期/内容时 key 必变，强制重渲染
+   *  （否则 ArkUI 复用旧子组件会导致"串天/重复"）。 */
+  private buildTimeRows(): TimeRow[] {
+    const rows: TimeRow[] = [];
+    const gs: TimelineGroup[] = this.groups();
+    const top: number = this.viewTop();
+    const bot: number = this.viewBot();
+    const dk: string = `${this.timeline.dateKey}_${this.viewStartHour()}_${this.viewEndHour()}`;
+    let cursor: number = top;
+    for (const g of gs) {
+      const gsx: number = g.startRatio > top ? g.startRatio : top;
+      const gex: number = g.endRatio < bot ? g.endRatio : bot;
+      if (gex - gsx <= 0.0002) {
+        continue; // 整组都在视窗外
+      }
+      this.pushSpanRow(rows, cursor, gsx, null, dk);
+      this.pushSpanRow(rows, gsx, gex, g, dk);
+      cursor = gex;
+    }
+    this.pushSpanRow(rows, cursor, bot, null, dk);
+    return rows;
+  }
+
+  private pushSpanRow(rows: TimeRow[], from: number, to: number, g: TimelineGroup | null,
+    dk: string): void {
+    if (to - from <= 0.0002) {
+      return;
+    }
+    const r = new TimeRow();
+    r.topRatio = from;
+    r.botRatio = to;
+    if (g === null) {
+      r.kind = 0;
+      r.key = `g_${dk}_${rows.length}_${Math.round((to - from) * 100000)}`;
+    } else {
+      r.kind = 1;
+      r.group = g;
+      let sig: string = '';
+      for (const b of g.blocks) {
+        sig = sig + '_' + b.eventKey;
+      }
+      r.key = `b_${dk}_${rows.length}${sig}`;
+    }
+    rows.push(r);
   }
 
   build() {
-    Row() {
-      Column()
-        .width(6)
-        .height(6)
-        .borderRadius(3)
-        .backgroundColor('#FF3B30')
-      Column()
-        .height(2)
+    Column() {
+      // 时间轴主体（含顶部"全天/跨天"条 —— 它们随内容一起滚动，向下滑时跟 0 点一起上移）。
+      // scrollable=true 时包一层 Scroll 并自动定位到当前时刻；否则整页平铺。
+      if (this.scrollable) {
+        Scroll(this.scroller) {
+          this.timelineBody()
+        }
         .layoutWeight(1)
-        .backgroundColor('#FF3B30')
-        .borderRadius(1)
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .align(Alignment.Top)
+        .onAreaChange((oldVal: Area, newVal: Area): void => {
+          const h: number = Number(newVal.height);
+          if (h > 0 && (this.viewportH < 1 || h - this.viewportH > 1 || h - this.viewportH < -1)) {
+            this.viewportH = h;
+            this.tryScroll();
+          }
+        })
+      } else {
+        this.timelineBody()
+      }
     }
     .width('100%')
-    .padding({ top: 3, bottom: 3 })
-    .opacity(this.dim ? 0.45 : 1)
-    .animation({ duration: 1000 })
+    // 自带滚动（月/周视图）：占满父容器剩余高度；平铺（列表视图）：按内容自适应高度
+    // —— 列表里每天需要的高度不同（视窗已按日程起止截断），必须让外层随内容伸缩，否则会显示不全
+    .layoutWeight(this.scrollable ? 1 : 0)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 时间轴主体：顶部"全天/跨天"条（随滚动一起移动）+ 左侧小时刻度 + 右侧按冲突组分行、组内按列并排 */
+  @Builder
+  private timelineBody() {
+    Column() {
+      // 全天 / 跨天日程：同样用**色块**展示（与普通日程保持一致的视觉），
+      // 画在 0 点之前并**随内容一起滚动**（向下滑时跟 0 点一起上移，不再常驻顶部）
+      if (this.timeline.allDay.length > 0) {
+        Column({ space: 4 }) {
+          ForEach(this.timeline.allDay, (e: DisplayEvent) => {
+            Row({ space: 6 }) {
+              Text(e.isAllDay ? '全天' : '跨天')
+                .fontSize(9)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#26000000')
+                .borderRadius(6)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              Text(e.title === '' ? '(无标题)' : e.title)
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#FFFFFF')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(26)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(8)
+            .backgroundColor(e.color)
+            .onClick(() => this.onPick(e))
+          }, (e: DisplayEvent) => `al_${this.timeline.dateKey}_${TimelineUtil.keyOf(e)}`)
+        }
+        .width('100%')
+        .padding({ bottom: 6 })
+        .onAreaChange((oldVal: Area, newVal: Area): void => {
+          const h: number = Number(newVal.height);
+          if (h > 0 && (h - this.allDayH > 1 || h - this.allDayH < -1)) {
+            this.allDayH = h;
+            this.tryScroll();
+          }
+        })
+      }
+
+      Row() {
+        // 左侧小时刻度（每格一条底线，作为时间尺；当前小时高亮）。只渲染视窗内的小时
+        Column() {
+          ForEach(this.hourLabels(), (h: number) => {
+            Text(this.hourText(h))
+              .fontSize(10)
+              .fontColor(this.isNowHour(h) ? '#FF3B30' : '#9AA0A6')
+              .width(36)
+              .height(this.hourUnit)
+              .textAlign(TextAlign.End)
+              .padding({ right: 4, top: 2 })
+              .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
+          }, (h: number) => `h${h}`)
+        }
+        .width(36)
+
+        // 右侧内容区：**三层堆叠**（网格层 / 日程层 / 红线层）。
+        // 三层尺寸、分格方式完全一致；上层透明，只画自己该画的东西，互不挤占 →
+        // 日程色块再也不会被整点线或红线"切开"，红线也永远浮在最上面。
+        Stack() {
+          this.gridLayer()  // 第 1 层：整点网格线（贯穿全宽）
+          this.eventLayer() // 第 2 层：日程色块（透明底，盖住下面的网格线属正常）
+          this.nowLayer()   // 第 3 层：当前时间红线（盖住前两层）
+        }
+        .layoutWeight(1)
+        .height(this.viewH())
+        .alignContent(Alignment.TopStart)
+        .border({ width: { left: 0.5 }, color: { left: '#14000000' } })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+    }
+    .width('100%')
+  }
+
+  // ===== 三层绘图：每层尺寸与分格方式完全相同（高 = viewH，宽 = 内容区全宽），上层透明 =====
+
+  /** 第 1 层：整点网格 —— 每个小时一格，格底一条灰线，贯穿全宽 */
+  @Builder
+  private gridLayer() {
+    Column() {
+      ForEach(this.hourLabels(), (h: number) => {
+        Column()
+          .width('100%')
+          .height(this.hourUnit)
+          .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
+          .hitTestBehavior(HitTestMode.None) // 装饰层子节点同样不参与命中测试
+      }, (h: number) => `gd_${h}`)
+    }
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.None) // 装饰层：不参与命中测试，触碰事件穿透到下层色块
+  }
+
+  /** 第 2 层：日程色块 —— 冲突组分行 + 组内 lane 分列，纵向用 Blank 定位。
+   *  本层不再需要为"整点线 / 红线"让路而切段 → 每条日程永远是一个完整连续的色块。 */
+  @Builder
+  private eventLayer() {
+    Column() {
+      ForEach(this.buildTimeRows(), (r: TimeRow) => {
+        if (r.kind === 1) {
+          Row() {
+            ForEach(r.group.lanes, (lane: TimelineBlock[], li: number) => {
+              Column() {
+                ForEach(this.laneBlocks(r, lane), (b: TimelineBlock, index: number) => {
+                  Blank().height(this.lanePadH(r, lane, index))
+                  Column({ space: 1 }) {
+                    Text(b.title)
+                      .fontSize(11)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor('#FFFFFF')
+                      .maxLines(2)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                    if (b.heightRatio * 86400000 >= 40 * 60000) {
+                      Text(b.timeText)
+                        .fontSize(9)
+                        .fontColor('#E6FFFFFF')
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .width('100%')
+                    }
+                  }
+                  .alignItems(HorizontalAlign.Start)
+                  .justifyContent(FlexAlign.Start)
+                  .padding({ left: 6, right: 3, top: 2, bottom: 2 })
+                  .borderRadius(6)
+                  .backgroundColor(b.color)
+                  .opacity(b.isNow ? 1 : 0.92)
+                  .clip(true)
+                  .width('100%')
+                  .height(this.blockH(b))
+                  .onClick(() => {
+                    if (b.ev !== null) {
+                      this.onPick(b.ev);
+                    }
+                  })
+                }, (b: TimelineBlock) => `blk_${r.key}_${b.eventKey}`)
+              }
+              .layoutWeight(1)
+              .height('100%')
+              .padding({ right: 2 })
+              .clip(true)
+            }, (lane: TimelineBlock[], li: number) => `ln_${r.key}_${li}`)
+          }
+          .width('100%')
+          .height((r.botRatio - r.topRatio) * this.totalH())
+          .alignItems(VerticalAlign.Top)
+        } else {
+          // 空隙：纯占位（网格线在第 1 层，红线在第 3 层，本层不参与）
+          Blank().height((r.botRatio - r.topRatio) * this.totalH())
+        }
+      }, (r: TimeRow) => r.key)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 第 3 层：当前时间红线 —— 浮在最上层，不挤占任何布局，也不切割任何色块 */
+  @Builder
+  private nowLayer() {
+    Column() {
+      if (this.nowVisible()) {
+        Blank().height(this.nowOffsetVp()).hitTestBehavior(HitTestMode.None) // 占位块：不拦截点击
+        Row() {
+          Column()
+            .width(6)
+            .height(6)
+            .borderRadius(3)
+            .backgroundColor('#FF3B30')
+          Column()
+            .height(2)
+            .layoutWeight(1)
+            .backgroundColor('#FF3B30')
+            .borderRadius(1)
+        }
+        .width('100%')
+        .hitTestBehavior(HitTestMode.None) // 红线本身也不拦截点击，穿透到色块层
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.None) // 装饰层：整层不参与命中测试，触碰事件穿透到下层色块
   }
 }

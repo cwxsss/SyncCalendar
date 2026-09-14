@@ -8,8 +8,8 @@ import { LogUtil } from '../common/LogUtil';
 
 export default class EntryFormAbility extends FormExtensionAbility {
   /** 组装更新数据并推送到指定卡片 */
-  private pushData(formId: string): void {
-    CardDataService.buildCardData(this.context).then((data: CardData): void => {
+  private pushData(formId: string, dayOffset: number = 0): void {
+    CardDataService.buildCardData(this.context, dayOffset).then((data: CardData): void => {
       const binding: formBindingData.FormBindingData =
         formBindingData.createFormBindingData(data);
       formProvider.updateForm(formId, binding).catch((err: BusinessError): void => {
@@ -42,12 +42,32 @@ export default class EntryFormAbility extends FormExtensionAbility {
     LogUtil.init(this.context);
     LogUtil.write(`系统触发卡片更新: formId=${formId}`);
     CardDataService.registerForm(this.context, formId);
-    this.pushData(formId);
+    // 保留用户翻到的日期（系统定时刷新不应把用户翻走的日期拽回今天）
+    this.pushData(formId, CardDataService.getDayOffset(formId));
   }
 
   onRemoveForm(formId: string): void {
     LogUtil.init(this.context);
     LogUtil.write(`移除卡片: formId=${formId}`);
     CardDataService.unregisterForm(this.context, formId);
+    CardDataService.clearDayOffset(formId);
+  }
+
+  /** 卡片上「‹ / › / 回到今天」按钮触发：message 里带 pageAction=prev|next|today */
+  onFormEvent(formId: string, message: string): void {
+    LogUtil.init(this.context);
+    const cur: number = CardDataService.getDayOffset(formId);
+    let next: number = cur;
+    // 不用 JSON 解析：不同版本 message 的格式可能是 {params:{...}} 或直接 {...}，直接子串匹配更稳
+    if (message.indexOf('prev') >= 0) {
+      next = cur - 1;
+    } else if (message.indexOf('next') >= 0) {
+      next = cur + 1;
+    } else if (message.indexOf('today') >= 0) {
+      next = 0;
+    }
+    CardDataService.setDayOffset(formId, next);
+    LogUtil.write(`卡片翻页: formId=${formId} ${cur} → ${next}`);
+    this.pushData(formId, next);
   }
 }

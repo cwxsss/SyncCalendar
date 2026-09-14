@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "com.example.synccalendar",
-    "vendor": "example",
+    "bundleName": "synccalendar.yangyq.net",
+    "vendor": "yangyq",
     "versionCode": 1000000,
     "versionName": "1.0.0",
     "buildVersion": "1",
