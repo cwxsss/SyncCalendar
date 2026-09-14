@@ -427,13 +427,8 @@ struct Index {
   }
 
   private openEvent(e: DisplayEvent): void {
-    // 只读日历本或系统日历日程：无法保存修改，直接显示详情
-    if (e.isSystem || !e.writable) {
-      this.showEventDetail(e);
-      return;
-    }
-    AppStorage.setOrCreate<number>('pendingEventId', e.id);
-    router.pushUrl({ url: 'pages/EventEditPage' });
+    // 所有日程点击都弹出详情（只读/可写/系统一致）；可写日程在详情中可点"编辑"进入编辑页
+    this.showEventDetail(e);
   }
 
   /** 只读日程详情：改为卡片式半屏弹层（与编辑页风格一致） */
@@ -728,6 +723,25 @@ struct Index {
         .scrollBar(BarState.Auto)
         .align(Alignment.Top)
         .layoutWeight(1)
+      }
+      // 可写日程：详情底部提供"编辑"入口（系统/只读日程无此按钮）
+      if (this.detailEvent !== null && !this.detailEvent.isSystem && this.detailEvent.writable) {
+        Button('编辑日程')
+          .width('100%')
+          .height(44)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.button_text'))
+          .backgroundColor($r('app.color.brand'))
+          .borderRadius(12)
+          .onClick(() => {
+            const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
+            this.detailShow = false;
+            if (id > 0) {
+              AppStorage.setOrCreate<number>('pendingEventId', id);
+              router.pushUrl({ url: 'pages/EventEditPage' });
+            }
+          })
       }
     }
     .width('100%')
@@ -1738,6 +1752,19 @@ struct Index {
               .borderRadius(4)
               .backgroundColor($r('app.color.chip_off_bg'))
           }
+        }
+        if (e.location !== '') {
+          Row({ space: 4 }) {
+            Text('📍')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+            Text(e.location)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
         }
       }
       .alignItems(HorizontalAlign.Start)
