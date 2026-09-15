@@ -32,10 +32,8 @@ struct SettingsPage {
   @State manualKeys: string[] = [];     // 手动标记只读的 calKey
   @State mutedKeys: string[] = [];      // 提醒静音的 calKey
   @State notifyEnabled: boolean = true; // 通知权限状态（提醒依赖）
-  @State showFeatures: boolean = false; // 软件特性弹层
-  @State showHelp: boolean = false;     // 使用帮助弹层
   @State showLegal: boolean = false;    // 隐私政策与用户协议弹层
-  // 内置文档浏览器（《隐私政策》/《用户服务协议》）：整页 Web 覆盖层
+  // 内置文档浏览器（《隐私政策》/《用户服务协议》/《软件特性》/《使用帮助》）：整页 Web 覆盖层
   @State showDoc: boolean = false;
   @State docTitle: string = '';
   @State docUrl: string = '';
@@ -725,7 +723,7 @@ struct SettingsPage {
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
 
-          // 软件特性（点击弹层；bindSheet 挂在本卡片上，避免与其它弹层冲突）
+          // 软件特性（打开内置浏览器；内容为在线文档 sf.html，便于随时更新）
           Column({ space: 8 }) {
             Row({ space: 10 }) {
               Column({ space: 2 }) {
@@ -752,16 +750,10 @@ struct SettingsPage {
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
           .onClick(() => {
-            this.showFeatures = true;
-          })
-          .bindSheet($$this.showFeatures, this.featureSheet(), {
-            height: 560,
-            dragBar: true,
-            showClose: true,
-            title: { title: '软件特性' }
+            this.openDoc(AppSettings.FEATURES_TITLE, AppSettings.FEATURES_URL);
           })
 
-          // 使用帮助（点击弹层；bindSheet 挂在本卡片上）
+          // 使用帮助（打开内置浏览器；内容为在线文档 uh.html，便于随时更新）
           Column({ space: 8 }) {
             Row({ space: 10 }) {
               Column({ space: 2 }) {
@@ -788,13 +780,7 @@ struct SettingsPage {
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
           .onClick(() => {
-            this.showHelp = true;
-          })
-          .bindSheet($$this.showHelp, this.helpSheet(), {
-            height: 560,
-            dragBar: true,
-            showClose: true,
-            title: { title: '使用帮助' }
+            this.openDoc(AppSettings.HELP_TITLE, AppSettings.HELP_URL);
           })
 
           // 功能引导（首启引导卡片，可在设置里再看一次；bindSheet 挂在本卡片上）
@@ -959,7 +945,8 @@ struct SettingsPage {
       .height('100%')
       .backgroundColor($r('app.color.page_bg'))
 
-      // 内置文档浏览器（《隐私政策》/《用户服务协议》）：整页覆盖层，点"✕"即刻返回设置页
+      // 内置文档浏览器（《隐私政策》/《用户服务协议》/《软件特性》/《使用帮助》）：
+      // 整页覆盖层，点"✕"即刻返回设置页
       if (this.showDoc) {
         DocViewer({
           title: this.docTitle,
@@ -1006,155 +993,6 @@ struct SettingsPage {
         Text('《隐私政策》说明本应用如何收集、使用与保护你的信息（日历、位置等）；《用户服务协议》说明使用本应用的权利与义务。两份文件随功能调整更新，最新版本以上述链接为准。')
           .fontSize(12)
           .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-      }
-      .width('100%')
-      .align(Alignment.Top)
-      .padding(16)
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
-  }
-
-  @Builder
-  featureSheet() {
-    Scroll() {
-      Column({ space: 12 }) {
-        Text('隐私与数据')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 数据自持：你的所有日程、待办只存放在你自己（或所在机构）的 CalDAV 服务器上，我们（开发者）不保存你的任何日程或账户数据。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 账户加密：CalDAV 账号的密码在本地以 AES-256-GCM 加密保存，只有发起同步时才临时解密使用，不会以明文留存。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 开源透明：本项目完全开源，代码可自行查看与审计，不藏任何后台上传逻辑。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Button('打开开源仓库')
-          .fontSize(13)
-          .backgroundColor($r('app.color.brand'))
-          .onClick(() => {
-            this.openUrl('https://gitee.com/dryangyq/SyncCalendar');
-          })
-        Text('同步能力')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('• 双向同步：本地新建/修改会自动推送到服务器，服务器上的变更也会自动拉取，多设备保持一致。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 多账号多日历本统一管理，并可与手机系统日历混合展示。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 完整重复规则（RRULE）与多种提前提醒（可多选：5/10/15/30/60 分钟/1 天等）。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 只读日历本标记、他人分享日历本一键静音免打扰。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 后台持续同步（长时任务），退到后台也按设定间隔继续同步。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 日程地址一键拉起高德地图导航（系统地理编码定位，无需额外配置）。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('• 提醒走系统本地通知，不依赖厂商云推送；在系统无代理提醒配额时自动降级为应用内通知（需 App 在前台或开启后台同步）。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-      }
-      .width('100%')
-      .align(Alignment.Top)
-      .padding(16)
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
-  }
-
-  @Builder
-  helpSheet() {
-    Scroll() {
-      Column({ space: 12 }) {
-        Text('一、添加账号')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('在「账号」页填写你的 CalDAV 服务器地址（如群晖 https://域名:5006）、用户名与密码。账号信息在本地加密保存，不会上传给开发者。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        Text('二、查看与新建日程')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('首页支持月 / 周 / 日 / 列表视图。点「＋」新建日程：选择所属日历本、开始/结束时间、重复规则、提醒（可多选），并可填写地址用于导航。点列表中任意日程都会弹出详情；详情中若有地址，点「导航 ›」即可拉起高德地图；可写日程还能点「编辑日程」修改。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        Text('三、同步')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('App 处于打开状态时按设定间隔自动同步。开启「后台持续同步」后，退到后台也会继续同步（通知栏有常驻通知）。同步期间会保持屏幕常亮，避免熄屏中断。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        Text('四、只读与静音')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('把某个日历本标记为「只读」后，其中日程只能查看、不再可新建（适用于他人共享给你、或服务器侧不让改的本）。把分享来的日历本「静音」，其中所有日程都不再弹提醒，避免被打扰。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        Text('五、提醒')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('日程会在开始前按设定提前量弹出系统通知。请在系统设置中开启本应用「通知」权限（设置页可检测并一键前往开启）。提醒依赖系统代理提醒配额；若系统额度为 0，将自动改用应用内通知。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        Text('六、系统日历与数据修复')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .margin({ top: 4 })
-        Text('可开启「混合显示系统日历」，把手机自带日历也一并展示；或开启「备份到 CalDAV」，把系统本地日程导入所选日历本，换机/丢失也有备份。若发现提醒丢失等异常，可点「重建日程数据」让下次同步重新拉取完整数据。')
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
           .width('100%')
       }
       .width('100%')
