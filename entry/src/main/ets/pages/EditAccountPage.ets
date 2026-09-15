@@ -208,11 +208,35 @@ struct EditAccountPage {
         this.isSaving = false;
         return;
       }
+      // 保存前的旧序号（calKey = accId_序号，序号=勾选顺序）：
+      // 服务器上新增日历本后，新本可能插在列表中间导致后续序号整体位移，
+      // 若不迁移，已落库的日程会挂错日历本（表现为色块颜色不对）。
+      const oldHrefs: string[] = target.calendarHrefs.slice();
       target.name = this.accountName.trim();
-      target.calendarHrefs = selectedItems.map((c: EditCalendarItem): string => c.href);
+      const newHrefs: string[] = selectedItems.map((c: EditCalendarItem): string => c.href);
+      target.calendarHrefs = newHrefs;
       target.calendarNames = selectedItems.map((c: EditCalendarItem): string => c.name);
       target.calendarColors = selectedItems.map((c: EditCalendarItem): string => c.color);
       LogUtil.write(`编辑账号保存：id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
+      // 按 href 求出「旧序号 → 新序号」，迁移已落库日程到正确的 calKey
+      const remapPairs: Array<[string, string]> = [];
+      for (let oi: number = 0; oi < oldHrefs.length; oi++) {
+        const oldNorm: string = DavClient.normalizeHref(oldHrefs[oi]);
+        let ni: number = -1;
+        for (let k: number = 0; k < newHrefs.length; k++) {
+          if (DavClient.normalizeHref(newHrefs[k]) === oldNorm) {
+            ni = k;
+            break;
+          }
+        }
+        if (ni >= 0 && ni !== oi) {
+          remapPairs.push([`${target.id}_${oi}`, `${target.id}_${ni}`]);
+        }
+      }
+      if (remapPairs.length > 0) {
+        const moved: number = await EventDb.remapCalKeys(context, remapPairs);
+        LogUtil.write(`编辑账号保存：日历本序号变动，迁移日程 ${moved} 行（${remapPairs.length} 个日历本）`);
+      }
       await AccountStore.saveAll(context, accounts);
       // 重选后 calKey（accId_序号）会变化，清理已取消勾选的日历本数据
       const validKeys: string[] =

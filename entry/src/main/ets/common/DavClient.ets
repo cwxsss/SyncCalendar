@@ -191,6 +191,34 @@ export class DavClient {
     }
   }
 
+  /**
+   * 规范化集合 href，用于「本地保存的 calendarHrefs」与「PROPFIND 返回的 href」比对。
+   *
+   * 为什么需要：同一集合在不同 PROPFIND 请求/不同服务器上的写法可能不同——
+   *   ① 绝对 URL（https://nas/calendars/A/） vs 纯路径（/calendars/A/）
+   *   ② URL 编码差异（/calendars/%E6%96%B0/ vs /calendars/新/）
+   *   ③ 末尾斜杠有无、重复斜杠
+   * 直接用字符串相等比对会匹配失败 → 服务器上的颜色取不回来，界面只能退回调色板色。
+   * 这里统一成「解码后的路径、无尾斜杠」再比较（路径大小写保持敏感，不转小写）。
+   */
+  static normalizeHref(href: string): string {
+    let s: string = href.trim();
+    const m = /^[a-zA-Z]+:\/\/[^/]+/i.exec(s);
+    if (m !== null) {
+      s = s.substring(m[0].length);
+    }
+    try {
+      s = decodeURIComponent(s);
+    } catch (err) {
+      // 解码失败（如含非法 % 序列）保持原样
+    }
+    s = s.replace(/\/{2,}/g, '/');
+    if (s.length > 1 && s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    return s;
+  }
+
   /** 颜色规范化：#RRGGBBAA → #RRGGBB */
   static normalizeHex(raw: string): string {
     const v: string = raw.trim();

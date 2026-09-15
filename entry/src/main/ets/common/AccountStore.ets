@@ -79,6 +79,22 @@ export class BookPalette {
   static colorFor(index: number): string {
     return BookPalette.colors[index % BookPalette.colors.length];
   }
+
+  /**
+   * 按日历本的**稳定标识**（集合 href）派生回退色。
+   *
+   * 为什么不用 colorFor(索引)：服务器未返回颜色时若按索引取色，一旦在服务器上
+   * 新增/删除日历本导致列表顺序变化，索引就会位移，**同一个日历本的颜色会跟着变**
+   * （表现为"加了个新日历本，其他日历本色块颜色全不对了"）。
+   * 用 href 做哈希派生则与顺序无关，增删日历本不会影响其余日历本的颜色。
+   */
+  static colorForHref(href: string): string {
+    let h: number = 0;
+    for (let i = 0; i < href.length; i++) {
+      h = (h * 31 + href.charCodeAt(i)) >>> 0;
+    }
+    return BookPalette.colors[h % BookPalette.colors.length];
+  }
 }
 
 function bytesToB64(u: Uint8Array): string {

@@ -66,9 +66,9 @@ export class CalendarDataService {
             name = acc.calendarHrefs.length === 1 ? acc.name : `日历本 ${i + 1}`;
           }
           s.name = `${acc.name}:${name}`;
-          // 优先使用服务器端定义的颜色，未定义时按序号取调色板
+          // 优先使用服务器端定义的颜色；未定义时按**集合 href** 派生（不随顺序变化，见 colorForHref 说明）
           let color: string = i < acc.calendarColors.length ? AccountStore.normalizeColor(acc.calendarColors[i]) : '';
-          s.color = color !== '' ? color : BookPalette.colorFor(i);
+          s.color = color !== '' ? color : BookPalette.colorForHref(acc.calendarHrefs[i]);
           s.source = 'dav';
           s.visible = true;
           // 写权限：服务器探测结果 + 手动标记（部分服务器不在 CalDAV 层拒绝写入）

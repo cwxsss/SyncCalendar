@@ -725,7 +725,7 @@ class CalendarDataBridge {
         }
         s.name = `${acc.name} · ${name}`;
         let color: string = i < acc.calendarColors.length ? AccountStore.normalizeColor(acc.calendarColors[i]) : '';
-        s.color = color !== '' ? color : BookPalette.colorFor(i);
+        s.color = color !== '' ? color : BookPalette.colorForHref(acc.calendarHrefs[i]);
         s.href = acc.calendarHrefs[i];
         s.writable = true;
         result.push(s);

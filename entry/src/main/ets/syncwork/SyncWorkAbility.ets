@@ -54,6 +54,10 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
       }
       await SyncEngine.settleLocalEvents(context);
       await SyncEngine.pruneOrphanRows(context, accounts);
+      // ⚠️ 必须回写账号：syncAccount 会就地更新 acc（服务器日历本颜色、写权限等）。
+      // 缺了这一步，后台同步刷到的颜色只留在内存里、进程退出即丢失，
+      // 界面下次冷启动仍用旧颜色（表现为"同步之后颜色还是不对"）。
+      await AccountStore.saveAll(context, accounts);
       // 同步后刷新卡片 + 重建提醒，保证后台同步的成果直接可见
       await CardDataService.pushToAllForms(context);
       await ReminderService.refreshReminders(context);

@@ -202,19 +202,22 @@ export class SyncEngine {
     }
     for (let i = 0; i < acc.calendarHrefs.length; i++) {
       const target: string = acc.calendarHrefs[i];
-      const originMatch = /https?:\/\/[^/]+/i.exec(target);
-      let path: string = originMatch !== null ? target.substring(originMatch[0].length) : target;
-      if (path === '') {
-        path = '/';
-      }
-      const norm = (s: string): string => s.endsWith('/') ? s : s + '/';
+      // 用规范化后的路径比对：兼容「绝对 URL vs 纯路径」「URL 编码差异」「尾斜杠有无」，
+      // 否则新加入的日历本匹配不上 → 服务器颜色取不回来，界面只能退回调色板色（表现为"颜色不对"）
+      const targetNorm: string = DavClient.normalizeHref(target);
       const found = entries.find((e: DavColorEntry): boolean =>
-        norm(e.href) === norm(path));
+        DavClient.normalizeHref(e.href) === targetNorm);
       if (found !== undefined && found.color !== '') {
         while (acc.calendarColors.length <= i) {
           acc.calendarColors.push('');
         }
+        if (acc.calendarColors[i] !== found.color) {
+          LogUtil.write(`日历本[${i}] 颜色更新：${acc.calendarColors[i] === '' ? '(空)' : acc.calendarColors[i]} → ${found.color}`);
+        }
         acc.calendarColors[i] = found.color;
+      } else if (found === undefined) {
+        // 匹配失败不改动已有颜色（保留上次取到的值），但记录便于排查
+        LogUtil.write(`日历本[${i}] 颜色未匹配：${target}（PROPFIND 返回 ${entries.length} 个集合）`);
       }
       // 回写各日历本写权限（'1'=可写 '0'=只读）
       while (acc.calendarWritable.length <= i) {

@@ -516,4 +516,45 @@ export class EventDb {
     }
     await store.delete(predicates);
   }
+
+  /**
+   * 迁移因「日历本序号变动」而错位的日程行（calKey = `${accId}_${序号}`）。
+   *
+   * 背景（本方法要修的现象）：序号取自「勾选顺序」。在服务器上新增一个日历本后重新勾选，
+   * 若新本不是排在末尾而是插在中间，其后所有日历本的序号都会 +1；但已落库的日程仍挂着
+   * 旧 calKey，于是**日程与日历本错位**——表现为色块颜色不对、日程显示到别人的日历本下。
+   * 同步虽然最终会用远端数据重建，但在同步完成前（以及同步部分失败时）错位一直可见。
+   *
+   * 做法：按 href 对应关系把旧 calKey 的行整体搬到新 calKey。
+   * 分两阶段更新（旧键 → 临时键 → 新键），避免 A↔B 互换时后一次更新把前一次的行一起改掉。
+   *
+   * @param pairs [旧calKey, 新calKey] 列表；只传真正发生位移的项
+   * @returns 被迁移的行数
+   */
+  static async remapCalKeys(context: common.Context, pairs: Array<[string, string]>): Promise<number> {
+    if (pairs.length === 0) {
+      return 0;
+    }
+    const store = await EventDb.getDb(context);
+    const stamp: number = Date.now();
+    const tmpKeys: string[] = [];
+    let moved: number = 0;
+    // 阶段一：旧键 → 临时键
+    for (let i = 0; i < pairs.length; i++) {
+      const tmpKey: string = `__remap_${stamp}_${i}`;
+      const bucket: relationalStore.ValuesBucket = { 'cal_key': tmpKey };
+      const p = new relationalStore.RdbPredicates('events');
+      p.equalTo('cal_key', pairs[i][0]);
+      moved += await store.update(bucket, p);
+      tmpKeys.push(tmpKey);
+    }
+    // 阶段二：临时键 → 新键
+    for (let i = 0; i < pairs.length; i++) {
+      const bucket: relationalStore.ValuesBucket = { 'cal_key': pairs[i][1] };
+      const p = new relationalStore.RdbPredicates('events');
+      p.equalTo('cal_key', tmpKeys[i]);
+      await store.update(bucket, p);
+    }
+    return moved;
+  }
 }
