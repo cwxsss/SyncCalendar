@@ -681,7 +681,8 @@ struct Index {
     }
     try {
       await ctx.openLink(link);
-      LogUtil.write(`已拉起高德导航：${address}（坐标=${coords !== null ? '有' : '无'}）`);
+      // 日志不落盘地点文本（可能包含家庭/公司等敏感地址），仅记录是否拿到坐标
+      LogUtil.write(`已拉起高德导航（地点已脱敏，坐标=${coords !== null ? '有' : '无'}）`);
       return;
     } catch (err) {
       LogUtil.write(`高德深链打开失败：${(err as BusinessError).message}`);
@@ -728,7 +729,8 @@ struct Index {
       if (list.length > 0 && list[0].latitude !== undefined && list[0].longitude !== undefined) {
         return [list[0].latitude, list[0].longitude];
       }
-      LogUtil.write(`地理编码无结果：${address}`);
+      // 日志不落盘地点文本（可能含家庭/公司等敏感地址）
+      LogUtil.write('地理编码无结果（地点已脱敏）');
     } catch (err) {
       LogUtil.write(`地理编码失败：${(err as BusinessError).message}`);
     }
@@ -2351,6 +2353,9 @@ struct DayTimelineView {
   @Watch('onShowNowLine') @Prop showNowLine: boolean = false; // 仅"今天"显示红线 + 触发自动定位
   @Prop scrollable: boolean = false; // 是否自带可滚动容器（月/周视图日时间轴=true；列表视图卡片=false）
   hourUnit: number = TimelineUtil.HOUR_UNIT;
+  private minBlockVp: number = 16;   // 极短日程色块的可读高度下限（一行"标题 + 时间"）
+  private twoLineVp: number = 30;    // 能放下"标题 + 时间/地点"两行的高度门槛
+  private threeLineVp: number = 46;  // 能放下"标题 / 时间 / 地址"三行的高度门槛
   onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {};
   private scroller: Scroller = new Scroller();
   @State private viewportH: number = 0; // 滚动视口高度（由 Scroll 实测，用于把"当前时刻"居中）
@@ -2483,10 +2488,62 @@ struct DayTimelineView {
     const d: number = (top - prevEnd) * this.totalH();
     return d < 0 ? 0 : d;
   }
-  /** 色块高度（vp）：按实际时长换算，至少 14vp 保证短日程也可见（超出组行的部分由列裁切） */
-  private blockH(b: TimelineBlock): number {
-    const h: number = b.heightRatio * this.totalH();
-    return h < 14 ? 14 : h;
+  /** 色块实际渲染高度（vp）：按真实时长换算。
+   *  "特别短"的日程（如 15 分钟）原始高度只有几 vp，放不下一行字 → 在不越过**同列下一个色块**的前提下
+   *  尽量垫到 minBlockVp，保证至少能显示一行"时刻 + 题目"。垫不满时按实际可用量给，绝不重叠。 */
+  private blockVp(r: TimeRow, lane: TimelineBlock[], index: number): number {
+    const arr: TimelineBlock[] = this.laneBlocks(r, lane);
+    const b: TimelineBlock = arr[index];
+    const real: number = b.heightRatio * this.totalH();
+    if (real >= this.minBlockVp) {
+      return real;
+    }
+    let room: number = 0; // 可以借用的下方空隙（同列下一块之前 / 本行末尾）
+    if (index + 1 < arr.length) {
+      room = this.lanePadH(r, lane, index + 1);
+    } else {
+      const tail: number = (r.botRatio - (b.topRatio + b.heightRatio)) * this.totalH();
+      room = tail > 0 ? tail : 0;
+    }
+    const h: number = real + room;
+    return h > this.minBlockVp ? this.minBlockVp : h;
+  }
+  /** 色块信息行数（按**渲染高度**判定，标题永远独占第一行的开头）：
+   *  1 = 一行放下 → 标题 · 时间 · 地址（时间用短格式）；
+   *  2 = 标题一行 + "时间 · 地点"一行；
+   *  3 = 标题 / 时间 / 地址 各一行（没有地址时退化为 2 行，不空占一行）。 */
+  private blockLines(r: TimeRow, lane: TimelineBlock[], index: number, b: TimelineBlock): number {
+    const h: number = this.blockVp(r, lane, index);
+    if (h >= this.threeLineVp && b.location !== '') {
+      return 3;
+    }
+    if (h >= this.twoLineVp) {
+      return 2;
+    }
+    return 1;
+  }
+  /** 两行色块的第二行：'09:00 - 10:30 · 地点'（无地点时只剩时间） */
+  private blockMeta(b: TimelineBlock): string {
+    if (b.location !== '') {
+      return `${b.timeText} · ${b.location}`;
+    }
+    return b.timeText;
+  }
+  /** 色块 ForEach key 的内容签名：只读标记 / 地点 / 渲染高度 / 标题长度任一变化都必须强制重建，
+   *  否则 ArkUI 会按旧 key 复用子组件 → "改了样式界面不更新"。 */
+  private blockSig(r: TimeRow, lane: TimelineBlock[], index: number, b: TimelineBlock): string {
+    return `${b.writable ? 1 : 0}_${b.location.length}_${Math.round(this.blockVp(r, lane, index))}_${b.title.length}`;
+  }
+  /** 「只读」小标：圆角矩形白框 + 白字，紧跟在日程标题后面，字号比标题小一号 */
+  @Builder
+  private roTag() {
+    Text('只读')
+      .fontSize(9)
+      .fontColor('#FFFFFF')
+      .border({ width: 0.5, color: '#FFFFFF' })
+      .borderRadius(4)
+      .padding({ left: 4, right: 4, top: 0, bottom: 0 })
+      .maxLines(1)
   }
   // 整点灰线由第 1 层（网格层）画、红线由第 3 层画 → 日程层不再为它们切段。
   /** 左侧刻度：当前小时是否高亮（仅今天） */
@@ -2588,6 +2645,15 @@ struct DayTimelineView {
                 .backgroundColor('#26000000')
                 .borderRadius(6)
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              if (!e.writable) {
+                // 只读标记：圆角矩形白框 + 白字（与色块上的「只读」小标同一套样式）
+                Text('只读')
+                  .fontSize(9)
+                  .fontColor('#FFFFFF')
+                  .border({ width: 0.5, color: '#FFFFFF' })
+                  .borderRadius(4)
+                  .padding({ left: 4, right: 4, top: 0, bottom: 0 })
+              }
               Text(e.title === '' ? '(无标题)' : e.title)
                 .fontSize(12)
                 .fontWeight(FontWeight.Medium)
@@ -2595,15 +2661,24 @@ struct DayTimelineView {
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .layoutWeight(1)
+              if (e.location !== '') {
+                Text(e.location)
+                  .fontSize(10)
+                  .fontColor('#D9FFFFFF')
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .constraintSize({ maxWidth: 120 })
+              }
             }
             .alignItems(VerticalAlign.Center)
             .width('100%')
             .height(26)
             .padding({ left: 8, right: 8 })
             .borderRadius(8)
+            // 只读不再用灰蒙版（已撤），只靠标题后的「只读」白框小标区分
             .backgroundColor(e.color)
             .onClick(() => this.onPick(e))
-          }, (e: DisplayEvent) => `al_${this.timeline.dateKey}_${TimelineUtil.keyOf(e)}`)
+          }, (e: DisplayEvent) => `al_${this.timeline.dateKey}_${TimelineUtil.keyOf(e)}_${e.writable ? 1 : 0}_${e.location.length}`)
         }
         .width('100%')
         .padding({ bottom: 6 })
@@ -2683,20 +2758,80 @@ struct DayTimelineView {
                 ForEach(this.laneBlocks(r, lane), (b: TimelineBlock, index: number) => {
                   Blank().height(this.lanePadH(r, lane, index))
                   Column({ space: 1 }) {
-                    Text(b.title)
-                      .fontSize(11)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor('#FFFFFF')
-                      .maxLines(2)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    if (this.blockLines(r, lane, index, b) === 1) {
+                      // 一行：标题 · [只读] · 时间 · 地址
+                      // 时间用**完整起止**（09:00 - 10:30）：宽度够就整段显示，不够由 maxWidth + 省略号自然截断；
+                      // 三者的让位顺序是"地址先没 → 时间省略 → 标题只保 50%"，保证标题与开始时间一定看得到。
+                      Row({ space: 4 }) {
+                        Text(b.title)
+                          .fontSize(10)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor('#FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '50%' })
+                          .lineHeight(12)
+                        if (!b.writable) {
+                          this.roTag()
+                        }
+                        Text(b.timeText)
+                          .fontSize(9)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '55%' })
+                          .lineHeight(12)
+                        if (b.location !== '') {
+                          Text(b.location)
+                            .fontSize(9)
+                            .fontColor('#B3FFFFFF')
+                            .maxLines(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                            .lineHeight(12)
+                            .layoutWeight(1)
+                        }
+                      }
                       .width('100%')
-                    if (b.heightRatio * 86400000 >= 40 * 60000) {
-                      Text(b.timeText)
-                        .fontSize(9)
-                        .fontColor('#E6FFFFFF')
-                        .maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        .width('100%')
+                      .alignItems(VerticalAlign.Center)
+                    } else {
+                      // 第一行：标题 · [只读]（标题永远打头）
+                      Row({ space: 4 }) {
+                        Text(b.title)
+                          .fontSize(11)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor('#FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '70%' })
+                        if (!b.writable) {
+                          this.roTag()
+                        }
+                      }
+                      .width('100%')
+                      .alignItems(VerticalAlign.Center)
+                      if (this.blockLines(r, lane, index, b) >= 3) {
+                        // 三行：第二行时间、第三行地址
+                        Text(b.timeText)
+                          .fontSize(9)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                        Text(b.location)
+                          .fontSize(9)
+                          .fontColor('#B3FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                      } else {
+                        // 两行：第二行"时间 · 地点"
+                        Text(this.blockMeta(b))
+                          .fontSize(9)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                      }
                     }
                   }
                   .alignItems(HorizontalAlign.Start)
@@ -2707,13 +2842,13 @@ struct DayTimelineView {
                   .opacity(b.isNow ? 1 : 0.92)
                   .clip(true)
                   .width('100%')
-                  .height(this.blockH(b))
+                  .height(this.blockVp(r, lane, index))
                   .onClick(() => {
                     if (b.ev !== null) {
                       this.onPick(b.ev);
                     }
                   })
-                }, (b: TimelineBlock) => `blk_${r.key}_${b.eventKey}`)
+                }, (b: TimelineBlock, index: number) => `blk_${r.key}_${b.eventKey}_${this.blockSig(r, lane, index, b)}`)
               }
               .layoutWeight(1)
               .height('100%')

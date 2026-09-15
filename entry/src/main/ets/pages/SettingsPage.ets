@@ -104,6 +104,11 @@ struct SettingsPage {
     this.allBooks = books;
   }
 
+  /** 该日历本是否只读：服务器无写权限（探测结果）或用户手动标记只读 —— 与首页色块/只读标记同一口径 */
+  private isBookReadonly(b: BackupTarget): boolean {
+    return !b.serverWritable || this.manualKeys.includes(b.calKey);
+  }
+
   /** 手动标记/取消只读 */
   private async toggleManualBook(b: BackupTarget): Promise<void> {
     if (this.context === undefined) {
@@ -300,6 +305,44 @@ struct SettingsPage {
     });
   }
 
+  /** 确认后清空本地账号库（密码一并删除不可恢复；服务器日程不受影响） */
+  private askResetVault(): void {
+    this.getUIContext().showAlertDialog({
+      title: '重置账号库',
+      message: '将删除本机保存的全部账号、服务器地址与密码，回到"还没添加过账号"的状态。\n\n'
+        + '日历数据保存在你的 CalDAV 服务器上，不受影响：重新添加账号并同步一次即可恢复。\n\n'
+        + '本操作不可撤销（本地密码会一并删除），仅在账号读不出来、也无法新增账号时使用。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '确认重置',
+        action: (): void => {
+          this.doResetVault();
+        }
+      }
+    });
+  }
+
+  private async doResetVault(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    try {
+      await AccountStore.resetVault(this.context);
+      this.getUIContext().getPromptAction().showToast({
+        message: '账号库已重置，请重新添加账号'
+      });
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({
+        message: '重置失败，请稍后重试'
+      });
+    }
+  }
+
   /** 去系统设置开启本应用通知 */
   private async openNotifySettings(): Promise<void> {
     if (this.context === undefined) {
@@ -313,10 +356,18 @@ struct SettingsPage {
     }
   }
 
-  /** 打开外部链接（如开源仓库） */
+  /**
+   * 打开外部链接（隐私政策 / 用户服务协议 / 开源仓库）。
+   * 仅放行 http(s)：避免 URL 被篡改或误传为 file://、自定义 scheme、intent 类 URI 时，
+   * 拉起本地文件或任意第三方应用 —— 把"打开网页"严格限定在预期范围内。
+   */
   private async openUrl(url: string): Promise<void> {
     const context = this.getUIContext().getHostContext();
     if (context === undefined) {
+      return;
+    }
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
       return;
     }
     try {
@@ -468,6 +519,36 @@ struct SettingsPage {
                 .backgroundColor($r('app.color.brand'))
                 .onClick(() => {
                   this.askRebuildData();
+                })
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 逃生舱：账号库读不出来（密钥丢失/失效）时，只清账号，不动设置与日程
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('重置账号库')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('清空本机保存的账号、服务器地址与密码。服务器上的日程不受影响，重新添加账号并同步即可恢复。仅在账号读不出来、也无法新增账号时使用')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Button('重置')
+                .fontSize(13)
+                .backgroundColor($r('app.color.error'))
+                .onClick(() => {
+                  this.askResetVault();
                 })
             }
             .width('100%')
@@ -791,9 +872,17 @@ struct SettingsPage {
             }
             ForEach(this.allBooks, (b: BackupTarget) => {
               Row({ space: 8 }) {
+                // 日历本色点：只读本变中性灰 —— 相当于给这个本盖了一层灰蒙板
+                Column()
+                  .width(8)
+                  .height(8)
+                  .borderRadius(4)
+                  .backgroundColor(this.isBookReadonly(b)
+                    ? '#B0B4BA' : $r('app.color.brand'))
                 Text(b.label)
                   .fontSize(13)
-                  .fontColor($r('app.color.text_primary'))
+                  .fontColor(this.isBookReadonly(b)
+                    ? $r('app.color.text_hint') : $r('app.color.text_primary'))
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .layoutWeight(1)
@@ -827,8 +916,9 @@ struct SettingsPage {
                   })
               }
               .width('100%')
-              .padding({ top: 6, bottom: 6 })
-            }, (b: BackupTarget) => `book_${b.calKey}_r${this.manualKeys.includes(b.calKey) ? 1 : 0}_m${this.mutedKeys.includes(b.calKey) ? 1 : 0}`)
+              .padding({ left: 6, right: 6, top: 6, bottom: 6 })
+              .borderRadius(8)
+            }, (b: BackupTarget) => `book_${b.calKey}_r${this.manualKeys.includes(b.calKey) ? 1 : 0}_m${this.mutedKeys.includes(b.calKey) ? 1 : 0}_w${b.serverWritable ? 1 : 0}`)
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')

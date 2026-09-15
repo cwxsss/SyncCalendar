@@ -45,7 +45,7 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
           ok++;
         } catch (err) {
           const e = err as BusinessError;
-          LogUtil.write(`延迟任务同步「${acc.name}」失败: ${e.message}`);
+          LogUtil.write(`延迟任务同步 id=${acc.id} 失败: ${e.message}`);
         }
       }
       // 全部账号同步成功才结束"一次性全量重拉"状态

@@ -20,6 +20,22 @@ export class DavColorEntry {
   privilegeKnown: boolean = false; // 服务器是否返回了 current-user-privilege-set（未返回时需要写探测）
 }
 
+/** 日历本集合条目（"添加/编辑账号"页列日历本用） */
+export class DavCalendarEntry {
+  href: string = '';        // 完整 URL（已补全域名）
+  displayName: string = ''; // 显示名（服务器未给 displayname 时回退为路径末段）
+  color: string = '';       // 规范化后的 #RRGGBB，可能为空
+}
+
+/**
+ * 日历本发现结果。
+ * 带 statusCode —— 调用方需要据此区分「401 凭据失效」与「非 207 异常」，故不能只返回列表。
+ */
+export class DavCalendarDiscovery {
+  statusCode: number = 0;
+  entries: DavCalendarEntry[] = [];
+}
+
 export class DavClient {
   /**
    * PROPFIND 拉取某路径下所有集合的 calendar-color
@@ -88,6 +104,88 @@ export class DavClient {
         console.info(`PROPFIND(颜色) 未取到颜色，响应片段: ${xml.substring(0, 600)}`);
       }
       return result;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * PROPFIND 列出某账号下所有「日历集合」（resourcetype 含 calendar）。
+   *
+   * 供「添加账号 / 编辑账号」两页复用，取代它们各自维护的一份同逻辑拷贝 ——
+   * 解析逻辑集中在此，避免多处正则各自漂移。
+   * 解析用正则而非 XML 解析器（见 extractTag 的 XXE 说明）。
+   * 网络/解析异常向上抛出由调用方决定提示文案；仅"HTTP 状态码非成功"经 statusCode 返回。
+   */
+  static async listCalendars(serverUrl: string, auth: string): Promise<DavCalendarDiscovery> {
+    const requestBody: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
+      'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
+      '<d:displayname/><d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
+      '</d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    const out = new DavCalendarDiscovery();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(serverUrl, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: requestBody,
+        connectTimeout: 10000,
+        readTimeout: 15000
+      });
+      out.statusCode = resp.responseCode;
+      LogUtil.write(`HTTP PROPFIND(日历本) ${serverUrl} → ${resp.responseCode}`);
+      if (resp.responseCode !== 207 && resp.responseCode !== 200) {
+        return out;
+      }
+      const xml: string = resp.result as string;
+      const originMatch = /https?:\/\/[^/]+/i.exec(serverUrl);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const href: string = DavClient.extractTag(block, 'href');
+        if (href === '') {
+          continue;
+        }
+        const resourcetype: string = DavClient.extractTag(block, 'resourcetype');
+        if (!/calendar/i.test(resourcetype)) {
+          continue;
+        }
+        let name: string = DavClient.extractTag(block, 'displayname');
+        if (name === '') {
+          // 服务器没给 displayname → 回退为 href 路径末段
+          const segs: string[] = href.split('/').filter((s: string) => s !== '');
+          if (segs.length > 0) {
+            const last: string = segs[segs.length - 1];
+            try {
+              name = decodeURIComponent(last);
+            } catch (err) {
+              name = last;
+            }
+          } else {
+            name = href;
+          }
+        }
+        // 两个命名空间都试：cs:getcolor（CalendarServer）/ ical:calendar-color（Apple）
+        let color: string = DavClient.normalizeHex(DavClient.extractTag(block, 'getcolor'));
+        if (color === '') {
+          color = DavClient.normalizeHex(DavClient.extractTag(block, 'calendar-color'));
+        }
+        const entry = new DavCalendarEntry();
+        entry.href = href.startsWith('http') ? href : origin + href;
+        entry.displayName = name;
+        entry.color = color;
+        out.entries.push(entry);
+      }
+      return out;
     } finally {
       httpRequest.destroy();
     }
@@ -370,7 +468,14 @@ export class DavClient {
     }
   }
 
-  /** 提取任意命名空间前缀标签的内容 */
+  /**
+   * 提取任意命名空间前缀标签的文本内容（如 `<d:href>` / `<cs:getcolor>`）。
+   *
+   * 安全说明：此处**刻意用正则而不是 XML 解析器**——DAV 响应来自用户自填的远端服务器，
+   * 属不可信输入；正则提取不构建 DOM、不解析实体，从根上规避了 XXE（外部实体扩展）
+   * 与「十亿笑声」实体炸弹这类解析器层面的攻击面。
+   * 另外 `tag` 只由本文件内的代码常量传入，不来自远端数据，故无需防注入。
+   */
   static extractTag(xml: string, tag: string): string {
     const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
     const regex: RegExp = new RegExp(pattern, 'i');

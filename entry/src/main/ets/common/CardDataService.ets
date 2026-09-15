@@ -16,7 +16,6 @@ export class CardItem {
   endTime: string = '';   // 结束时间 '10:00'（全天事件为空）
   date: string = '';      // '9月15日'
   showDate: boolean = false; // 是否为当天分组的第一条（卡片上渲染日期头）
-  calName: string = '';   // 所属日历本名（右侧显示，颜色同日历色）
   color: string = '#007DFF';
   // 当前时间红线：start/end 为日程实际起止毫秒（用于定位"现在"位置）；
   // showNowLine 表示该日程上方应绘制红线，isNow 表示该日程正在进行中
@@ -252,7 +251,6 @@ export class CardDataService {
           }
           item.date = dateLabel;
           item.showDate = i === 0; // 当天分组第一条 → 卡片上显示日期头
-          item.calName = e.calName;
           item.color = e.color;
           // 红线定位：记录实际起止毫秒（用于卡片渲染时判断"现在"位置）
           item.startMs = e.startTime;
@@ -316,7 +314,6 @@ export class CardDataService {
         oi.title = e.title === '' ? '(无标题)' : e.title;
         oi.time = dayLong ? '全天' : `${p(ds.getHours())}:${p(ds.getMinutes())}`;
         oi.endTime = dayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
-        oi.calName = e.calName;
         oi.color = e.color;
         oi.startMs = e.startTime;
         oi.endMs = e.endTime;

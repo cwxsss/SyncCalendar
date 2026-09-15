@@ -346,6 +346,8 @@ export class EventDb {
    * 用远端数据刷新某个日历本（增量）：
    * - etag 未变的跳过；变化的更新；远端没有的本地图删掉（排除本地待推送的新事件）
    * - 返回统计描述："新增X 更新Y 删除Z 不变W"
+   * - 实例唯一键用 `${uid}_${startTime}`：同一 uid 的多日展开各自成行，
+   *   因此**改期会表现为"旧实例删除 + 新实例新增"**，属预期行为。
    */
   static async applyRemote(context: common.Context, calKey: string, href: string,
     remote: RemoteEvent[], isTodo: boolean): Promise<string> {

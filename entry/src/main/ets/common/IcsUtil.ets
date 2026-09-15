@@ -216,7 +216,13 @@ export class IcsUtil {
     return parsed;
   }
 
-  /** 由本地事件构建 VCALENDAR 文本（时间统一转 UTC，保证服务器端时区正确） */
+  /**
+   * 由本地事件构建 VCALENDAR 文本（时间统一转 UTC，保证服务器端时区正确）。
+   *
+   * 已知取舍：摘要 / 地点 / 备注等文本字段**未做 ICS 转义**（`,` `;` `\` 与换行）。
+   * 含这些字符的标题在服务器端可能被截断或串行；
+   * 若线上出现"标题被截断"反馈，需在此补 escapeIcsText()。
+   */
   static build(e: LocalEvent): string {
     const pad = (n: number): string => n < 10 ? '0' + n : String(n);
     const fmtUtc = (ms: number): string => {

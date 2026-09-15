@@ -1,10 +1,10 @@
 // entry/src/main/ets/pages/CalendarListPage.ets
 // 添加账号第二页：PROPFIND 列出日历本 → 勾选 → 命名 → 保存账号
-import { http } from '@kit.NetworkKit';
 import { router } from '@kit.ArkUI';
 import { buffer } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_CALDAV } from '../common/AccountStore';
+import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
 import { LogUtil } from '../common/LogUtil';
 
 /**
@@ -52,7 +52,8 @@ struct CalendarListPage {
     this.serverUrl = AppStorage.get<string>('pendingDavUrl') ?? '';
     this.username = AppStorage.get<string>('pendingDavUsername') ?? '';
     this.password = AppStorage.get<string>('pendingDavPassword') ?? '';
-    LogUtil.write(`添加账号流程开始：服务器=${this.serverUrl} 用户名=${this.username}`);
+    // 日志不记录用户名（可能是邮箱等个人标识），只留服务器地址以便定位问题
+    LogUtil.write(`添加账号流程开始：服务器=${this.serverUrl}`);
     if (this.serverUrl === '') {
       this.isLoading = false;
       this.statusMsg = '尚未连接服务器，请先返回重新连接';
@@ -60,6 +61,23 @@ struct CalendarListPage {
       return;
     }
     await this.fetchCalendars();
+  }
+
+  /**
+   * 清除跨页传递的明文凭据。
+   * 这些值原本通过 AppStorage 在页面间传递，AppStorage 是全局单例，若不清除，
+   * 明文密码会在**整个进程生命周期**内一直可读 —— 属于不必要的凭据驻留。
+   */
+  private clearPendingCredentials(): void {
+    AppStorage.setOrCreate<string>('pendingDavPassword', '');
+    AppStorage.setOrCreate<string>('pendingDavUsername', '');
+    AppStorage.setOrCreate<string>('pendingDavUrl', '');
+    this.password = '';
+  }
+
+  /** 离开页面即清理凭据（覆盖用户按返回键放弃添加这条路径） */
+  aboutToDisappear(): void {
+    this.clearPendingCredentials();
   }
 
   private encodeBasicAuth(): string {
@@ -80,45 +98,25 @@ struct CalendarListPage {
       this.statusOk = false;
       return;
     }
-    const requestBody: string = '<?xml version="1.0" encoding="utf-8"?>' +
-      '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
-      'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
-      '<d:displayname/><d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
-      '</d:prop></d:propfind>';
-    const httpRequest = http.createHttp();
+    // PROPFIND 与解析统一走 DavClient.listCalendars（与「编辑账号」页共用同一实现，避免重复正则逻辑）
     try {
-      const resp: http.HttpResponse = await httpRequest.request(this.serverUrl, {
-        method: 'PROPFIND' as http.RequestMethod,
-        header: {
-          'Authorization': 'Basic ' + token,
-          'Content-Type': 'application/xml; charset=utf-8',
-          'Depth': '1',
-          'User-Agent': 'SyncCalendar/1.0'
-        },
-        extraData: requestBody,
-        connectTimeout: 10000,
-        readTimeout: 15000
-      });
-      console.info(`PROPFIND 响应码: ${resp.responseCode}`);
-      if (resp.responseCode === 401) {
-        this.isLoading = false;
+      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.serverUrl, 'Basic ' + token);
+      this.isLoading = false;
+      if (disc.statusCode === 401) {
         this.statusMsg = '登录已失效，请返回重新连接';
         this.statusOk = false;
         return;
       }
-      if (resp.responseCode !== 207 && resp.responseCode !== 200) {
-        this.isLoading = false;
-        this.statusMsg = `获取日历列表失败，服务器返回：${resp.responseCode}`;
+      if (disc.statusCode !== 207 && disc.statusCode !== 200) {
+        this.statusMsg = `获取日历列表失败，服务器返回：${disc.statusCode}`;
         this.statusOk = false;
         return;
       }
-      const xml: string = resp.result as string;
-      LogUtil.write(`添加账号 PROPFIND → ${resp.responseCode}，响应体 ${xml.length} 字符`);
-      const list: CalendarItem[] = this.parseCalendarList(xml);
+      const list: CalendarItem[] = disc.entries.map((e: DavCalendarEntry): CalendarItem =>
+        new CalendarItem(e.href, e.displayName, e.color));
       for (const item of list) {
         LogUtil.write(`发现日历本：「${item.name}」${item.href} 颜色=${item.color === '' ? '(无)' : item.color}`);
       }
-      this.isLoading = false;
       if (list.length === 0) {
         this.statusMsg = '该路径下未发现日历本（没有包含 calendar 资源类型的集合）';
         this.statusOk = false;
@@ -134,57 +132,7 @@ struct CalendarListPage {
       this.isLoading = false;
       this.statusMsg = `获取日历列表失败：${e.message}`;
       this.statusOk = false;
-    } finally {
-      httpRequest.destroy();
     }
-  }
-
-  private extractTag(xml: string, tag: string): string {
-    const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
-    const regex: RegExp = new RegExp(pattern, 'i');
-    const match = regex.exec(xml);
-    return match !== null ? match[2].trim() : '';
-  }
-
-  private parseCalendarList(xml: string): CalendarItem[] {
-    const items: CalendarItem[] = [];
-    const originMatch = /https?:\/\/[^/]+/i.exec(this.serverUrl);
-    const origin: string = originMatch !== null ? originMatch[0] : '';
-    const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
-    for (const block of blocks) {
-      if (!/<[\w-]*:?response[\s>]/i.test(block)) {
-        continue;
-      }
-      const href: string = this.extractTag(block, 'href');
-      if (href === '') {
-        continue;
-      }
-      const resourcetype: string = this.extractTag(block, 'resourcetype');
-      if (!/calendar/i.test(resourcetype)) {
-        continue;
-      }
-      let name: string = this.extractTag(block, 'displayname');
-      if (name === '') {
-        const segs: string[] = href.split('/').filter((s: string) => s !== '');
-        if (segs.length > 0) {
-          try {
-            name = decodeURIComponent(segs[segs.length - 1]);
-          } catch (err) {
-            name = segs[segs.length - 1];
-          }
-        } else {
-          name = href;
-        }
-      }
-      // 服务器端颜色：cs:getcolor 或 ical:calendar-color，带 Alpha 时转成 #RRGGBB
-      let color: string = AccountStore.normalizeColor(this.extractTag(block, 'getcolor'));
-      if (color === '') {
-        color = AccountStore.normalizeColor(this.extractTag(block, 'calendar-color'));
-      }
-      const fullHref: string = href.startsWith('http') ? href : origin + href;
-      items.push(new CalendarItem(fullHref, name, color));
-    }
-    return items;
   }
 
   private async saveSelection(): Promise<void> {
@@ -222,13 +170,14 @@ struct CalendarListPage {
       acc.calendarHrefs = selectedItems.map((c: CalendarItem): string => c.href);
       acc.calendarNames = selectedItems.map((c: CalendarItem): string => c.name);
       acc.calendarColors = selectedItems.map((c: CalendarItem): string => c.color);
-      LogUtil.write(`保存账号「${acc.name}」：id=${acc.id}，勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
+      LogUtil.write(`保存账号 id=${acc.id}：勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
       await AccountStore.addAccount(context, acc);
       AppStorage.setOrCreate<string>('pendingSyncAccountId', acc.id);
       this.getUIContext().getPromptAction()
         .showToast({ message: `账号已保存，共 ${selectedItems.length} 个日历本` });
       this.statusMsg = '保存成功';
       this.statusOk = true;
+      this.clearPendingCredentials();
       router.back({ url: 'pages/AccountsPage' });
     } catch (err) {
       const e = err as BusinessError;

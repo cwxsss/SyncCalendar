@@ -151,6 +151,41 @@ struct AddAccountPage {
       return;
     }
 
+    // 明文 HTTP 属于"已知不安全"的传输方式：Basic 凭据（用户名/密码）会以未加密形式
+    // 在网络上传输，可被同网络中间人直接读取。
+    // 不直接拒绝（局域网自建 NAS/测试环境常用 http），但必须让用户明确知情并二次确认，
+    // 避免用户在不知情下把凭据发到明文信道。
+    if (targetUrl.startsWith('http://')) {
+      this.getUIContext().showAlertDialog({
+        title: '不安全连接',
+        message: '该地址使用 http:// 明文连接，用户名与密码将以未加密方式在网络中传输，存在被窃听的风险。\n\n建议改用 https://。是否仍要继续？',
+        autoCancel: true,
+        alignment: DialogAlignment.Center,
+        primaryButton: {
+          value: '取消',
+          action: (): void => {
+            this.statusMsg = '已取消：建议改用 https:// 地址';
+            this.statusOk = false;
+          }
+        },
+        secondaryButton: {
+          value: '仍要继续',
+          fontColor: $r('app.color.error'),
+          action: (): void => {
+            this.doConnect(targetUrl);
+          }
+        }
+      });
+      return;
+    }
+    await this.doConnect(targetUrl);
+  }
+
+  /** 实际连接并（成功时）把凭据经 AppStorage 交给日历本选择页 */
+  private async doConnect(targetUrl: string): Promise<void> {
+    if (this.isLoading) {
+      return;
+    }
     this.isLoading = true;
     this.statusMsg = '正在连接服务器…';
     this.statusOk = false;

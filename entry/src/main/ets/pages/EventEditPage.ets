@@ -270,7 +270,8 @@ struct EventEditPage {
       } else {
         await SyncEngine.settleLocalEvents(context);
       }
-      LogUtil.write(`本地保存日程「${e.title}」提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
+      // 日志仅记录 uid 与提醒/重复设置，不落盘日程标题（避免隐私内容进入可备份的 sync.log）
+      LogUtil.write(`本地保存日程（标题已脱敏）uid=${e.uid} 提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
       // 立即刷新提醒（不等下一轮同步），保证刚保存的提醒马上生效
       try {
         await ReminderService.refreshReminders(context as common.UIAbilityContext);
@@ -287,6 +288,35 @@ struct EventEditPage {
       router.back();
     }
     this.isSaving = false;
+  }
+
+  /**
+   * 删除前二次确认。
+   * 删除日程不可撤销，且会同时从本地库与服务器（DAV）移除，故破坏性操作前必须显式确认，
+   * 避免"删除日程"按钮点击即删的误触。
+   */
+  private askRemoveEvent(): void {
+    if (this.event === null || this.isSaving) {
+      return;
+    }
+    const label: string = this.title.trim() === '' ? '该日程' : `「${this.title.trim()}」`;
+    this.getUIContext().showAlertDialog({
+      title: '删除日程',
+      message: `确定删除${label}吗？\n\n删除后该日程将从本地与服务器日历中一并移除，且不可撤销。`,
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '删除',
+        fontColor: $r('app.color.error'),
+        action: (): void => {
+          this.removeEvent();
+        }
+      }
+    });
   }
 
   private async removeEvent(): Promise<void> {
@@ -314,7 +344,8 @@ struct EventEditPage {
       } else {
         await SyncEngine.settleLocalEvents(context);
       }
-      LogUtil.write(`本地删除日程「${this.event?.title ?? ''}」`);
+      // 日志不落盘日程标题，仅以 uid 追踪
+      LogUtil.write(`本地删除日程（标题已脱敏）uid=${this.event?.uid ?? ''}`);
       // 立即刷新提醒（取消已发布但日程已删的提醒）
       try {
         await ReminderService.refreshReminders(context as common.UIAbilityContext);
@@ -515,7 +546,8 @@ struct EventEditPage {
               .borderRadius(12)
               .enabled(!this.isSaving)
               .onClick(() => {
-                this.removeEvent();
+                // 二次确认后再执行删除
+                this.askRemoveEvent();
               })
           }
         }

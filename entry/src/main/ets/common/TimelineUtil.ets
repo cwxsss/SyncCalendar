@@ -16,7 +16,9 @@ export class TimelineBlock {
   eventKey: string = '';   // 与视图 ForEach key 一致
   title: string = '';
   timeText: string = '';   // '09:00 - 10:30'
+  location: string = '';   // 地点（第 2/3 行显示）
   color: string = '#007DFF';
+  writable: boolean = true; // 所属日历本是否可写（false → 色块标题后挂白框「只读」小标）
   topRatio: number = 0;    // 距 0 点的比例 0~1（乘时间轴总高）
   heightRatio: number = 0; // 高度比例（最小高度由视图侧兜底）
   leftRatio: number = 0;   // 横向起始比例 0~1（冲突平分）
@@ -84,6 +86,10 @@ export class TimelineUtil {
     const p = (n: number): string => n < 10 ? '0' + n : String(n);
     return `${p(d.getHours())}:${p(d.getMinutes())}`;
   }
+
+  // ---- 只读外观 ------------------------------------------------------------
+  // 只读不再用"灰蒙版底色"（观感不好，已撤），改为在色块标题后挂一个**白框白字**的「只读」小标
+  // （见 Index 的 roTag()/卡片内的同名小标）。这里只负责把可写标记带出来。
 
   /**
    * 构建某一天的时间轴布局。
@@ -165,6 +171,8 @@ export class TimelineUtil {
         b.groupIndex = groupIdx;
         b.title = e.title === '' ? '(无标题)' : e.title;
         b.timeText = `${TimelineUtil.fmtTime(e.startTime)} - ${TimelineUtil.fmtTime(e.endTime)}`;
+        b.location = e.location;
+        b.writable = e.writable;
         b.color = e.color;
         // 与今天的交集（跨天日程已排除，这里都是日内）
         const s: number = Math.max(e.startTime, dayStart);

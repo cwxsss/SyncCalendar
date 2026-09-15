@@ -14,6 +14,8 @@ class TBlock {
   eventKey: string = '';
   title: string = '';
   timeText: string = '';
+  location: string = '';  // 地点（第 2/3 行显示）
+  writable: boolean = true; // false → 标题后挂白框「只读」小标
   color: string = '#007DFF';
   topRatio: number = 0;
   heightRatio: number = 0;
@@ -143,9 +145,11 @@ struct Widget4x4Card {
     rg.e = e;
     return rg;
   }
+  /** 视窗起始小时（取 w4Range 的起点，向下取整） */
   private w4StartHour(): number {
     return this.w4Range().s;
   }
+  /** 视窗结束小时（取 w4Range 的终点，向上取整） */
   private w4EndHour(): number {
     return this.w4Range().e;
   }
@@ -305,6 +309,21 @@ struct Widget4x4Card {
   /** 色块高度（vp） */
   private w4BlockVp(b: TBlock): number {
     return b.heightRatio * 24 * W4_HOUR;
+  }
+  /** 色块信息行数（标题永远打头）：1=标题+时间+地址同行；2=标题 + 时间·地点；3=标题 / 时间 / 地址 */
+  private w4Lines(b: TBlock): number {
+    const h: number = this.w4BlockVp(b);
+    if (h >= 40 && b.location !== '') {
+      return 3;
+    }
+    if (h >= 26) {
+      return 2;
+    }
+    return 1;
+  }
+  /** 两行色块的第二行：'09:00 - 10:30 · 地点'（无地点时只剩时间） */
+  private w4Meta(b: TBlock): string {
+    return b.location !== '' ? `${b.timeText} · ${b.location}` : b.timeText;
   }
   /** 今天定时日程是否已全部结束（最晚结束比例 <= 当前时刻比例）；只剩全天 / 无定时日程也算已结束。
    *  非今天（r<0）返回 false，交由原条件判断（非今天本来就不显示红线）。 */
@@ -585,19 +604,89 @@ struct Widget4x4Card {
                 ForEach(lane, (b: TBlock, index: number) => {
                   Blank().height(this.w4LanePadVp(r.group, lane, index))
                   Column({ space: 1 }) {
-                    Text(b.title)
-                      .fontSize(10)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor('#FFFFFF')
-                      .maxLines(2)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    if (this.w4Lines(b) === 1) {
+                      // 一行：标题 · [只读] · 时间 · 地址（时间用完整起止，宽度不够自然省略；
+                      // 让位顺序：地址先没 → 时间省略 → 标题只保 50%）
+                      Row({ space: 3 }) {
+                        Text(b.title)
+                          .fontSize(9)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor('#FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '50%' })
+                          .lineHeight(11)
+                        if (!b.writable) {
+                          Text('只读')
+                            .fontSize(8)
+                            .fontColor('#FFFFFF')
+                            .border({ width: 0.5, color: '#FFFFFF' })
+                            .borderRadius(3)
+                            .padding({ left: 3, right: 3, top: 0, bottom: 0 })
+                            .maxLines(1)
+                        }
+                        Text(b.timeText)
+                          .fontSize(8)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '56%' })
+                          .lineHeight(11)
+                        if (b.location !== '') {
+                          Text(b.location)
+                            .fontSize(8)
+                            .fontColor('#B3FFFFFF')
+                            .maxLines(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                            .lineHeight(11)
+                            .layoutWeight(1)
+                        }
+                      }
                       .width('100%')
-                    if (b.heightRatio * 86400000 >= 60 * 60000) {
-                      Text(b.timeText)
-                        .fontSize(8)
-                        .fontColor('#E6FFFFFF')
-                        .maxLines(1)
-                        .width('100%')
+                      .alignItems(VerticalAlign.Center)
+                    } else {
+                      // 第一行：标题 · [只读]
+                      Row({ space: 3 }) {
+                        Text(b.title)
+                          .fontSize(10)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor('#FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .constraintSize({ maxWidth: '70%' })
+                        if (!b.writable) {
+                          Text('只读')
+                            .fontSize(8)
+                            .fontColor('#FFFFFF')
+                            .border({ width: 0.5, color: '#FFFFFF' })
+                            .borderRadius(3)
+                            .padding({ left: 3, right: 3, top: 0, bottom: 0 })
+                            .maxLines(1)
+                        }
+                      }
+                      .width('100%')
+                      .alignItems(VerticalAlign.Center)
+                      if (this.w4Lines(b) >= 3) {
+                        Text(b.timeText)
+                          .fontSize(8)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                        Text(b.location)
+                          .fontSize(8)
+                          .fontColor('#B3FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                      } else {
+                        Text(this.w4Meta(b))
+                          .fontSize(8)
+                          .fontColor('#E6FFFFFF')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                      }
                     }
                   }
                   .alignItems(HorizontalAlign.Start)

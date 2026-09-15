@@ -1,12 +1,12 @@
 // entry/src/main/ets/pages/EditAccountPage.ets
 // 编辑账号：查看/重选该账号下的日历本、修改账户名
 // 保存后清理失效日历本的本地数据，并触发一次重新同步
-import { http } from '@kit.NetworkKit';
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { buffer } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore } from '../common/AccountStore';
+import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
 import { EventDb } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
 
@@ -102,7 +102,7 @@ struct EditAccountPage {
       this.accountName = foundAcc.name;
       this.serverUrl = foundAcc.serverUrl;
       this.username = foundAcc.username;
-      LogUtil.write(`编辑账号「${foundAcc.name}」：id=${foundAcc.id}，当前已选 ${foundAcc.calendarHrefs.length} 个日历本`);
+      LogUtil.write(`编辑账号 id=${foundAcc.id}：当前已选 ${foundAcc.calendarHrefs.length} 个日历本`);
       for (let i = 0; i < foundAcc.calendarHrefs.length; i++) {
         const nm: string = i < foundAcc.calendarNames.length ? foundAcc.calendarNames[i] : '';
         LogUtil.write(`  已选日历本[${i}]「${nm}」${foundAcc.calendarHrefs[i]}`);
@@ -135,42 +135,22 @@ struct EditAccountPage {
       this.statusOk = false;
       return;
     }
-    const requestBody: string = '<?xml version="1.0" encoding="utf-8"?>' +
-      '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
-      'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
-      '<d:displayname/><d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
-      '</d:prop></d:propfind>';
-    const httpRequest = http.createHttp();
+    // PROPFIND 与解析统一走 DavClient.listCalendars（与「添加账号」页共用同一实现）
     try {
-      const resp: http.HttpResponse = await httpRequest.request(this.acc.serverUrl, {
-        method: 'PROPFIND' as http.RequestMethod,
-        header: {
-          'Authorization': 'Basic ' + token,
-          'Content-Type': 'application/xml; charset=utf-8',
-          'Depth': '1',
-          'User-Agent': 'SyncCalendar/1.0'
-        },
-        extraData: requestBody,
-        connectTimeout: 10000,
-        readTimeout: 15000
-      });
-      console.info(`编辑账号 PROPFIND 响应码: ${resp.responseCode}`);
-      if (resp.responseCode === 401) {
-        this.isLoading = false;
+      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.acc.serverUrl, 'Basic ' + token);
+      this.isLoading = false;
+      if (disc.statusCode === 401) {
         this.statusMsg = '登录已失效，请检查账号密码';
         this.statusOk = false;
         return;
       }
-      if (resp.responseCode !== 207 && resp.responseCode !== 200) {
-        this.isLoading = false;
-        this.statusMsg = `获取日历列表失败，服务器返回：${resp.responseCode}`;
+      if (disc.statusCode !== 207 && disc.statusCode !== 200) {
+        this.statusMsg = `获取日历列表失败，服务器返回：${disc.statusCode}`;
         this.statusOk = false;
         return;
       }
-      const xml: string = resp.result as string;
-      LogUtil.write(`编辑账号 PROPFIND → ${resp.responseCode}，响应体 ${xml.length} 字符`);
-      const list: EditCalendarItem[] = this.parseCalendarList(xml);
-      this.isLoading = false;
+      const list: EditCalendarItem[] = disc.entries.map((e: DavCalendarEntry): EditCalendarItem =>
+        new EditCalendarItem(e.href, e.displayName, e.color));
       if (list.length === 0) {
         LogUtil.write('编辑账号：未发现任何日历本');
         this.statusMsg = '该路径下未发现日历本';
@@ -192,56 +172,7 @@ struct EditAccountPage {
       this.isLoading = false;
       this.statusMsg = `获取日历列表失败：${e.message}`;
       this.statusOk = false;
-    } finally {
-      httpRequest.destroy();
     }
-  }
-
-  private extractTag(xml: string, tag: string): string {
-    const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
-    const regex: RegExp = new RegExp(pattern, 'i');
-    const match = regex.exec(xml);
-    return match !== null ? match[2].trim() : '';
-  }
-
-  private parseCalendarList(xml: string): EditCalendarItem[] {
-    const items: EditCalendarItem[] = [];
-    const originMatch = /https?:\/\/[^/]+/i.exec(this.acc.serverUrl);
-    const origin: string = originMatch !== null ? originMatch[0] : '';
-    const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
-    for (const block of blocks) {
-      if (!/<[\w-]*:?response[\s>]/i.test(block)) {
-        continue;
-      }
-      const href: string = this.extractTag(block, 'href');
-      if (href === '') {
-        continue;
-      }
-      const resourcetype: string = this.extractTag(block, 'resourcetype');
-      if (!/calendar/i.test(resourcetype)) {
-        continue;
-      }
-      let name: string = this.extractTag(block, 'displayname');
-      if (name === '') {
-        const segs: string[] = href.split('/').filter((s: string) => s !== '');
-        if (segs.length > 0) {
-          try {
-            name = decodeURIComponent(segs[segs.length - 1]);
-          } catch (err) {
-            name = segs[segs.length - 1];
-          }
-        } else {
-          name = href;
-        }
-      }
-      let color: string = AccountStore.normalizeColor(this.extractTag(block, 'getcolor'));
-      if (color === '') {
-        color = AccountStore.normalizeColor(this.extractTag(block, 'calendar-color'));
-      }
-      const fullHref: string = href.startsWith('http') ? href : origin + href;
-      items.push(new EditCalendarItem(fullHref, name, color));
-    }
-    return items;
   }
 
   /** 保存：更新账号的日历本选择与名称，清理失效数据，触发重新同步 */
@@ -281,7 +212,7 @@ struct EditAccountPage {
       target.calendarHrefs = selectedItems.map((c: EditCalendarItem): string => c.href);
       target.calendarNames = selectedItems.map((c: EditCalendarItem): string => c.name);
       target.calendarColors = selectedItems.map((c: EditCalendarItem): string => c.color);
-      LogUtil.write(`编辑账号保存：「${target.name}」id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
+      LogUtil.write(`编辑账号保存：id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
       await AccountStore.saveAll(context, accounts);
       // 重选后 calKey（accId_序号）会变化，清理已取消勾选的日历本数据
       const validKeys: string[] =
@@ -428,7 +359,8 @@ struct EditAccountPage {
                   this.handleItemToggle(selectedItem);
                 }
               })
-            }, (item: EditCalendarItem) => `${item.href}_${item.selected}`)
+              // key 只用 href（稳定标识）：若把选中态也拼进 key，勾选一次就会导致整行销毁重建
+            }, (item: EditCalendarItem) => item.href)
           }
         }
         .width('100%')

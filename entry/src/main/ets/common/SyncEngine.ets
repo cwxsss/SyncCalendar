@@ -39,11 +39,12 @@ export class SyncEngine {
       if (Date.now() - heldSince < SyncEngine.LOCK_STALE_MS) {
         throw new Error('该账号正在同步中，请稍后再试');
       }
-      LogUtil.write(`同步互斥锁超时残留（${acc.name}），强制释放并重新同步`);
+      LogUtil.write(`同步互斥锁超时残留（账号 id=${acc.id}），强制释放并重新同步`);
     }
     SyncEngine.activeSyncs.set(acc.id, Date.now());
     const t0: number = Date.now();
-    LogUtil.write(`========== 同步账号「${acc.name}」开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
+    // 日志不记录账号名（用户自定义，可能含个人信息），以 id + 服务器地址定位
+    LogUtil.write(`========== 同步账号 id=${acc.id} 开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
     try {
       // 全量重拉（升级后首次）要逐个 GET 所有资源，放宽超时到 10 分钟；常规 5 分钟
       const fullRefetch: boolean = await AppSettings.isFullRefetchPending(context);
@@ -54,11 +55,11 @@ export class SyncEngine {
         SyncEngine.activeSyncs.delete(acc.id);
       });
       const r: number = await SyncEngine.withTimeout<number>(inner, timeoutMs);
-      LogUtil.write(`同步账号「${acc.name}」完成：拉取 ${r} 条日程，耗时 ${Math.round((Date.now() - t0) / 1000)} 秒`);
+      LogUtil.write(`同步账号 id=${acc.id} 完成：拉取 ${r} 条日程，耗时 ${Math.round((Date.now() - t0) / 1000)} 秒`);
       return r;
     } catch (err) {
       const e = err as BusinessError;
-      LogUtil.write(`同步账号「${acc.name}」失败：${e.message}（耗时 ${Math.round((Date.now() - t0) / 1000)} 秒）`);
+      LogUtil.write(`同步账号 id=${acc.id} 失败：${e.message}（耗时 ${Math.round((Date.now() - t0) / 1000)} 秒）`);
       throw new Error(e.message !== '' ? e.message : `错误码 ${e.code}`);
     }
   }
@@ -287,13 +288,13 @@ export class SyncEngine {
   static async pushDirtyForAccount(context: common.Context, acc: DavAccount, auth: string): Promise<void> {
     const dirty: LocalEvent[] = await EventDb.getDirty(context);
     const mine: LocalEvent[] = dirty.filter((e: LocalEvent): boolean => acc.calendarHrefs.includes(e.href));
-    LogUtil.write(`推送本地修改：全部待推送 ${dirty.length} 条，属于账号「${acc.name}」的 ${mine.length} 条`);
+    LogUtil.write(`推送本地修改：全部待推送 ${dirty.length} 条，属于账号 id=${acc.id} 的 ${mine.length} 条`);
     for (const e of mine) {
       // 只读日历本：推送必然 403，跳过并保留 dirty（权限恢复后可再推）
       const bookIdx: number = acc.calendarHrefs.indexOf(e.href);
       if (bookIdx >= 0 && acc.calendarWritable.length > bookIdx
         && acc.calendarWritable[bookIdx] === '0') {
-        LogUtil.write(`推送跳过只读日历本事件「${e.title}」(uid=${e.uid})`);
+        LogUtil.write(`推送跳过只读日历本事件（标题已脱敏）uid=${e.uid}`);
         continue;
       }
       if (e.kind === 'todo') {
@@ -304,23 +305,23 @@ export class SyncEngine {
       if (e.recurring && e.rrule === '') {
         // 重复日程的"单次覆盖实例"（RECURRENCE-ID）推送会破坏服务器整个序列，暂不支持
         await EventDb.clearDirty(context, e.id, e.etag);
-        LogUtil.write(`推送跳过重复日程实例「${e.title}」(uid=${e.uid})`);
+        LogUtil.write(`推送跳过重复日程实例（标题已脱敏）uid=${e.uid}`);
         continue;
       }
       if (e.recurring) {
         // 重复主事件（含 RRULE，含本机新建的重复日程）：整条 PUT 覆盖推送
-        LogUtil.write(`推送重复主事件「${e.title}」(uid=${e.uid})`);
+        LogUtil.write(`推送重复主事件（标题已脱敏）uid=${e.uid}`);
       }
       const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
       if (e.deleted) {
         await DavClient.deleteRemote(url, auth);
         await EventDb.purge(context, e.id);
-        LogUtil.write(`推送删除「${e.title}」→ ${url}`);
+        LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
       } else {
         const ics: string = IcsUtil.build(e);
         const etag: string = await DavClient.putEvent(url, auth, ics);
         await EventDb.clearDirty(context, e.id, etag);
-        LogUtil.write(`推送保存「${e.title}」→ ${url}（${ics.length} 字节，提醒=${e.reminders.map((n: number): string => String(n)).join('/')}分钟，VALARM=${ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'}）`);
+        LogUtil.write(`推送保存（标题已脱敏）uid=${e.uid} → ${url}（${ics.length} 字节，提醒=${e.reminders.map((n: number): string => String(n)).join('/')}分钟，VALARM=${ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'}）`);
       }
     }
   }

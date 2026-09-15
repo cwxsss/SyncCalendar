@@ -37,3 +37,6 @@ password.txt
 /hvigor/*
 !/hvigor/hvigor-config.json5
 /hvigor-ohos-plugin/
+
+# 项目文档（本地维护，不入公共仓库）
+/docs/
