@@ -23,11 +23,17 @@ export class AppSettings {
   // 否则一旦某次因故没显示出来，旧标记会把功能永久锁死（v2 正是这样被锁住 → 本次升到 v3）。
   private static readonly KEY_TIPS_SHOWN: string = 'tips_shown_v3';
 
-  /** 隐私政策网址（华为 AGC 隐私政策托管服务生成，上架时填此地址） */
-  static readonly PRIVACY_URL: string =
-    'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2039401852717510592';
+  // 隐私政策 / 用户服务协议网址（自托管，AGC 上架的"隐私政策网址"填 PRIVACY_URL）。
+  // ⚠️ 两份文件必须与安装包实际申请的 user_grant 权限保持一致：
+  //    应用仅申请 READ_CALENDAR / READ_WHOLE_CALENDAR / LOCATION / APPROXIMATELY_LOCATION（均前台），
+  //    文档中不得出现"在后台获取位置"（LOCATION_IN_BACKGROUND）与"添加/修改/删除日历活动"（WRITE_CALENDAR）。
+  /** 隐私政策网址 */
+  static readonly PRIVACY_URL: string = 'https://synccalendar.yangyq.net/upa.html';
   /** 用户服务协议网址 */
   static readonly AGREEMENT_URL: string = 'https://synccalendar.yangyq.net/usa.html';
+  /** 文档标题（内置浏览器标题栏用） */
+  static readonly PRIVACY_TITLE: string = '隐私政策';
+  static readonly AGREEMENT_TITLE: string = '用户服务协议';
 
   /**
    * 是否已同意《隐私政策》与《用户协议》（首启同意弹窗）。

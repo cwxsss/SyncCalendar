@@ -8,6 +8,7 @@ import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
 import { TipsPanel } from '../common/TipsPanel';
+import { DocViewer } from '../common/DocViewer';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
 
@@ -34,6 +35,10 @@ struct SettingsPage {
   @State showFeatures: boolean = false; // 软件特性弹层
   @State showHelp: boolean = false;     // 使用帮助弹层
   @State showLegal: boolean = false;    // 隐私政策与用户协议弹层
+  // 内置文档浏览器（《隐私政策》/《用户服务协议》）：整页 Web 覆盖层
+  @State showDoc: boolean = false;
+  @State docTitle: string = '';
+  @State docUrl: string = '';
   @State showTips: boolean = false;     // 功能引导卡片（底部弹出）
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   private context?: common.Context;
@@ -377,8 +382,24 @@ struct SettingsPage {
     }
   }
 
+  /**
+   * 用内置浏览器（整页 Web 覆盖层）打开法律文档 —— 不跳出应用、随时可关闭。
+   * 先收起"隐私政策与用户协议"弹层，再显示覆盖层，避免两层叠在一起看不清。
+   */
+  private openDoc(title: string, url: string): void {
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
+      return;
+    }
+    this.showLegal = false;
+    this.docTitle = title;
+    this.docUrl = url;
+    this.showDoc = true;
+  }
+
   build() {
-    Column() {
+    Stack() {
+      Column() {
       // 顶部
       Row({ space: 10 }) {
         Text('←')
@@ -933,10 +954,24 @@ struct SettingsPage {
       .layoutWeight(1)
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.page_bg'))
+
+      // 内置文档浏览器（《隐私政策》/《用户服务协议》）：整页覆盖层，点"✕"即刻返回设置页
+      if (this.showDoc) {
+        DocViewer({
+          title: this.docTitle,
+          url: this.docUrl,
+          onClose: (): void => {
+            this.showDoc = false;
+          }
+        })
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
   }
 
   /** 功能引导卡片（与首页共用 TipsPanel） */
@@ -959,14 +994,14 @@ struct SettingsPage {
           .fontSize(15)
           .backgroundColor($r('app.color.brand'))
           .onClick(() => {
-            this.openUrl(AppSettings.PRIVACY_URL);
+            this.openDoc(AppSettings.PRIVACY_TITLE, AppSettings.PRIVACY_URL);
           })
         Button('查看《用户服务协议》')
           .width('100%')
           .fontSize(15)
           .backgroundColor($r('app.color.brand'))
           .onClick(() => {
-            this.openUrl(AppSettings.AGREEMENT_URL);
+            this.openDoc(AppSettings.AGREEMENT_TITLE, AppSettings.AGREEMENT_URL);
           })
         Text('《隐私政策》说明本应用如何收集、使用与保护你的信息（日历、位置等）；《用户服务协议》说明使用本应用的权利与义务。两份文件随功能调整更新，最新版本以上述链接为准。')
           .fontSize(12)

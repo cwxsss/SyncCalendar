@@ -15,6 +15,7 @@ import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
 import { TipsPanel } from '../common/TipsPanel';
+import { DocViewer } from '../common/DocViewer';
 import { EventDb, LocalEvent, RemoteEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
 import { IcsUtil } from '../common/IcsUtil';
@@ -80,6 +81,10 @@ struct Index {
   @State policyAgreed: boolean = false;   // 是否已同意《隐私政策》与《用户协议》
   private notifAsked: boolean = false;    // 通知权限是否已申请（同意后才申请）
   @State showTips: boolean = false;       // 首启功能引导（整页覆盖层：遮罩 + 底部卡片 + Swiper 三页）
+  // ---- 内置文档浏览器（《隐私政策》/《用户服务协议》，整页 Web 覆盖层，不跳出应用） ----
+  @State showDoc: boolean = false;
+  @State docTitle: string = '';
+  @State docUrl: string = '';
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -277,17 +282,18 @@ struct Index {
     }
   }
 
-  /** 打开外部链接（隐私政策 / 用户协议 / 开源仓库等） */
-  private async openExternalUrl(url: string): Promise<void> {
-    const ctx = this.getUIContext().getHostContext();
-    if (ctx === undefined) {
+  /**
+   * 用内置浏览器（整页 Web 覆盖层）打开法律文档 —— 不跳出应用、随时可关闭。
+   * 仅放行 http(s)：避免 URL 被误传为 file://、自定义 scheme 等而拉起本地文件或任意第三方应用。
+   */
+  private openDoc(title: string, url: string): void {
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
       return;
     }
-    try {
-      await (ctx as common.UIAbilityContext).openLink(url);
-    } catch (err) {
-      this.getUIContext().getPromptAction().showToast({ message: '无法打开链接' });
-    }
+    this.docTitle = title;
+    this.docUrl = url;
+    this.showDoc = true;
   }
 
   // ---------- 工具 ----------
@@ -1016,6 +1022,18 @@ struct Index {
       if (this.showTips) {
         this.tipsOverlay()
       }
+
+      // 内置文档浏览器（《隐私政策》/《用户服务协议》）：
+      // 根 Stack 最上层 —— 未同意时也能从同意门禁直接打开，看完点"✕"即刻回到门禁，无需切回应用。
+      if (this.showDoc) {
+        DocViewer({
+          title: this.docTitle,
+          url: this.docUrl,
+          onClose: (): void => {
+            this.showDoc = false;
+          }
+        })
+      }
     }
     .width('100%')
     .height('100%')
@@ -1054,7 +1072,7 @@ struct Index {
         .backgroundColor($r('app.color.card_bg'))
         .fontColor($r('app.color.brand'))
         .onClick(() => {
-          this.openExternalUrl(AppSettings.PRIVACY_URL);
+          this.openDoc(AppSettings.PRIVACY_TITLE, AppSettings.PRIVACY_URL);
         })
       Button('《用户服务协议》')
         .width('100%')
@@ -1062,7 +1080,7 @@ struct Index {
         .backgroundColor($r('app.color.card_bg'))
         .fontColor($r('app.color.brand'))
         .onClick(() => {
-          this.openExternalUrl(AppSettings.AGREEMENT_URL);
+          this.openDoc(AppSettings.AGREEMENT_TITLE, AppSettings.AGREEMENT_URL);
         })
       Blank()
       Text('点击“同意并继续”，即表示你已阅读并同意上述两份文件。')
