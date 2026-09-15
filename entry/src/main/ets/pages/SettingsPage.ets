@@ -7,6 +7,7 @@ import { AppSettings } from '../common/AppSettings';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
+import { TipsPanel } from '../common/TipsPanel';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
 
@@ -32,6 +33,8 @@ struct SettingsPage {
   @State notifyEnabled: boolean = true; // 通知权限状态（提醒依赖）
   @State showFeatures: boolean = false; // 软件特性弹层
   @State showHelp: boolean = false;     // 使用帮助弹层
+  @State showLegal: boolean = false;    // 隐私政策与用户协议弹层
+  @State showTips: boolean = false;     // 功能引导卡片（底部弹出）
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   private context?: common.Context;
 
@@ -692,6 +695,78 @@ struct SettingsPage {
             title: { title: '使用帮助' }
           })
 
+          // 功能引导（首启引导卡片，可在设置里再看一次；bindSheet 挂在本卡片上）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('功能引导')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('图文介绍安全、系统日历与只读 / 静音')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text('›')
+                .fontSize(18)
+                .fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+          .onClick(() => {
+            this.showTips = true;
+          })
+          .bindSheet($$this.showTips, this.tipsSheet(), {
+            height: '72%',
+            dragBar: true,
+            showClose: true,
+            title: { title: '功能引导' }
+          })
+
+          // 隐私政策与用户协议（点击弹层；bindSheet 挂在本卡片上，避免与其它弹层冲突）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('隐私政策与用户协议')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('查看本应用如何处理你的信息，以及使用条款')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text('›')
+                .fontSize(18)
+                .fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+          .onClick(() => {
+            this.showLegal = true;
+          })
+          .bindSheet($$this.showLegal, this.legalSheet(), {
+            height: 400,
+            dragBar: true,
+            showClose: true,
+            title: { title: '隐私政策与用户协议' }
+          })
+
           // 日历本只读 / 静音（放在最下方；本多时列表较长）
           Column({ space: 8 }) {
             Row({ space: 10 }) {
@@ -768,6 +843,49 @@ struct SettingsPage {
       .layoutWeight(1)
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.page_bg'))
+  }
+
+  /** 功能引导卡片（与首页共用 TipsPanel） */
+  @Builder
+  tipsSheet() {
+    TipsPanel({ onClose: (): void => { this.showTips = false; } })
+  }
+
+  /** 隐私政策与用户协议弹层 */
+  @Builder
+  legalSheet() {
+    Scroll() {
+      Column({ space: 12 }) {
+        Text('我们遵循"数据自持、最小必要"原则：开发者不保存你的日程与账号数据，不收集通讯录、相册、剪贴板等信息，不含任何第三方统计或广告 SDK。')
+          .fontSize(14)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+        Button('查看《隐私政策》')
+          .width('100%')
+          .fontSize(15)
+          .backgroundColor($r('app.color.brand'))
+          .onClick(() => {
+            this.openUrl(AppSettings.PRIVACY_URL);
+          })
+        Button('查看《用户服务协议》')
+          .width('100%')
+          .fontSize(15)
+          .backgroundColor($r('app.color.brand'))
+          .onClick(() => {
+            this.openUrl(AppSettings.AGREEMENT_URL);
+          })
+        Text('《隐私政策》说明本应用如何收集、使用与保护你的信息（日历、位置等）；《用户服务协议》说明使用本应用的权利与义务。两份文件随功能调整更新，最新版本以上述链接为准。')
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+      }
+      .width('100%')
+      .align(Alignment.Top)
+      .padding(16)
     }
     .width('100%')
     .height('100%')

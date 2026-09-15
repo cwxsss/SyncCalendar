@@ -5,6 +5,7 @@ import { notificationManager } from '@kit.NotificationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { LogUtil } from '../common/LogUtil';
+import { AppSettings } from '../common/AppSettings';
 
 const DOMAIN = 0x0000;
 
@@ -18,14 +19,22 @@ export default class EntryAbility extends UIAbility {
     BackgroundSyncService.initOnLaunch(this.context);
     // 服务卡片"添加"按钮跳转：把 widgetAction=add 透传给主页面（在 AppStorage 中暂存）
     this.handleWidgetParam(want);
-    // 申请通知权限：日程提醒、后台同步常驻通知都依赖它（系统只弹一次授权框）
-    notificationManager.isNotificationEnabled()
-      .then((enabled: boolean): Promise<void> => {
-        if (!enabled) {
-          return notificationManager.requestEnableNotification(this.context)
-            .catch((): void => {});
+    // 通知权限：日程提醒、后台同步常驻通知都依赖它（系统只弹一次授权框）。
+    // 必须在用户同意《隐私政策》之后才申请 —— 同意前不得申请任何权限；
+    // 首次安装此处跳过，用户点"同意并继续"后由 Index.initPermissionAndLoad() 补申请。
+    AppSettings.getPolicyAgreed(this.context)
+      .then((agreed: boolean): Promise<void> => {
+        if (!agreed) {
+          LogUtil.write('未同意隐私政策：跳过通知权限申请');
+          return Promise.resolve();
         }
-        return Promise.resolve();
+        return notificationManager.isNotificationEnabled()
+          .then((enabled: boolean): Promise<void> => {
+            if (!enabled) {
+              return notificationManager.requestEnableNotification(this.context).catch((): void => {});
+            }
+            return Promise.resolve();
+          });
       })
       .catch((): void => {});
   }

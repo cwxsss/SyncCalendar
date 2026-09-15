@@ -17,6 +17,69 @@ export class AppSettings {
   private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
+  private static readonly KEY_POLICY_AGREED: string = 'policy_agreed';    // 是否已同意隐私政策与用户协议
+  // 首启功能引导"用户已看过并关闭"的标记。键名带版本号：改动引导内容后把 vN 加 1，用户即可再看一次。
+  // 注意：只在用户主动关闭（"开始使用" / ✕ / 点遮罩）时才置 true，**不再"显示前就置 true"**——
+  // 否则一旦某次因故没显示出来，旧标记会把功能永久锁死（v2 正是这样被锁住 → 本次升到 v3）。
+  private static readonly KEY_TIPS_SHOWN: string = 'tips_shown_v3';
+
+  /** 隐私政策网址（华为 AGC 隐私政策托管服务生成，上架时填此地址） */
+  static readonly PRIVACY_URL: string =
+    'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2039401852717510592';
+  /** 用户服务协议网址 */
+  static readonly AGREEMENT_URL: string = 'https://synccalendar.yangyq.net/usa.html';
+
+  /**
+   * 是否已同意《隐私政策》与《用户协议》（首启同意弹窗）。
+   * 默认 false —— 未同意前不得申请任何系统权限、不得加载/同步数据。
+   */
+  static async getPolicyAgreed(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_POLICY_AGREED, false) as boolean;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  static async setPolicyAgreed(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_POLICY_AGREED, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存隐私政策同意状态失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 首启功能引导卡片是否已展示过（避免每次启动都弹）。
+   * 默认 false —— 启动（首次同意后 / 已同意用户再次启动）时若为 false 会自动弹出一次并置为 true。
+   */
+  static async getTipsShown(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_TIPS_SHOWN, false) as boolean;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  static async setTipsShown(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_TIPS_SHOWN, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存功能引导展示状态失败: ${e.message}`);
+    }
+  }
 
   /** 打开 App 后默认展示的视图：'month' | 'week' | 'agenda'（默认 month） */
   static async getDefaultView(context: common.Context): Promise<string> {

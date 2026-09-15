@@ -5,6 +5,7 @@ import { mediaquery, router } from '@kit.ArkUI';
 import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
 import { SyncEngine } from '../common/SyncEngine';
@@ -13,6 +14,7 @@ import { LunarUtil } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
+import { TipsPanel } from '../common/TipsPanel';
 import { EventDb, LocalEvent, RemoteEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
 import { IcsUtil } from '../common/IcsUtil';
@@ -73,6 +75,12 @@ struct Index {
   @State dayTimeline: DayTimeline = new DayTimeline();            // 选中日（月/周视图用）
   @State agendaTimelines: AgendaTimelineGroup[] = [];             // 列表视图：每天一条时间轴
 
+  // ---- 隐私政策与用户协议首启同意（未同意前不申请任何权限、不加载数据） ----
+  @State policyChecked: boolean = false;  // 是否已读取过同意状态（避免首帧闪烁）
+  @State policyAgreed: boolean = false;   // 是否已同意《隐私政策》与《用户协议》
+  private notifAsked: boolean = false;    // 通知权限是否已申请（同意后才申请）
+  @State showTips: boolean = false;       // 首启功能引导（整页覆盖层：遮罩 + 底部卡片 + Swiper 三页）
+
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
     if (ctx !== undefined) {
@@ -85,14 +93,17 @@ struct Index {
     this.selectedDate = this.startOfDay(now.getTime());
     this.rebuildPages();
     this.initLandscapeListener();
-    this.initPermissionAndLoad();
-    // 读取"默认视图"设置：打开 App 后按用户选择展示（月/周/列表，默认月）
-    if (ctx !== undefined) {
-      AppSettings.getDefaultView(ctx).then((v: string): void => {
-        this.mode = v;
-        if (v === 'agenda') {
-          this.ensureAgendaData();
+    // 首启同意门禁：未同意《隐私政策》与《用户协议》前，不申请任何系统权限、不加载/同步数据（AGC 硬性要求）
+    if (ctx === undefined) {
+      this.policyChecked = true;
+      this.startApp(ctx);
+    } else {
+      AppSettings.getPolicyAgreed(ctx).then((ok: boolean): void => {
+        this.policyChecked = true;
+        if (ok) {
+          this.startApp(ctx);
         }
+        // 未同意：仅显示整页同意门禁（consentGate），不申请权限、不加载数据
       });
     }
     // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进（同时刷新色块"进行中"标记）
@@ -129,6 +140,15 @@ struct Index {
 
   /** 从设置页/账号页返回时刷新（同步间隔、系统日历开关立即生效），并处理编辑账号后的待同步 */
   onPageShow(): void {
+    // 未同意《隐私政策》前不加载、不同步任何数据
+    if (!this.policyAgreed) {
+      return;
+    }
+    // 首启功能引导兜底：已同意用户若在 aboutToAppear 阶段漏触发，这里再补一次（幂等：已展示过会直接跳过）
+    const tipCtx = this.getUIContext().getHostContext();
+    if (tipCtx !== undefined) {
+      this.maybeShowTips(tipCtx);
+    }
     // 卡片"添加"按钮深链：首次冷启动经 onCreate→AppStorage 落到这里消费
     this.consumeWidgetAction();
     // 无条件刷新：之前"列表为空就跳过"的条件会导致账号列表卡死在空状态，
@@ -164,6 +184,7 @@ struct Index {
       return;
     }
     this.reloadAll();
+    this.ensureNotificationPermission(context as common.UIAbilityContext);
     if (!this.permissionAsked) {
       this.permissionAsked = true;
       // 申请读取全部日历权限（用于混合展示系统日程）
@@ -171,6 +192,101 @@ struct Index {
         .then((): void => {
           this.reloadAll();
         });
+    }
+  }
+
+  /**
+   * 申请通知权限（日程提醒、后台同步常驻通知都依赖它）。
+   * 必须在用户同意《隐私政策》之后才调用 —— 同意前不得申请任何权限。
+   */
+  private ensureNotificationPermission(context: common.UIAbilityContext): void {
+    if (this.notifAsked) {
+      return;
+    }
+    this.notifAsked = true;
+    notificationManager.isNotificationEnabled()
+      .then((enabled: boolean): Promise<void> => {
+        if (!enabled) {
+          return notificationManager.requestEnableNotification(context).catch((): void => {});
+        }
+        return Promise.resolve();
+      })
+      .catch((): void => {});
+  }
+
+  /**
+   * 同意之后（或"已同意用户"启动时）的正式初始化：
+   * 申请权限、加载数据、读取默认视图，并首启弹一次功能引导卡片。
+   * 首次同意（acceptPolicy）与已同意直接启动（aboutToAppear）都走这里，保证两条路径都能弹出引导。
+   */
+  private startApp(ctx: common.Context | undefined): void {
+    this.policyAgreed = true;
+    this.initPermissionAndLoad();
+    if (ctx !== undefined) {
+      // 读取"默认视图"设置：打开 App 后按用户选择展示（月/周/列表，默认月）
+      AppSettings.getDefaultView(ctx).then((v: string): void => {
+        this.mode = v;
+        if (v === 'agenda') {
+          this.ensureAgendaData();
+        }
+      });
+      this.maybeShowTips(ctx);
+    }
+  }
+
+  /**
+   * 首启功能引导：仅在用户从未看过时显示一次（整页覆盖层），之后不再出现。
+   * 注意：这里**不写"已看过"标记** —— 标记由 hideTips() 在用户主动关闭时写入。
+   * 若在此处提前写标记，一旦显示环节出问题就会把引导永久锁死（历史踩过坑）。
+   */
+  private maybeShowTips(ctx: common.Context): void {
+    AppSettings.getTipsShown(ctx).then((seen: boolean): void => {
+      if (seen) {
+        return;
+      }
+      // 略延迟：先让主页面完成首帧布局，并尽量错开紧随其后的权限申请系统弹窗
+      setTimeout((): void => {
+        this.showTips = true;
+      }, 600);
+    });
+  }
+
+  /** 关闭功能引导覆盖层（"开始使用" / ✕ / 点遮罩 均走这里），此刻才标记"已看过" */
+  private hideTips(): void {
+    this.showTips = false;
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      AppSettings.setTipsShown(ctx, true);
+    }
+  }
+
+  /** 用户点击"同意并继续"：持久化同意标记，之后才申请权限、加载数据 */
+  private acceptPolicy(): void {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      AppSettings.setPolicyAgreed(ctx, true);
+    }
+    this.startApp(ctx);
+  }
+
+  /** 用户点击"不同意并退出"：不申请任何权限、不处理任何数据，直接退出应用 */
+  private rejectPolicy(): void {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      (ctx as common.UIAbilityContext).terminateSelf();
+    }
+  }
+
+  /** 打开外部链接（隐私政策 / 用户协议 / 开源仓库等） */
+  private async openExternalUrl(url: string): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    try {
+      await (ctx as common.UIAbilityContext).openLink(url);
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '无法打开链接' });
     }
   }
 
@@ -881,6 +997,23 @@ struct Index {
       .onClick(() => {
         this.addEvent();
       })
+
+      // 未同意《隐私政策》与《用户协议》：整页门禁盖在最上层（不申请权限、不加载数据）
+      if (!this.policyChecked) {
+        // 读取同意状态期间的占位（极短），避免闪一下主界面或门禁页
+        Column() {
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor($r('app.color.page_bg'))
+      } else if (!this.policyAgreed) {
+        this.consentGate()
+      }
+
+      // 功能引导：整页覆盖层，放根 Stack 最后一层（盖住主界面与悬浮按钮）
+      if (this.showTips) {
+        this.tipsOverlay()
+      }
     }
     .width('100%')
     .height('100%')
@@ -890,6 +1023,126 @@ struct Index {
       showClose: false, // 关闭按钮自绘在标题行右侧，避免系统按钮压住徽标
       backgroundColor: $r('app.color.page_bg')
     })
+  }
+
+  /**
+   * 首启隐私政策同意门禁（整页渲染，不用弹窗 —— 弹窗在本环境实测无法弹出）。
+   * AGC 要求：明确同意前不得申请权限、不得收集/处理个人信息，故未同意时整页挡住主界面。
+   */
+  @Builder
+  consentGate() {
+    Column({ space: 14 }) {
+      Text('隐私政策与用户协议')
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .margin({ top: 40 })
+      Text('欢迎使用「同步日历」。在使用前，请阅读并同意以下条款。')
+        .fontSize(14)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+      Text('我们不会保存你的日程与账号数据：日历仅在你的设备与你自己填写的 CalDAV 服务器之间同步；位置信息仅在你点击“导航”时用于调用第三方地图，不会上传。')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+      Button('《隐私政策》')
+        .width('100%')
+        .fontSize(14)
+        .backgroundColor($r('app.color.card_bg'))
+        .fontColor($r('app.color.brand'))
+        .onClick(() => {
+          this.openExternalUrl(AppSettings.PRIVACY_URL);
+        })
+      Button('《用户服务协议》')
+        .width('100%')
+        .fontSize(14)
+        .backgroundColor($r('app.color.card_bg'))
+        .fontColor($r('app.color.brand'))
+        .onClick(() => {
+          this.openExternalUrl(AppSettings.AGREEMENT_URL);
+        })
+      Blank()
+      Text('点击“同意并继续”，即表示你已阅读并同意上述两份文件。')
+        .fontSize(12)
+        .fontColor($r('app.color.text_hint'))
+        .width('100%')
+      Row({ space: 10 }) {
+        Button('不同意并退出')
+          .fontSize(15)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.card_bg'))
+          .fontColor($r('app.color.text_secondary'))
+          .onClick(() => {
+            this.rejectPolicy();
+          })
+        Button('同意并继续')
+          .fontSize(15)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.brand'))
+          .onClick(() => {
+            this.acceptPolicy();
+          })
+      }
+      .width('100%')
+      .margin({ bottom: 24 })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 24, right: 24, top: 20, bottom: 12 })
+    .backgroundColor($r('app.color.page_bg'))
+  }
+
+  /**
+   * 首启功能引导：整页覆盖层（半透明遮罩 + 底部卡片），由 TipsPanel 提供 Swiper 三页与
+   * 左下"上一步" / 右下"下一步"。
+   * 用页面内容渲染而非 bindSheet/CustomDialog —— 本环境从"启动时的异步回调"里弹出系统弹层不可靠
+   * （详见 MEMORY：CustomDialogController 静默失败；bindSheet 同样实测弹不出来）。
+   */
+  @Builder
+  tipsOverlay() {
+    Column() {
+      // 上部留白：露出被遮罩压暗的主界面，制造"从下方弹出"的层次（点空白处也可关闭）
+      Column() {
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .onClick((): void => {
+        this.hideTips();
+      })
+
+      // 底部引导卡片
+      Column() {
+        // 右上角关闭
+        Row() {
+          Blank()
+          Text('✕')
+            .fontSize(16)
+            .fontColor($r('app.color.text_hint'))
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .onClick((): void => {
+              this.hideTips();
+            })
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 8 })
+
+        Column() {
+          TipsPanel({ onClose: (): void => { this.hideTips(); } })
+        }
+        .width('100%')
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .height('70%')
+      .backgroundColor($r('app.color.page_bg'))
+      .borderRadius({ topLeft: 20, topRight: 20 })
+      .clip(true)
+      .shadow({ radius: 16, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: -2 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#66000000')
   }
 
   @Builder

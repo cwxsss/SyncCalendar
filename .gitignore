@@ -15,3 +15,25 @@
 /.clangd
 /.clang-format
 /.clang-tidy
+
+# 签名材料：私钥 / 证书 / Profile / 口令 —— 严禁入库
+/sign/
+/signature/
+*.p12
+*.cer
+*.p7b
+*.csr
+*.keystore
+*.jks
+password.txt
+*password*.txt
+
+# 仓库根目录的签名构建配置：含本机绝对路径与加密口令，机器相关，不入公共仓库
+# （仅锚定根目录；entry/build-profile.json5 是普通模块构建配置，仍需入库）
+/build-profile.json5
+
+# hvigor 本地引擎 / 插件：构建期从 DevEco 恢复进来的机器相关副本，不入公共仓库
+# 注意 /hvigor/hvigor-config.json5 是项目构建配置，仍需入库
+/hvigor/*
+!/hvigor/hvigor-config.json5
+/hvigor-ohos-plugin/

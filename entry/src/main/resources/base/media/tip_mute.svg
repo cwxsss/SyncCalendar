@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3AA0FF"/>
+      <stop offset="1" stop-color="#0057C8"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="200" height="200" rx="44" fill="url(#bg)"/>
+  <!-- 日历本体 -->
+  <rect x="50" y="60" width="96" height="92" rx="14" fill="#FFFFFF"/>
+  <rect x="50" y="60" width="96" height="26" rx="14" fill="#007DFF"/>
+  <rect x="50" y="76" width="96" height="10" fill="#007DFF"/>
+  <rect x="74" y="52" width="8" height="14" rx="4" fill="#0057C8"/>
+  <rect x="118" y="52" width="8" height="14" rx="4" fill="#0057C8"/>
+  <!-- 铃铛（静音） -->
+  <path d="M100 92 C88 92 82 101 82 112 L82 120 L78 126 L122 126 L118 120 L118 112 C118 101 112 92 100 92 Z" fill="#007DFF"/>
+  <circle cx="100" cy="131" r="5" fill="#007DFF"/>
+  <!-- 静音斜杠（红） -->
+  <path d="M80 96 L120 136" stroke="#FF3B30" stroke-width="8" stroke-linecap="round"/>
+  <!-- 只读小锁（右上角，白色，叠在蓝色角上） -->
+  <rect x="150" y="50" width="16" height="13" rx="3" fill="#FFFFFF"/>
+  <path d="M153 50 v-5 a5 5 0 0 1 10 0 v5" fill="none" stroke="#FFFFFF" stroke-width="3"/>
+  <circle cx="158" cy="57" r="2.4" fill="#0057C8"/>
+</svg>
