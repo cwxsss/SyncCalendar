@@ -195,7 +195,7 @@ struct CalendarListPage {
   }
 
   private handleItemToggle(item: CalendarItem): void {
-    item.selected = !item.selected;
+    // 选中状态已在 CalendarRow 内部直接翻转，这里只刷新计数
     this.updateSelectionState();
   }
 
@@ -402,6 +402,8 @@ struct CalendarRow {
     .padding({ left: 12, right: 12, top: 14, bottom: 14 })
     .borderRadius(8)
     .onClick(() => {
+      // 直接翻转 @ObjectLink 属性，子组件自身即可触发刷新
+      this.item.selected = !this.item.selected;
       this.onSelect(this.item);
     })
   }
