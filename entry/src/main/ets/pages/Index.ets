@@ -1042,6 +1042,10 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+    // 沉浸式：根容器背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件），
+    // 配合 EntryAbility 里"系统栏透明"的设置，彻底消除顶部通知栏与底部灰条。
+    .backgroundColor($r('app.color.page_bg'))
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .bindSheet($$this.detailShow, this.detailSheet(), {
       height: 540,
       dragBar: true,
@@ -1299,7 +1303,7 @@ struct Index {
       .borderRadius(12)
       .backgroundColor($r('app.color.card_bg'))
       .border({ width: 1, color: $r('app.color.shadow_color') })
-      .shadow({ radius: 12, color: '#22000000', offsetY: 4 })
+      .shadow({ radius: 12, color: $r('app.color.shadow_color'), offsetY: 4 })
       .margin({ top: 56, right: 20 })
     }
     .width('100%')
@@ -2925,7 +2929,7 @@ struct DayTimelineView {
               .height(this.hourUnit)
               .textAlign(TextAlign.End)
               .padding({ right: 4, top: 2 })
-              .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
+              .border({ width: { bottom: 0.5 }, color: { bottom: $r('app.color.grid_line') } })
           }, (h: number) => `h${h}`)
         }
         .width(36)
@@ -2941,7 +2945,7 @@ struct DayTimelineView {
         .layoutWeight(1)
         .height(this.viewH())
         .alignContent(Alignment.TopStart)
-        .border({ width: { left: 0.5 }, color: { left: '#14000000' } })
+        .border({ width: { left: 0.5 }, color: { left: $r('app.color.grid_line') } })
       }
       .width('100%')
       .alignItems(VerticalAlign.Top)
@@ -2959,7 +2963,7 @@ struct DayTimelineView {
         Column()
           .width('100%')
           .height(this.hourUnit)
-          .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
+          .border({ width: { bottom: 0.5 }, color: { bottom: $r('app.color.grid_line') } })
           .hitTestBehavior(HitTestMode.None) // 装饰层子节点同样不参与命中测试
       }, (h: number) => `gd_${h}`)
     }

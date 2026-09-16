@@ -247,6 +247,9 @@ struct AccountsPage {
     }
     .width('100%')
     .height('100%')
+    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+    .backgroundColor($r('app.color.page_bg'))
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 
   @Builder

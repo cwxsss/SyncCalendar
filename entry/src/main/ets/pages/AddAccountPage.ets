@@ -292,6 +292,8 @@ struct AddAccountPage {
     .height('100%')
     .padding({ left: 24, right: 24, top: 16, bottom: 24 })
     .backgroundColor($r('app.color.page_bg'))
+    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .alignItems(HorizontalAlign.Center)
   }
 
@@ -310,6 +312,10 @@ struct AddAccountPage {
         .fontSize(15)
         .backgroundColor($r('app.color.input_bg'))
         .borderRadius(8)
+        // 显式指定文字/提示/光标颜色：默认取系统主题色，深色模式下会与底色撞色而"看不清"
+        .fontColor($r('app.color.text_primary'))
+        .placeholderColor($r('app.color.text_hint'))
+        .caretColor($r('app.color.brand'))
         .onChange(onChange)
     }
     .alignItems(HorizontalAlign.Start)

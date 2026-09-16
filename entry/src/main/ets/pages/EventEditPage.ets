@@ -425,6 +425,11 @@ struct EventEditPage {
             .fontSize(16)
             .backgroundColor($r('app.color.card_bg'))
             .borderRadius(12)
+            // 显式指定文字/提示/光标颜色：TextInput 默认取系统主题色，
+            // 深色模式下会变成浅色文字 → 与卡片底色撞色而"看不清"
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_hint'))
+            .caretColor($r('app.color.brand'))
             .onChange((v: string) => {
               this.title = v;
             })
@@ -541,6 +546,9 @@ struct EventEditPage {
             .fontSize(14)
             .backgroundColor($r('app.color.card_bg'))
             .borderRadius(12)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_hint'))
+            .caretColor($r('app.color.brand'))
             .onChange((v: string) => {
               this.location = v;
             })
@@ -551,6 +559,9 @@ struct EventEditPage {
             .fontSize(14)
             .backgroundColor($r('app.color.card_bg'))
             .borderRadius(12)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_hint'))
+            .caretColor($r('app.color.brand'))
             .onChange((v: string) => {
               this.description = v;
             })
@@ -591,6 +602,8 @@ struct EventEditPage {
     .height('100%')
     .padding({ top: 12 })
     .backgroundColor($r('app.color.page_bg'))
+    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .bindSheet($$this.pickerShow, this.dateTimePickerSheet(), {
       height: 380,
       showClose: false,
@@ -698,6 +711,13 @@ struct EventEditPage {
           .onDateChange((value: Date) => {
             this.pickDate = value;
           })
+          // 滚轮文字显式指定颜色：默认取系统主题色，深色模式下与弹层底色撞色会"看不清"
+          .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+          .selectedTextStyle({
+            color: $r('app.color.text_primary'),
+            font: { size: 16, weight: FontWeight.Medium }
+          })
+          .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
           .layoutWeight(1)
           .height(210)
         if (!this.allDay) {
@@ -708,6 +728,12 @@ struct EventEditPage {
               this.pickHour = value.hour;
               this.pickMin = value.minute;
             })
+            .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+            .selectedTextStyle({
+              color: $r('app.color.text_primary'),
+              font: { size: 16, weight: FontWeight.Medium }
+            })
+            .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
             .layoutWeight(1)
             .height(210)
         }

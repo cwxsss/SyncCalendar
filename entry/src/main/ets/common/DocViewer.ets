@@ -52,5 +52,7 @@ export struct DocViewer {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.page_bg'))
+    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制，Web 与标题栏仍在安全区内）
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }

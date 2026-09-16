@@ -249,6 +249,7 @@ struct CalendarListPage {
           .fontSize(16)
           .fontColor($r('app.color.text_primary'))
           .placeholderColor($r('app.color.text_hint'))
+          .caretColor($r('app.color.brand'))
           .backgroundColor($r('app.color.input_bg'))
           .borderRadius(10)
           .border({ width: 1.5, color: $r('app.color.brand') })
@@ -364,6 +365,8 @@ struct CalendarListPage {
     .height('100%')
     .padding({ left: 24, right: 24, top: 16, bottom: 24 })
     .backgroundColor($r('app.color.page_bg'))
+    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .alignItems(HorizontalAlign.Center)
   }
 }
