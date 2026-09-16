@@ -28,8 +28,8 @@ export struct TipsPanel {
     {
       icon: $r('app.media.tip_calendar'),
       title: '系统日历，也能一起管',
-      desc: '手机系统日历可与 CalDAV 日历混合显示在同一时间轴；还能把系统日历本通过 CalDAV 同步备份，' +
-        '一处编辑、处处更新。'
+      desc: '手机系统日历可与 CalDAV 日历混合显示在同一时间轴，也能把系统日历本通过 CalDAV 同步备份，' +
+        '一处编辑、处处更新。到「设置 → 混合显示系统日历」开启并授权即可。'
     },
     {
       icon: $r('app.media.tip_mute'),

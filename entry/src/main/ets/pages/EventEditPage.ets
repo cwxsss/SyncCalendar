@@ -3,6 +3,7 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { DavAccount, AccountStore, CalSource, BookPalette } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
 import { AppSettings } from '../common/AppSettings';
@@ -272,6 +273,11 @@ struct EventEditPage {
       }
       // 日志仅记录 uid 与提醒/重复设置，不落盘日程标题（避免隐私内容进入可备份的 sync.log）
       LogUtil.write(`本地保存日程（标题已脱敏）uid=${e.uid} 提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
+      // 设置了提醒 → 此刻才申请通知权限（用户刚主动使用了依赖通知的功能，
+      // 符合《审核指南》7.17"在用户主动点击对应功能时申请"，不随 App 启动自动弹窗）
+      if (e.reminders.length > 0) {
+        await this.ensureNotifyPermission();
+      }
       // 立即刷新提醒（不等下一轮同步），保证刚保存的提醒马上生效
       try {
         await ReminderService.refreshReminders(context as common.UIAbilityContext);
@@ -288,6 +294,27 @@ struct EventEditPage {
       router.back();
     }
     this.isSaving = false;
+  }
+
+  /**
+   * 确认通知权限已开启 —— 仅"用户保存了带提醒的日程"这条路径会调用。
+   * 日程提醒依赖系统通知，用户刚主动设置了提醒，此时申请权限与其使用目的完全一致。
+   * ⚠️ 严禁在 App 启动 / 首次打开时调用（《审核指南》7.17：不得提前弹窗申请权限）。
+   */
+  private async ensureNotifyPermission(): Promise<void> {
+    try {
+      const enabled: boolean = await notificationManager.isNotificationEnabled();
+      if (enabled) {
+        return;
+      }
+      const context = this.getUIContext().getHostContext();
+      if (context === undefined) {
+        return;
+      }
+      await notificationManager.requestEnableNotification(context as common.UIAbilityContext);
+    } catch (err) {
+      // 用户拒绝或未弹窗：日程照常保存，只是提醒可能不弹出（设置页可再开启）
+    }
   }
 
   /**

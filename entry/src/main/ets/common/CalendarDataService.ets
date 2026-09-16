@@ -1,6 +1,6 @@
 // entry/src/main/ets/common/CalendarDataService.ets
 // 合并数据源：本地库（DAV 同步 + 本机事件） + 系统日历（只读展示）
-import { common, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
+import { common, abilityAccessCtrl, bundleManager, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { calendarManager } from '@kit.CalendarKit';
 import { AccountStore, CalSource, BookPalette, LOCAL_CAL_KEY, DavAccount } from './AccountStore';
@@ -29,15 +29,52 @@ export class DisplayEvent {
 }
 
 export class CalendarDataService {
-  /** 申请读取全部日历权限（混合展示系统日历需要） */
-  static async ensureSystemCalendarPermission(context: common.UIAbilityContext): Promise<boolean> {
+  /** 本功能依赖的日历权限：读取本应用日历 + 读取全部日历（即"读取全部日程"） */
+  private static readonly CALENDAR_PERMISSIONS: Permissions[] = [
+    'ohos.permission.READ_CALENDAR',
+    'ohos.permission.READ_WHOLE_CALENDAR'
+  ];
+
+  /**
+   * 是否已获得"读取全部日程"权限。
+   * **只检查、绝不弹窗** —— 供界面判断状态、决定是否需要引导用户主动授权。
+   * 注意：checkAccessToken 只反映本应用授权状态，不会触发任何系统弹窗。
+   */
+  static async hasSystemCalendarPermission(): Promise<boolean> {
     try {
       const atManager = abilityAccessCtrl.createAtManager();
-      const permissions: Permissions[] = [
-        'ohos.permission.READ_CALENDAR',
-        'ohos.permission.READ_WHOLE_CALENDAR'
-      ];
-      const result = await atManager.requestPermissionsFromUser(context, permissions);
+      const info = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      const tokenId: number = info.appInfo.accessTokenId;
+      for (const p of CalendarDataService.CALENDAR_PERMISSIONS) {
+        const status = await atManager.checkAccessToken(tokenId, p);
+        if (status !== abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
+          return false;
+        }
+      }
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /**
+   * 申请"读取全部日程"权限（READ_CALENDAR + READ_WHOLE_CALENDAR）。
+   *
+   * ⚠️ 合规约束（《审核指南》7.17）：**只能在用户主动点击使用对应功能时调用**，
+   * 例如在设置页打开"混合显示系统日历"开关、把系统日历模式切到"备份到 CalDAV 日历本"。
+   * 严禁在 App 启动 / 首次打开 / 未同意隐私政策等用户未主动操作的时机调用。
+   *
+   * 已授权时直接返回 true，不会再弹窗（先 checkAccessToken，避免多余弹窗）。
+   */
+  static async requestSystemCalendarPermission(context: common.UIAbilityContext): Promise<boolean> {
+    if (await CalendarDataService.hasSystemCalendarPermission()) {
+      return true;
+    }
+    try {
+      const atManager = abilityAccessCtrl.createAtManager();
+      const result = await atManager.requestPermissionsFromUser(
+        context, CalendarDataService.CALENDAR_PERMISSIONS);
       for (const r of result.authResults) {
         if (r !== 0) {
           return false;

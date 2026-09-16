@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { AppSettings } from '../common/AppSettings';
 import { CardDataService } from '../common/CardDataService';
+import { CalendarDataService } from '../common/CalendarDataService';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
@@ -49,6 +50,15 @@ struct SettingsPage {
     this.context = ctx;
     AppSettings.getShowSystemCalendar(ctx).then((v: boolean): void => {
       this.showSystem = v;
+      // 状态自洽：若记录为"开"，但权限已被用户在系统设置里回收 → 自动回落为"关"，避免开关与实际不符
+      if (v) {
+        CalendarDataService.hasSystemCalendarPermission().then((granted: boolean): void => {
+          if (!granted) {
+            this.showSystem = false;
+            AppSettings.setShowSystemCalendar(ctx, false);
+          }
+        });
+      }
     });
     AppSettings.getSyncIntervalMinutes(ctx).then((v: number): void => {
       this.intervalMinutes = v;
@@ -85,6 +95,27 @@ struct SettingsPage {
       .catch((): void => {
         this.notifyEnabled = false;
       });
+  }
+
+  /**
+   * 确认通知权限已开启 —— **只在用户主动使用依赖通知的功能时调用**
+   * （保存带提醒的日程 / 开启后台持续同步 / 点击设置页"去开启通知"）。
+   * ⚠️ 严禁在 App 启动、首次打开等用户未操作的时机调用（《审核指南》7.17）。
+   */
+  private async ensureNotifyPermission(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    try {
+      const enabled: boolean = await notificationManager.isNotificationEnabled();
+      if (!enabled) {
+        await notificationManager.requestEnableNotification(
+          this.context as common.UIAbilityContext);
+      }
+    } catch (err) {
+      // 用户拒绝或系统未弹窗：不阻断功能，仅状态仍显示为未开启
+    }
+    this.refreshNotifyState();
   }
 
   /** 加载全部 DAV 日历本（含探测到的写权限，只读/静音标记管理用） */
@@ -198,6 +229,18 @@ struct SettingsPage {
     if (this.context === undefined) {
       return;
     }
+    // "备份到 CalDAV" 需要读取手机系统（本地）日历 → 只在用户主动选择该模式时申请权限
+    if (mode === 'backup') {
+      const granted: boolean = await CalendarDataService.requestSystemCalendarPermission(
+        this.context as common.UIAbilityContext);
+      if (!granted) {
+        this.sysMode = 'display'; // 回弹选择，保持与实际授权状态一致
+        this.getUIContext().getPromptAction().showToast({
+          message: '未获得"读取全部日程"权限，无法开启系统日历备份'
+        });
+        return;
+      }
+    }
     this.sysMode = mode;
     await AppSettings.setSysCalMode(this.context, mode);
     if (mode === 'backup' && this.backupKey === '') {
@@ -223,8 +266,25 @@ struct SettingsPage {
       .showToast({ message: '备份目标已更新，下次同步生效' });
   }
 
-  private async saveShowSystem(value: boolean): Promise<void> {    if (this.context === undefined) {
+  /**
+   * 保存「混合显示系统日历」开关。
+   * ⚠️ 合规约束（《审核指南》7.17）：读取系统日历依赖"读取全部日程"敏感权限，
+   * **只有在用户主动打开该开关时才申请**；未授权则开关回弹、不保存设置。
+   */
+  private async saveShowSystem(value: boolean): Promise<void> {
+    if (this.context === undefined) {
       return;
+    }
+    if (value) {
+      const granted: boolean = await CalendarDataService.requestSystemCalendarPermission(
+        this.context as common.UIAbilityContext);
+      if (!granted) {
+        this.showSystem = false; // 回弹开关，保持与实际授权状态一致
+        this.getUIContext().getPromptAction().showToast({
+          message: '未获得"读取全部日程"权限，无法混合显示系统日历'
+        });
+        return;
+      }
     }
     await AppSettings.setShowSystemCalendar(this.context, value);
     this.getUIContext().getPromptAction()
@@ -244,6 +304,10 @@ struct SettingsPage {
   private async saveBackgroundSync(value: boolean): Promise<void> {
     if (this.context === undefined) {
       return;
+    }
+    // 后台持续同步依赖常驻通知 → 在用户主动开启时才申请通知权限（不随启动自动弹窗）
+    if (value) {
+      await this.ensureNotifyPermission();
     }
     try {
       await BackgroundSyncService.setBackgroundSync(
@@ -447,7 +511,7 @@ struct SettingsPage {
                   .fontSize(15)
                   .fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.text_primary'))
-                Text('选择手机系统日历日程的处理方式')
+                Text('选择手机系统日历日程的处理方式（需授权读取系统日历）')
                   .fontSize(12)
                   .fontColor($r('app.color.text_secondary'))
               }

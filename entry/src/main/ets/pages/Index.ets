@@ -5,7 +5,6 @@ import { mediaquery, router } from '@kit.ArkUI';
 import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
-import { notificationManager } from '@kit.NotificationKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
 import { SyncEngine } from '../common/SyncEngine';
@@ -84,7 +83,6 @@ struct Index {
   // ---- 隐私政策与用户协议首启同意（未同意前不申请任何权限、不加载数据） ----
   @State policyChecked: boolean = false;  // 是否已读取过同意状态（避免首帧闪烁）
   @State policyAgreed: boolean = false;   // 是否已同意《隐私政策》与《用户协议》
-  private notifAsked: boolean = false;    // 通知权限是否已申请（同意后才申请）
   @State showTips: boolean = false;       // 首启功能引导（整页覆盖层：遮罩 + 底部卡片 + Swiper 三页）
   // ---- 内置文档浏览器（《隐私政策》/《用户服务协议》，整页 Web 覆盖层，不跳出应用） ----
   @State showDoc: boolean = false;
@@ -211,40 +209,17 @@ struct Index {
     }
   }
 
-  private initPermissionAndLoad(): void {
-    const context = this.getUIContext().getHostContext();
-    if (context === undefined) {
-      return;
-    }
-    this.reloadAll();
-    this.ensureNotificationPermission(context as common.UIAbilityContext);
-    if (!this.permissionAsked) {
-      this.permissionAsked = true;
-      // 申请读取全部日历权限（用于混合展示系统日程）
-      CalendarDataService.ensureSystemCalendarPermission(context as common.UIAbilityContext)
-        .then((): void => {
-          this.reloadAll();
-        });
-    }
-  }
-
   /**
-   * 申请通知权限（日程提醒、后台同步常驻通知都依赖它）。
-   * 必须在用户同意《隐私政策》之后才调用 —— 同意前不得申请任何权限。
+   * 启动/同意隐私政策后的初始化：**只加载本地库与 DAV 数据**。
+   *
+   * ⚠️ 合规约束（《审核指南》7.17）：这里**不申请任何权限**。
+   * 权限必须由用户主动点击对应功能时申请，否则会被判定为"未主动点击即提前弹窗申请"：
+   *   - 读取全部日程（日历）→ 设置页「混合显示系统日历」开关 / 「备份到 CalDAV 日历本」
+   *   - 通知 → 保存带提醒的日程 / 开启「后台持续同步」/ 设置页「去开启通知」
+   * 本方法只负责加载数据；系统日历来源由 CalendarDataService.loadSources 按开关与授权状态自行决定是否读取。
    */
-  private ensureNotificationPermission(context: common.UIAbilityContext): void {
-    if (this.notifAsked) {
-      return;
-    }
-    this.notifAsked = true;
-    notificationManager.isNotificationEnabled()
-      .then((enabled: boolean): Promise<void> => {
-        if (!enabled) {
-          return notificationManager.requestEnableNotification(context).catch((): void => {});
-        }
-        return Promise.resolve();
-      })
-      .catch((): void => {});
+  private initPermissionAndLoad(): void {
+    this.reloadAll();
   }
 
   /**

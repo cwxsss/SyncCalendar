@@ -365,14 +365,18 @@ export class AppSettings {
     }
   }
 
-  /** 是否混合显示系统日历日程（默认开） */
+  /**
+   * 是否混合显示系统日历日程。
+   * ⚠️ 默认**关闭**：读取系统日历需要"读取全部日程"敏感权限，按《审核指南》7.17
+   * 只能在用户主动打开该开关时才申请，因此默认值必须与实际授权状态一致（无授权 = 关）。
+   */
   static async getShowSystemCalendar(context: common.Context): Promise<boolean> {
     try {
       const store: preferences.Preferences =
         await preferences.getPreferences(context, AppSettings.STORE);
-      return await store.get(AppSettings.KEY_SHOW_SYSTEM, true) as boolean;
+      return await store.get(AppSettings.KEY_SHOW_SYSTEM, false) as boolean;
     } catch (err) {
-      return true;
+      return false;
     }
   }
 
