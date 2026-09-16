@@ -90,6 +90,7 @@ struct Widget6x4Card {
   @LocalStorageProp('dayCount') dayCount: number = 0;
   @LocalStorageProp('listJson') listJson: string = '[]';
   @LocalStorageProp('displayStyle') displayStyle: string = 'timeline';
+  @LocalStorageProp('selectedDate') selectedDate: number = 0; // 卡片当前显示日 0 点毫秒
 
   private parseBlocks(): TBlock6[] {
     try {
@@ -418,7 +419,8 @@ struct Widget6x4Card {
     postCardAction(this, {
       action: 'router',
       abilityName: 'EntryAbility',
-      params: {}
+      // 携带卡片当前显示日（用户可能已翻到其他日期），进入日历时定位到这一天
+      params: { openDate: this.selectedDate }
     });
   }
 

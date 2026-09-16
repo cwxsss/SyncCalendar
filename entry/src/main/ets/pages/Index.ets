@@ -71,6 +71,8 @@ struct Index {
   @State detailEvent: DisplayEvent | null = null;
   // 服务卡片"添加"按钮深链：EntryAbility 写入，本页读取后拉起新建日程页
   @Watch('onWidgetActionChange') @StorageLink('widgetAction') widgetAction: string = '';
+  // 服务卡片点击进入日历时携带的"显示日"毫秒（用户可能已翻到其他日期）：消费后定位 selectedDate
+  @Watch('onWidgetOpenDateChange') @StorageLink('widgetOpenDate') widgetOpenDate: number = 0;
   @State nowMs: number = Date.now(); // 当前时刻毫秒（驱动红线"播放"位置，每 30s 更新）
   // 时间轴视图（月/周/列表共用）：按天预计算好色块布局，避免 build 中重算
   @State dayTimeline: DayTimeline = new DayTimeline();            // 选中日（月/周视图用）
@@ -99,6 +101,13 @@ struct Index {
     this.displayYear = now.getFullYear();
     this.displayMonth = now.getMonth();
     this.selectedDate = this.startOfDay(now.getTime());
+    // 卡片点击：若携带显示日（用户可能已翻到其他日期），进入日历时定位到那一天
+    const openFromCard: number = AppStorage.get<number>('widgetOpenDate') ?? 0;
+    if (openFromCard > 0) {
+      this.selectedDate = this.startOfDay(openFromCard);
+      AppStorage.setOrCreate<number>('widgetOpenDate', 0);
+      LogUtil.write(`从卡片进入：定位到显示日 ${this.selectedDate}`);
+    }
     this.rebuildPages();
     this.initLandscapeListener();
     // 首启同意门禁：未同意《隐私政策》与《用户协议》前，不申请任何系统权限、不加载/同步数据（AGC 硬性要求）
@@ -167,6 +176,16 @@ struct Index {
   /** 卡片深链监听（App 已在后台运行时，onNewWant 改写 AppStorage 触发） */
   private onWidgetActionChange(): void {
     this.consumeWidgetAction();
+  }
+
+  /** 卡片点击携带的"显示日"：App 已在后台运行时由 onNewWant 改写，定位到那一天后清除 */
+  private onWidgetOpenDateChange(): void {
+    const d: number = this.widgetOpenDate;
+    if (d > 0) {
+      this.selectedDate = this.startOfDay(d);
+      AppStorage.setOrCreate<number>('widgetOpenDate', 0);
+      LogUtil.write(`卡片切入（运行中）：定位到显示日 ${this.selectedDate}`);
+    }
   }
 
   /** 消费卡片"添加"深链：拉起新建日程页并立即清除标记，避免重复触发 */

@@ -49,7 +49,7 @@ export default class EntryAbility extends UIAbility {
     this.handleWidgetParam(want);
   }
 
-  /** 读取卡片深链参数：widgetAction=add 时写入 AppStorage，供 Index 页面拉起新建日程页 */
+  /** 读取卡片深链参数：widgetAction=add 拉起新建日程；openDate 定位到卡片当前显示日 */
   private handleWidgetParam(want: Want): void {
     const params = want.parameters;
     if (params !== undefined) {
@@ -57,6 +57,21 @@ export default class EntryAbility extends UIAbility {
       if (typeof raw === 'string' && raw === 'add') {
         AppStorage.setOrCreate<string>('widgetAction', 'add');
         LogUtil.write('卡片添加入口：已设置 widgetAction=add');
+      }
+      // 卡片点击进入日历时，定位到卡片当前显示的那一天（用户可能已翻到其他日期）
+      const od = params['openDate'];
+      let odMs: number = 0;
+      if (typeof od === 'number') {
+        odMs = od;
+      } else if (typeof od === 'string' && od.length > 0) {
+        const parsed = parseInt(od, 10);
+        if (!isNaN(parsed)) {
+          odMs = parsed;
+        }
+      }
+      if (odMs > 0) {
+        AppStorage.setOrCreate<number>('widgetOpenDate', odMs);
+        LogUtil.write(`卡片进入日历：定位到显示日 ${odMs}`);
       }
     }
   }

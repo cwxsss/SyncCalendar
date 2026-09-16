@@ -60,6 +60,7 @@ export class CardData {
   // ===== 卡片翻页（上一天 / 下一天 / 回到今天）=====
   dayOffset: number = 0;    // 相对今天的天数偏移（0=今天）
   isToday: boolean = true;  // 当前显示的是否为今天（非今天不画红线）
+  selectedDate: number = 0; // 当前卡片显示的那一天 0 点毫秒（点卡片进入日历时定位到这一天）
   dayCount: number = 0;     // 当前显示日的日程条数（含全天）
 }
 
@@ -190,6 +191,7 @@ export class CardDataService {
         data.weekday = fullWeekCn[base.getDay()];
         data.dayOffset = dayOffset;
         data.isToday = dayOffset === 0;
+        data.selectedDate = baseStart; // 卡片当前显示日 0 点毫秒（点卡片进入日历时定位用）
       const start: number = baseStart < todayStart ? baseStart : todayStart;
       const end: number = (baseStart > todayStart ? baseStart : todayStart) + 60 * 86400000;
       const sources = await CalendarDataService.loadSources(context);
