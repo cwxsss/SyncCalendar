@@ -75,6 +75,9 @@ struct Index {
   // 时间轴视图（月/周/列表共用）：按天预计算好色块布局，避免 build 中重算
   @State dayTimeline: DayTimeline = new DayTimeline();            // 选中日（月/周视图用）
   @State agendaTimelines: AgendaTimelineGroup[] = [];             // 列表视图：每天一条时间轴
+  // 日程显示方式：'timeline'（竖向时间轴，默认） | 'list'（列表）。
+  // 列表模式无时间刻度 → 不绘制"当前时间红线"，改用"进行中"文字标记。
+  @State displayStyle: string = 'timeline';
 
   // ---- 隐私政策与用户协议首启同意（未同意前不申请任何权限、不加载数据） ----
   @State policyChecked: boolean = false;  // 是否已读取过同意状态（避免首帧闪烁）
@@ -339,6 +342,8 @@ struct Index {
     }
     this.accounts = await AccountStore.loadAll(context);
     this.sources = await CalendarDataService.loadSources(context);
+    // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
+    this.displayStyle = await AppSettings.getDisplayStyle(context);
     await this.reloadEvents();
     this.startAutoSync();
   }
@@ -2009,118 +2014,318 @@ struct Index {
     )
   }
 
-  /** 单日竖向时间轴滚动区（周视图 / 月视图下方共用）；DayTimelineView 自身带 Scroll 并自动定位到当前时刻 */
+  /** 单日日程展示区（周视图 / 月视图下方共用）。
+   *  - timeline 模式：竖向时间轴（DayTimelineView，带"当前时间红线"）。
+   *  - list 模式：按"行"平铺（eventRow），无时间刻度 → 不画红线，进行中改用文字标记。 */
   @Builder
   eventList() {
-    Column() {
-      DayTimelineView({
-        timeline: this.dayTimeline,
-        nowMs: this.nowMs,
-        showNowLine: this.selectedDate === this.startOfDay(this.nowMs),
-        scrollable: true,
-        onPick: (e: DisplayEvent): void => this.openEvent(e)
-      })
-      if (!this.dayTimeline.hasTimed && this.dayTimeline.allDay.length === 0 && !this.loading) {
-        Text('当天没有日程')
-          .fontSize(13)
-          .fontColor($r('app.color.text_hint'))
-          .width('100%')
-          .textAlign(TextAlign.Center)
-          .padding(20)
-      }
-    }
-    .layoutWeight(1)
-    .width('100%')
-    .padding({ left: 12, right: 16, top: 4, bottom: 24 })
-    .alignItems(HorizontalAlign.Start)
-    // 下半区（日程展示区）左右滑 → 按天切换（一次 1 天），仅周视图生效
-    .gesture(
-      SwipeGesture({ direction: SwipeDirection.Horizontal })
-        .onAction((event: GestureEvent) => {
-          if (this.mode !== 'week') {
-            return;
+    if (this.displayStyle === 'list') {
+      Scroll() {
+        Column({ space: 8 }) {
+          ForEach(this.eventsOfDate(this.selectedDate), (e: DisplayEvent) => {
+            this.eventRow(e, this.isEventNow(e, this.selectedDate === this.startOfDay(this.nowMs)))
+          }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+          if (this.eventsOfDate(this.selectedDate).length === 0 && !this.loading) {
+            Text('当天没有日程')
+              .fontSize(13)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+              .textAlign(TextAlign.Center)
+              .padding(20)
           }
-          this.switchDay(this.isSwipeLeft(event) ? 1 : -1);
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: 4, bottom: 24 })
+        .constraintSize({ minHeight: '100%' })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
+      .align(Alignment.Top)
+      .gesture(
+        SwipeGesture({ direction: SwipeDirection.Horizontal })
+          .onAction((event: GestureEvent) => {
+            if (this.mode !== 'week') {
+              return;
+            }
+            this.switchDay(this.isSwipeLeft(event) ? 1 : -1);
+          })
+      )
+    } else {
+      Column() {
+        DayTimelineView({
+          timeline: this.dayTimeline,
+          nowMs: this.nowMs,
+          showNowLine: this.selectedDate === this.startOfDay(this.nowMs),
+          scrollable: true,
+          onPick: (e: DisplayEvent): void => this.openEvent(e)
         })
-    )
+        if (!this.dayTimeline.hasTimed && this.dayTimeline.allDay.length === 0 && !this.loading) {
+          Text('当天没有日程')
+            .fontSize(13)
+            .fontColor($r('app.color.text_hint'))
+            .width('100%')
+            .textAlign(TextAlign.Center)
+            .padding(20)
+        }
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .padding({ left: 12, right: 16, top: 4, bottom: 24 })
+      .alignItems(HorizontalAlign.Start)
+      // 下半区（日程展示区）左右滑 → 按天切换（一次 1 天），仅周视图生效
+      .gesture(
+        SwipeGesture({ direction: SwipeDirection.Horizontal })
+          .onAction((event: GestureEvent) => {
+            if (this.mode !== 'week') {
+              return;
+            }
+            this.switchDay(this.isSwipeLeft(event) ? 1 : -1);
+          })
+      )
+    }
   }
 
   @Builder
   agendaBody() {
-    List({ space: 10, scroller: this.agendaScroller }) {
-      ListItem() {
-        Row({ space: 8 }) {
-          if (this.loading) {
-            LoadingProgress()
-              .width(24)
-              .height(24)
-              .color($r('app.color.brand'))
-          }
-          Text(this.loading ? '正在加载全部日程…' : `共 ${this.agendaEvents.length} 条` +
-            `，${this.agendaTimelines.length} 天`)
-            .fontSize(12)
-            .fontColor($r('app.color.text_hint'))
-        }
-        .width('100%')
-        .padding({ top: 2, bottom: 2 })
-      }
-
-      // 每一天：日期头 + 该日一条竖向时间轴（0-23 格，色块按时间平铺，冲突平分宽度）
-      ForEach(this.agendaTimelines, (day: AgendaTimelineGroup) => {
+    if (this.displayStyle === 'list') {
+      // 列表模式：按日分组，每天一条日期头 + 该日若干"行"卡片；不画红线，进行中改用文字标记
+      List({ space: 6, scroller: this.agendaScroller }) {
         ListItem() {
-          Column({ space: 6 }) {
-            Row({ space: 8 }) {
-              Text(day.label)
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))
-              if (day.isToday) {
-                Text('今天')
-                  .fontSize(10)
-                  .fontColor($r('app.color.button_text'))
-                  .backgroundColor($r('app.color.brand'))
-                  .borderRadius(6)
-                  .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-              }
-              Blank()
-              Text(`${day.timeline.blocks.length + day.timeline.allDay.length} 条`)
-                .fontSize(11)
-                .fontColor($r('app.color.text_hint'))
+          Row({ space: 8 }) {
+            if (this.loading) {
+              LoadingProgress()
+                .width(24)
+                .height(24)
+                .color($r('app.color.brand'))
             }
-            .width('100%')
-            .padding({ top: 4 })
-
-            DayTimelineView({
-              timeline: day.timeline,
-              nowMs: this.nowMs,
-              showNowLine: day.isToday,
-              scrollable: false,
-              onPick: (e: DisplayEvent): void => this.openEvent(e)
-            })
+            Text(this.loading ? '正在加载全部日程…' : `共 ${this.agendaEvents.length} 条`)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
           }
           .width('100%')
-          .padding(10)
-          .borderRadius(12)
-          .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
+          .padding({ top: 2, bottom: 2 })
         }
-      }, (day: AgendaTimelineGroup) => `day_${day.dateMs}`)
+
+        ForEach(this.agendaTimelines, (day: AgendaTimelineGroup) => {
+          ListItem() {
+            Text(day.label)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_secondary'))
+              .width('100%')
+              .padding({ top: 6, bottom: 2 })
+          }
+          ForEach(this.dayEvents(day), (e: DisplayEvent) => {
+            ListItem() {
+              this.eventRow(e, this.isEventNow(e, day.isToday))
+            }
+            .width('100%')
+          }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+        }, (day: AgendaTimelineGroup) => `day_${day.dateMs}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+      .edgeEffect(EdgeEffect.Spring)
+      .padding({ left: 20, right: 20, top: 6, bottom: 24 })
+      .cachedCount(8)
+      .onAreaChange((oldVal: Area, newVal: Area): void => {
+        const h: number = Number(newVal.height);
+        if (h > 0 && (h - this.agendaViewportH > 1 || h - this.agendaViewportH < -1)) {
+          this.agendaViewportH = h;
+          if (this.agendaScrollPending) {
+            this.doAgendaScroll();
+          }
+        }
+      })
+    } else {
+      // 时间轴模式：每天一条竖向时间轴（0-23 格，色块按时间平铺，冲突平分宽度；今天画红线）
+      List({ space: 10, scroller: this.agendaScroller }) {
+        ListItem() {
+          Row({ space: 8 }) {
+            if (this.loading) {
+              LoadingProgress()
+                .width(24)
+                .height(24)
+                .color($r('app.color.brand'))
+            }
+            Text(this.loading ? '正在加载全部日程…' : `共 ${this.agendaEvents.length} 条` +
+              `，${this.agendaTimelines.length} 天`)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+          }
+          .width('100%')
+          .padding({ top: 2, bottom: 2 })
+        }
+
+        // 每一天：日期头 + 该日一条竖向时间轴（0-23 格，色块按时间平铺，冲突平分宽度）
+        ForEach(this.agendaTimelines, (day: AgendaTimelineGroup) => {
+          ListItem() {
+            Column({ space: 6 }) {
+              Row({ space: 8 }) {
+                Text(day.label)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))
+                if (day.isToday) {
+                  Text('今天')
+                    .fontSize(10)
+                    .fontColor($r('app.color.button_text'))
+                    .backgroundColor($r('app.color.brand'))
+                    .borderRadius(6)
+                    .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+                }
+                Blank()
+                Text(`${day.timeline.blocks.length + day.timeline.allDay.length} 条`)
+                  .fontSize(11)
+                  .fontColor($r('app.color.text_hint'))
+              }
+              .width('100%')
+              .padding({ top: 4 })
+
+              DayTimelineView({
+                timeline: day.timeline,
+                nowMs: this.nowMs,
+                showNowLine: day.isToday,
+                scrollable: false,
+                onPick: (e: DisplayEvent): void => this.openEvent(e)
+              })
+            }
+            .width('100%')
+            .padding(10)
+            .borderRadius(12)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 1, color: $r('app.color.shadow_color') })
+          }
+        }, (day: AgendaTimelineGroup) => `day_${day.dateMs}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+      .edgeEffect(EdgeEffect.Spring)
+      .padding({ left: 12, right: 12, top: 6, bottom: 24 })
+      .cachedCount(4)
+      .onAreaChange((oldVal: Area, newVal: Area): void => {
+        const h: number = Number(newVal.height);
+        if (h > 0 && (h - this.agendaViewportH > 1 || h - this.agendaViewportH < -1)) {
+          this.agendaViewportH = h;
+          if (this.agendaScrollPending) {
+            this.doAgendaScroll();
+          }
+        }
+      })
     }
-    .width('100%')
-    .layoutWeight(1)
-    .scrollBar(BarState.Auto)
-    .edgeEffect(EdgeEffect.Spring)
-    .padding({ left: 12, right: 12, top: 6, bottom: 24 })
-    .cachedCount(4)
-    .onAreaChange((oldVal: Area, newVal: Area): void => {
-      const h: number = Number(newVal.height);
-      if (h > 0 && (h - this.agendaViewportH > 1 || h - this.agendaViewportH < -1)) {
-        this.agendaViewportH = h;
-        if (this.agendaScrollPending) {
-          this.doAgendaScroll();
+  }
+
+  /** 日程"行"卡片（列表模式 / 卡片共用）：左侧 4px 颜色条 + 标题 + 时间/地点 + 所属日历本。
+   *  isNow=true 时以红色强调并打"● 进行中"标记（替代时间轴里的"当前时间红线"）。 */
+  @Builder
+  eventRow(e: DisplayEvent, isNow: boolean = false) {
+    Row({ space: 10 }) {
+      Column()
+        .width(4)
+        .height(38)
+        .borderRadius(2)
+        .backgroundColor(isNow ? '#FF3B30' : e.color)
+      Column({ space: 3 }) {
+        Text(e.title === '' ? '(无标题)' : e.title)
+          .fontSize(15)
+          .fontColor(isNow ? '#FF3B30' : $r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row({ space: 6 }) {
+          Text(e.isAllDay || this.spansDays(e)
+            ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
+            .fontSize(12)
+            .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
+          if (e.recurring) {
+            Text('↻ 重复')
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .borderRadius(4)
+              .backgroundColor($r('app.color.chip_off_bg'))
+          }
+          if (isNow) {
+            Text('● 进行中')
+              .fontSize(10)
+              .fontColor('#FF3B30')
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .borderRadius(4)
+              .backgroundColor('#FFECEA')
+          }
+        }
+        if (e.location !== '') {
+          Row({ space: 4 }) {
+            Text('📍')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+            Text(e.location)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
         }
       }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      if (e.isSystem) {
+        Text('系统')
+          .fontSize(10)
+          .fontColor($r('app.color.text_hint'))
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .borderRadius(6)
+          .backgroundColor($r('app.color.chip_off_bg'))
+      }
+      // 所属日历本：最右侧、垂直居中，颜色同日历本；只读日历本加删除线标识
+      if (e.calName !== '') {
+        Text(e.calName)
+          .fontSize(11)
+          .fontColor(e.color)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '30%' })
+          .decoration({ type: e.writable ? TextDecorationType.None : TextDecorationType.LineThrough })
+      }
+    }
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .padding(10)
+    .borderRadius(12)
+    .backgroundColor($r('app.color.card_bg'))
+    .border({ width: 1, color: $r('app.color.shadow_color') })
+    .onClick(() => {
+      this.openEvent(e);
     })
+  }
+
+  /** 某条日程此刻是否"正在进行"。仅当天、且为按时段（非全天/非跨天）且 now 落在 [start,end) 才算。
+   *  列表模式用这个替代时间轴的"当前时间红线"：红条 + "● 进行中"文字标记。 */
+  private isEventNow(e: DisplayEvent, isToday: boolean): boolean {
+    if (!isToday) {
+      return false;
+    }
+    if (e.isAllDay || this.spansDays(e)) {
+      return false;
+    }
+    return e.startTime <= this.nowMs && this.nowMs < e.endTime;
+  }
+
+  /** 取某天时间轴里要按"行"平铺展示的全部日程（全天 + 时段色块对应事件）。 */
+  private dayEvents(day: AgendaTimelineGroup): DisplayEvent[] {
+    const arr: DisplayEvent[] = [];
+    for (const a of day.timeline.allDay) {
+      arr.push(a);
+    }
+    for (const b of day.timeline.blocks) {
+      if (b.ev !== null) {
+        arr.push(b.ev);
+      }
+    }
+    return arr;
   }
 
   /** 列表视图：把每天的分组转成"一天一条竖向时间轴"

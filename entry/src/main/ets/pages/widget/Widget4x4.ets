@@ -33,6 +33,16 @@ class TAllDay {
   isAllDay: boolean = true;
 }
 
+/** 列表模式单条日程（解析 listJson） */
+class LItem4 {
+  title: string = '';
+  time: string = '';
+  endTime: string = '';
+  color: string = '#007DFF';
+  calName: string = '';
+  isNow: boolean = false;
+}
+
 /** 冲突组：组内**贪心分列**，lanes[i] = 第 i 列（同列互不重叠） */
 class TGroup4 {
   startRatio: number = 0;
@@ -79,6 +89,8 @@ struct Widget4x4Card {
   @LocalStorageProp('todayCount') todayCount: number = 0;
   @LocalStorageProp('isToday') isToday: boolean = true;
   @LocalStorageProp('dayCount') dayCount: number = 0;
+  @LocalStorageProp('listJson') listJson: string = '[]';
+  @LocalStorageProp('displayStyle') displayStyle: string = 'timeline';
 
   private parseBlocks(): TBlock[] {
     try {
@@ -459,6 +471,112 @@ struct Widget4x4Card {
     }
   }
 
+  /** 列表模式单条日程（解析 listJson） */
+  private parseList(): LItem4[] {
+    try {
+      return JSON.parse(this.listJson) as LItem4[];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 列表模式单条行：左侧日历色条（进行中变红）+ 时间 + 标题 + 所属日历本；不画红线 */
+  @Builder
+  listRow(item: LItem4) {
+    Row({ space: 8 }) {
+      Column()
+        .width(3)
+        .height(item.time === '全天' ? 16 : 38)
+        .borderRadius(2)
+        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
+      if (item.time === '全天') {
+        Text(item.title)
+          .fontSize(12)
+          .fontColor('#1A1A1A')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        Text('全天')
+          .fontSize(9)
+          .fontColor('#FFFFFF')
+          .backgroundColor(item.color)
+          .borderRadius(6)
+          .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+      } else {
+        Column({ space: 2 }) {
+          Text(item.time)
+            .fontSize(10)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(item.isNow ? '#FF3B30' : '#333333')
+          Text(item.endTime)
+            .fontSize(10)
+            .fontColor('#999999')
+        }
+        .width(38)
+        .alignItems(HorizontalAlign.Center)
+        Text(item.title)
+          .fontSize(12)
+          .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        if (item.isNow) {
+          Text('● 进行中')
+            .fontSize(9)
+            .fontColor('#FF3B30')
+            .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+            .borderRadius(4)
+            .backgroundColor('#FFECEA')
+        }
+      }
+      if (item.calName !== '') {
+        Text(item.calName)
+          .fontSize(9)
+          .fontColor(item.color)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '25%' })
+      }
+    }
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+    .borderRadius(8)
+    .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
+  }
+
+  /** 列表模式主体：空态 / 可滚动的"行"列表（无时间轴、无红线） */
+  @Builder
+  listBody() {
+    if (this.parseList().length === 0) {
+      Column({ space: 6 }) {
+        Text('📅')
+          .fontSize(24)
+        Text('暂无日程')
+          .fontSize(13)
+          .fontColor('#8A8A8A')
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .justifyContent(FlexAlign.Center)
+      .onClick(() => this.openApp())
+    } else {
+      List({ space: 4 }) {
+        ForEach(this.parseList(), (item: LItem4) => {
+          ListItem() {
+            this.listRow(item)
+          }
+          .width('100%')
+        }, (item: LItem4) => `${item.time}_${item.title}_${item.color}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+      .cachedCount(8)
+      .onClick(() => this.openApp())
+    }
+  }
+
   build() {
     Column({ space: 6 }) {
       Row({ space: 4 }) {
@@ -484,6 +602,9 @@ struct Widget4x4Card {
 
       Divider().strokeWidth(0.5).color('#E5E5E5')
 
+      if (this.displayStyle === 'list') {
+        this.listBody()
+      } else {
       // 卡片不支持 Scroll，但支持 List / ListItem：
       // 把"整日时间轴"作为**一个很高的 ListItem**，超出卡片窗口的部分靠上下滑动查看
       List() {
@@ -567,6 +688,7 @@ struct Widget4x4Card {
       }
       .layoutWeight(1)
       .width('100%')
+      }
     }
     .width('100%')
     .height('100%')

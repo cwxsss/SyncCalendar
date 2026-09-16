@@ -17,6 +17,7 @@ export class AppSettings {
   private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
+  private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
   private static readonly KEY_POLICY_AGREED: string = 'policy_agreed';    // 是否已同意隐私政策与用户协议
   // 首启功能引导"用户已看过并关闭"的标记。键名带版本号：改动引导内容后把 vN 加 1，用户即可再看一次。
   // 注意：只在用户主动关闭（"开始使用" / ✕ / 点遮罩）时才置 true，**不再"显示前就置 true"**——
@@ -115,6 +116,36 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存默认视图失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 日程显示方式：'timeline'（竖向时间轴，默认） | 'list'（列表）。
+   *
+   * 两种风格各有偏好：时间轴强于"看一天的时间占用与冲突"，列表强于"快速扫读与长标题"。
+   * 该设置同时作用于主界面（月/周视图下方、列表视图）与桌面服务卡片（4×4 / 6×4）。
+   * 列表模式下不绘制"当前时间红线"（列表没有时间刻度，红线没有落点）。
+   */
+  static async getDisplayStyle(context: common.Context): Promise<string> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const v: string = await store.get(AppSettings.KEY_DISPLAY_STYLE, 'timeline') as string;
+      return v === 'list' ? 'list' : 'timeline';
+    } catch (err) {
+      return 'timeline';
+    }
+  }
+
+  static async setDisplayStyle(context: common.Context, style: string): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_DISPLAY_STYLE, style === 'list' ? 'list' : 'timeline');
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存日程显示方式失败: ${e.message}`);
     }
   }
 

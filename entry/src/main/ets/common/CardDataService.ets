@@ -5,9 +5,10 @@ import { formBindingData, formProvider } from '@kit.FormKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { preferences } from '@kit.ArkData';
 import { CalendarDataService, DisplayEvent } from './CalendarDataService';
+import { AppSettings } from './AppSettings';
 import { LunarUtil } from './LunarUtil';
 import { LogUtil } from './LogUtil';
-import { TimelineUtil, DayTimeline } from './TimelineUtil';
+import { TimelineUtil, DayTimeline, TimelineBlock } from './TimelineUtil';
 
 /** 卡片单条日程（按天分组：组内全天事件在前、有时间的按开始时间排序） */
 export class CardItem {
@@ -15,6 +16,7 @@ export class CardItem {
   time: string = '';      // 开始时间 '08:30' / '全天'
   endTime: string = '';   // 结束时间 '10:00'（全天事件为空）
   date: string = '';      // '9月15日'
+  calName: string = '';   // 所属日历本名称（列表模式卡片右侧展示，颜色同日历本）
   showDate: boolean = false; // 是否为当天分组的第一条（卡片上渲染日期头）
   color: string = '#007DFF';
   // 当前时间红线：start/end 为日程实际起止毫秒（用于定位"现在"位置）；
@@ -51,6 +53,10 @@ export class CardData {
   nowRatio: number = 0;    // 当前时间在当天时间轴上的比例（0~1），卡片画红线用
   nowLabel: string = '';   // 当前时间文字（如 '14:05'）
   allDayJson: string = '[]'; // 全天/跨天日程（CardAllDay[] JSON，卡片画在最上方）
+  // 列表模式：当前显示日的"行"式日程（CardItem[]，按全天在前、时间升序；无红线）
+  listJson: string = '[]';
+  // 日程显示方式：'timeline' | 'list'（与 App 内设置联动；列表模式卡片不画红线）
+  displayStyle: string = 'timeline';
   // ===== 卡片翻页（上一天 / 下一天 / 回到今天）=====
   dayOffset: number = 0;    // 相对今天的天数偏移（0=今天）
   isToday: boolean = true;  // 当前显示的是否为今天（非今天不画红线）
@@ -343,7 +349,31 @@ export class CardDataService {
       data.nowRatio = data.isToday ? TimelineUtil.nowRatio(nowMs) : -1;
       data.nowLabel = TimelineUtil.nowLabel(nowMs);
       data.dayCount = tl.blocks.length + tl.allDay.length;
-      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块`);
+      // 列表模式数据：当前显示日的"行"式日程（全天在前、有时间按开始时间升序）。
+      // 进行中（仅今天的有时间日程）用 isNow 标记 → 卡片上以红条 + "进行中"呈现，**不画横线红线**。
+      const dayList: CardItem[] = [];
+      const dayAllDay: DisplayEvent[] = tl.allDay;
+      const dayTimed: DisplayEvent[] = tl.blocks
+        .filter((b: TimelineBlock): boolean => b.ev !== null)
+        .map((b: TimelineBlock): DisplayEvent => b.ev as DisplayEvent)
+        .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+      for (const e of dayAllDay.concat(dayTimed)) {
+        const li = new CardItem();
+        li.title = e.title === '' ? '(无标题)' : e.title;
+        const isDayLong: boolean = e.isAllDay || spansDays(e);
+        const ds: Date = new Date(e.startTime);
+        const de: Date = new Date(e.endTime);
+        li.time = isDayLong ? '全天' : `${p(ds.getHours())}:${p(ds.getMinutes())}`;
+        li.endTime = isDayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
+        li.color = e.color;
+        li.calName = e.calName;
+        li.isNow = data.isToday && !isDayLong && e.startTime <= nowMs && nowMs < e.endTime;
+        dayList.push(li);
+      }
+      data.listJson = JSON.stringify(dayList);
+      // 显示方式：与 App 内设置联动（列表模式卡片不画当前时间红线）
+      data.displayStyle = await AppSettings.getDisplayStyle(context);
+      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，显示方式 ${data.displayStyle}`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }

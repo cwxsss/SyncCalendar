@@ -4,6 +4,7 @@ import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { AppSettings } from '../common/AppSettings';
+import { CardDataService } from '../common/CardDataService';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
@@ -39,6 +40,7 @@ struct SettingsPage {
   @State docUrl: string = '';
   @State showTips: boolean = false;     // 功能引导卡片（底部弹出）
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
+  @State displayStyle: string = 'timeline'; // 日程显示方式：timeline（时间轴）| list（列表）
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -67,6 +69,9 @@ struct SettingsPage {
     });
     AppSettings.getDefaultView(ctx).then((v: string): void => {
       this.defaultView = v;
+    });
+    AppSettings.getDisplayStyle(ctx).then((v: string): void => {
+      this.displayStyle = v;
     });
     this.refreshNotifyState();
     this.loadBackupSettings();
@@ -272,6 +277,25 @@ struct SettingsPage {
   private defaultViewLabel(): string {
     return this.defaultView === 'month' ? '月视图'
       : (this.defaultView === 'week' ? '周视图' : '列表视图');
+  }
+
+  private async saveDisplayStyle(style: string): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    this.displayStyle = style;
+    await AppSettings.setDisplayStyle(this.context, style);
+    // 同步刷桌面卡片：让 4×4 / 6×4 卡片立刻按新方式重绘（列表模式去掉红线）
+    try {
+      await CardDataService.pushToAllForms(this.context);
+    } catch (err) {
+      // 卡片刷新失败不影响设置保存，下次同步或卡片自刷新时会生效
+    }
+    this.getUIContext().getPromptAction().showToast({
+      message: style === 'list'
+        ? '已切换为列表显示（不显示当前时间红线）'
+        : '已切换为时间轴显示'
+    });
   }
 
   private intervalLabel(minutes: number): string {
@@ -507,6 +531,43 @@ struct SettingsPage {
                   const v: string = index === 0 ? 'month' : (index === 1 ? 'week' : 'agenda');
                   if (v !== this.defaultView) {
                     this.saveDefaultView(v);
+                  }
+                })
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 日程显示方式：时间轴 / 列表（同时作用于主界面与桌面卡片）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('日程显示方式')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('时间轴：按时间刻度看一天的占用与冲突；列表：快速扫读、适合长标题。列表模式不显示当前时间红线')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Select([{ value: '时间轴' }, { value: '列表' }] as SelectOption[])
+                .selected(this.displayStyle === 'list' ? 1 : 0)
+                .value(this.displayStyle === 'list' ? '列表' : '时间轴')
+                .fontColor($r('app.color.text_primary'))
+                .font({ size: 14 })
+                .optionFont({ size: 14 })
+                .selectedOptionFont({ size: 14 })
+                .onSelect((index: number) => {
+                  const v: string = index === 1 ? 'list' : 'timeline';
+                  if (v !== this.displayStyle) {
+                    this.saveDisplayStyle(v);
                   }
                 })
             }
