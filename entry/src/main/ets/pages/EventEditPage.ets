@@ -1,10 +1,10 @@
 // entry/src/main/ets/pages/EventEditPage.ets
-// 日程编辑页：新建 / 修改 / 删除本地（DAV 或本机）日程
+// 日程编辑页：新建 / 修改 / 删除日程（一律属于某个 CalDAV 日历本，不再支持"本机"日程）
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
-import { DavAccount, AccountStore, CalSource, BookPalette } from '../common/AccountStore';
+import { DavAccount, AccountStore, CalSource, BookPalette, LOCAL_CAL_KEY } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
 import { AppSettings } from '../common/AppSettings';
 import { DavClient } from '../common/DavClient';
@@ -52,8 +52,9 @@ struct EventEditPage {
     if (context === undefined) {
       return;
     }
-    // 收集可写入的日历本（DAV 可写日历本 + 本机）；只读日历本不出现在新建/编辑选择中
-    const sources: CalSourceWithHref[] = await CalendarDataBridge.loadWritableSources(context);
+    // 收集可写入的日历本：只取 **CalDAV** 可写日历本（"本机"不再出现在选择里）；
+    // 只读日历本同样不出现
+    const sources: CalSourceWithHref[] = await CalendarDataBridge.loadWritableDavSources(context);
     const choices: BookChoice[] = [];
     for (const s of sources) {
       const b = new BookChoice();
@@ -64,6 +65,10 @@ struct EventEditPage {
       choices.push(b);
     }
     this.books = choices;
+    if (choices.length === 0) {
+      // 没有可写入的 CalDAV 日历本 → 日程无处可写，给明确指引（保存时也会再拦一次）
+      this.statusMsg = '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号';
+    }
 
     // 编辑既有事件
     const pendingId: number | undefined = AppStorage.get<number>('pendingEventId');
@@ -79,6 +84,11 @@ struct EventEditPage {
         this.startMs = loaded.startTime;
         this.endMs = loaded.endTime;
         this.chosenKey = loaded.calKey;
+        // 历史遗留的"本机"日程：本应用已不再支持本机日程，改为引导用户挑一个 CalDAV 日历本
+        // （保存时 calKey/href 会改写为该日历本，事件随后被推送到服务器）
+        if (loaded.calKey === LOCAL_CAL_KEY) {
+          this.statusMsg = '这条日程原先只存在「本机」（不同步）。请选一个 CalDAV 日历本，保存后即会同步到服务器。';
+        }
         this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders
           : (loaded.reminder > 0 ? [loaded.reminder] : []);
@@ -225,6 +235,14 @@ struct EventEditPage {
       this.statusMsg = '重复日程的单次修改暂不支持，请到服务器端调整重复规则';
       return;
     }
+    // 日程必须落在某个 CalDAV 日历本上（"本机"不再是可选目标）——没选到就直接拦下
+    const book = this.chosenBook();
+    if (book === null) {
+      this.statusMsg = this.books.length === 0
+        ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
+        : '请选择要同步到的 CalDAV 日历本';
+      return;
+    }
     this.isSaving = true;
     this.statusMsg = '';
     try {
@@ -232,7 +250,6 @@ struct EventEditPage {
       if (context === undefined) {
         return;
       }
-      const book = this.chosenBook();
       const e = this.event ?? new LocalEvent();
       const isNew: boolean = this.event === null;
       e.title = this.title.trim();
@@ -241,8 +258,9 @@ struct EventEditPage {
       e.startTime = this.startMs;
       e.endTime = this.allDay ? this.startMs + 86399999 : this.endMs;
       e.isAllDay = this.allDay;
-      e.calKey = book !== null ? book.calKey : 'local';
-      e.href = book !== null ? book.href : '';
+      // 一律写入所选 CalDAV 日历本（新建/编辑/从「本机」迁过来都一样）
+      e.calKey = book.calKey;
+      e.href = book.href;
       // 重复规则与提醒
       if (this.repeatMode === 'custom') {
         // 无法识别的既有规则原样保留
@@ -509,30 +527,59 @@ struct EventEditPage {
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
-          // 日历本选择
+          // 日历本选择：两列等宽对齐（每项固定 48% 宽 + 两端对齐），只列 CalDAV 可写日历本
           Column({ space: 8 }) {
-            Text('日历本')
-              .fontSize(14)
-              .fontColor($r('app.color.text_secondary'))
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              ForEach(this.books, (b: BookChoice) => {
-                Row({ space: 5 }) {
-                  Circle().width(8).height(8).fill(b.color)
-                  Text(b.name)
-                    .fontSize(12)
-                    .fontColor(this.chosenKey === b.calKey
-                      ? $r('app.color.button_text') : $r('app.color.text_primary'))
-                }
-                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                .borderRadius(14)
-                .margin({ right: 8, bottom: 8 })
-                .backgroundColor(this.chosenKey === b.calKey ? b.color : $r('app.color.chip_off_bg'))
-                .onClick(() => {
-                  this.chosenKey = b.calKey;
-                })
-              }, (b: BookChoice) => b.calKey)
+            Row({ space: 6 }) {
+              Text('日历本')
+                .fontSize(14)
+                .fontColor($r('app.color.text_secondary'))
+              Text('同步到 CalDAV')
+                .fontSize(11)
+                .fontColor($r('app.color.text_hint'))
             }
             .width('100%')
+
+            if (this.books.length === 0) {
+              // 没有可写入的 CalDAV 日历本：说明原因 + 给替代方案（本机日程请用系统「日历」）
+              Text('没有可写入的 CalDAV 日历本。请先到「更多 → 账号管理」添加账号；'
+                + '这条日程需要同步到服务器。若只想记在本机，请使用系统「日历」应用。')
+                .fontSize(12)
+                .fontColor($r('app.color.error'))
+                .width('100%')
+            } else {
+              if (this.chosenBook() === null) {
+                // 未选中任何日历本（如历史遗留的"本机"日程）→ 就地提示，别让用户找不到原因
+                Text(this.chosenKey === LOCAL_CAL_KEY
+                  ? '这条日程原先只存在「本机」（不同步）。请选一个日历本，保存后即会同步到服务器。'
+                  : '请选择一个日历本，日程会同步到服务器。')
+                  .fontSize(12)
+                  .fontColor($r('app.color.brand_text'))
+                  .width('100%')
+              }
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                ForEach(this.books, (b: BookChoice) => {
+                  Row({ space: 6 }) {
+                    Circle().width(8).height(8).fill(b.color)
+                    Text(b.name)
+                      .fontSize(12)
+                      .layoutWeight(1)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .fontColor(this.chosenKey === b.calKey
+                        ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                  }
+                  .width('48%')
+                  .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                  .borderRadius(14)
+                  .margin({ bottom: 8 })
+                  .backgroundColor(this.chosenKey === b.calKey ? b.color : $r('app.color.chip_off_bg'))
+                  .onClick(() => {
+                    this.chosenKey = b.calKey;
+                  })
+                }, (b: BookChoice) => b.calKey)
+              }
+              .width('100%')
+            }
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
@@ -756,9 +803,15 @@ struct EventEditPage {
   }
 }
 
-/** 桥接：从账号存储拿可写来源（DAV 日历本 + 本机），附上 href */
+/**
+ * 桥接：从账号存储拿**可写入且能同步**的日历本（只取 CalDAV 日历本），并附上 href。
+ *
+ * ⚠️ 刻意**不返回"本机"（calKey='local'）**：本应用新建/编辑的日程一律写入某个 CalDAV
+ *    日历本并同步到服务器；纯本机日程请用户改用系统「日历」应用完成
+ *    （本应用也没有申请写系统日历本地的权限，做不到）。
+ */
 class CalendarDataBridge {
-  static async loadWritableSources(context: common.Context): Promise<CalSourceWithHref[]> {
+  static async loadWritableDavSources(context: common.Context): Promise<CalSourceWithHref[]> {
     const result: CalSourceWithHref[] = [];
     const accounts: DavAccount[] = await AccountStore.loadAll(context);
     const manualKeys: string[] = await AppSettings.getManualReadonlyKeys(context);
@@ -784,11 +837,6 @@ class CalendarDataBridge {
         result.push(s);
       }
     }
-    const local = new CalSourceWithHref();
-    local.calKey = 'local';
-    local.name = '本机（不同步）';
-    local.color = '#5A6068';
-    result.push(local);
     return result;
   }
 }
