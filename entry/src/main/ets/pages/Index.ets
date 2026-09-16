@@ -1519,8 +1519,12 @@ struct Index {
         Column({ space: 2 }) {
           Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
             .fontSize(11)
+            // ⚠️ 这里原来用 button_text（纯白），但该标签**没有背景**、坐在页面底色上，
+            //    浅色模式下是"白字压浅灰底"→ 对比度仅 1.11:1（应用市场 UX 检测被判不合格）。
+            //    改用 brand_text（品牌色文字版）：浅 #0057C2 → 6.01:1，深 #4DA3FF → 8.0:1，
+            //    既保留"选中"的强调含义，又满足对比度要求。
             .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.text_hint'))
+              ? $r('app.color.brand_text') : $r('app.color.text_hint'))
           Text(String(cell.day))
             .fontSize(14)
             .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
@@ -1971,8 +1975,9 @@ struct Index {
           Row({ space: 10 }) {
             Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
               .fontSize(12)
+              // 同上：选中态改用高对比的 brand_text（原 text_secondary 在浅色下仅 2.85:1）
               .fontColor(cell.dateMs === this.selectedDate
-                ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+                ? $r('app.color.brand_text') : $r('app.color.text_hint'))
               .width(18)
               .textAlign(TextAlign.Center)
             Text(String(cell.day))

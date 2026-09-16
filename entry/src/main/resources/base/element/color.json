@@ -8,6 +8,7 @@
     { "name": "text_secondary", "value": "#66000000" },
     { "name": "text_hint", "value": "#4D000000" },
     { "name": "brand", "value": "#007DFF" },
+    { "name": "brand_text", "value": "#0057C2" },
     { "name": "brand_disabled", "value": "#99007DFF" },
     { "name": "button_text", "value": "#FFFFFF" },
     { "name": "success", "value": "#00B34A" },
