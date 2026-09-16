@@ -69,9 +69,13 @@ export default class EntryAbility extends UIAbility {
           odMs = parsed;
         }
       }
-      if (odMs > 0) {
+      // 合法性校验：13 位毫秒时间戳若按 int32 传递会溢出成 2147483647 等小值 →
+      // 只接受 [2000-01-01, 2100-01-01] 区间，避免把日历定位到 1970
+      if (odMs >= 946684800000 && odMs <= 4102444800000) {
         AppStorage.setOrCreate<number>('widgetOpenDate', odMs);
         LogUtil.write(`卡片进入日历：定位到显示日 ${odMs}`);
+      } else if (odMs > 0) {
+        LogUtil.write(`卡片 openDate 非法（疑似 int32 溢出）：${odMs}，忽略`);
       }
     }
   }

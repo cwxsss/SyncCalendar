@@ -419,8 +419,9 @@ struct Widget6x4Card {
     postCardAction(this, {
       action: 'router',
       abilityName: 'EntryAbility',
-      // 携带卡片当前显示日（用户可能已翻到其他日期），进入日历时定位到这一天
-      params: { openDate: this.selectedDate }
+      // 携带卡片当前显示日（用户可能已翻到其他日期），进入日历时定位到这一天。
+      // 必须转成字符串：param 的数值按 int32 传递，13 位毫秒时间戳会溢出成 2147483647（曾导致定位到 1970）
+      params: { openDate: `${this.selectedDate}` }
     });
   }
 

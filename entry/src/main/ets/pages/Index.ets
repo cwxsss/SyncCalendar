@@ -103,10 +103,13 @@ struct Index {
     this.selectedDate = this.startOfDay(now.getTime());
     // 卡片点击：若携带显示日（用户可能已翻到其他日期），进入日历时定位到那一天
     const openFromCard: number = AppStorage.get<number>('widgetOpenDate') ?? 0;
-    if (openFromCard > 0) {
-      this.selectedDate = this.startOfDay(openFromCard);
-      AppStorage.setOrCreate<number>('widgetOpenDate', 0);
-      LogUtil.write(`从卡片进入：定位到显示日 ${this.selectedDate}`);
+    if (openFromCard !== 0) {
+      AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
+      // 合法性校验（防 int32 溢出等脏值把日历定位到 1970）
+      if (openFromCard >= 946684800000 && openFromCard <= 4102444800000) {
+        this.selectedDate = this.startOfDay(openFromCard);
+        LogUtil.write(`从卡片进入：定位到显示日 ${this.selectedDate}`);
+      }
     }
     this.rebuildPages();
     this.initLandscapeListener();
@@ -181,10 +184,13 @@ struct Index {
   /** 卡片点击携带的"显示日"：App 已在后台运行时由 onNewWant 改写，定位到那一天后清除 */
   private onWidgetOpenDateChange(): void {
     const d: number = this.widgetOpenDate;
-    if (d > 0) {
-      this.selectedDate = this.startOfDay(d);
-      AppStorage.setOrCreate<number>('widgetOpenDate', 0);
-      LogUtil.write(`卡片切入（运行中）：定位到显示日 ${this.selectedDate}`);
+    if (d !== 0) {
+      AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
+      // 合法性校验（防 int32 溢出等脏值）
+      if (d >= 946684800000 && d <= 4102444800000) {
+        this.selectedDate = this.startOfDay(d);
+        LogUtil.write(`卡片切入（运行中）：定位到显示日 ${this.selectedDate}`);
+      }
     }
   }
 
