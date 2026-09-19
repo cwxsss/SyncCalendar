@@ -1,6 +1,10 @@
 // entry/src/main/ets/pages/EditAccountPage.ets
 // 编辑账号：查看/重选该账号下的日历本、修改账户名
 // 保存后清理失效日历本的本地数据，并触发一次重新同步
+//
+// ⚠️ 取消勾选某个日历本会改变**后面所有本的序号**（calKey = accId_序号）。因此保存时还要检查：
+//    被取消的那个本是不是「系统日历 → CalDAV」的备份目标 —— 是的话当场把该功能关闭，
+//    否则用户会以为备份还在工作，实际却可能把系统日程导进别的本（用户实测反馈）。
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { buffer } from '@kit.ArkTS';
@@ -8,6 +12,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore } from '../common/AccountStore';
 import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
 import { EventDb } from '../common/EventDb';
+import { BackupTargetCheck, SystemCalendarMirror } from '../common/SystemCalendarMirror';
 import { LogUtil } from '../common/LogUtil';
 
 /**
@@ -243,8 +248,15 @@ struct EditAccountPage {
         selectedItems.map((c: EditCalendarItem, i: number): string => `${target.id}_${i}`);
       await EventDb.pruneAccountEvents(context, target.id, validKeys);
       AppStorage.setOrCreate<string>('pendingSyncAccountId', target.id);
-      this.getUIContext().getPromptAction()
-        .showToast({ message: `已保存，同步 ${selectedItems.length} 个日历本` });
+      // ⭐ 若刚被取消勾选的本正是「系统日历 → CalDAV」的备份目标，**当场**判它失效并关闭备份功能。
+      //    不这么做的话，要等下一次同步才会发现目标没了；这期间开关还显示"备份到 CalDAV"，
+      //    用户会以为备份仍在正常工作，而实际已经导不进去（或更糟：导进了别的本）。
+      const backupCheck: BackupTargetCheck = await SystemCalendarMirror.checkBackupTarget(context);
+      this.getUIContext().getPromptAction().showToast({
+        message: backupCheck.closed
+          ? '原系统日历备份目标已被取消同步，备份功能已自动关闭'
+          : `已保存，同步 ${selectedItems.length} 个日历本`
+      });
       router.back();
     } catch (err) {
       const e = err as BusinessError;

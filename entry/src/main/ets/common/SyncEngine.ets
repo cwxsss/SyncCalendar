@@ -46,6 +46,18 @@ export class SyncEngine {
     // 日志不记录账号名（用户自定义，可能含个人信息），以 id + 服务器地址定位
     LogUtil.write(`========== 同步账号 id=${acc.id} 开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
     try {
+      // ⭐ 库结构升级（recurrence_id 列）：老库里覆盖实例的该列全是 0，而被丢弃的
+      //    RECURRENCE-ID 无法从本地任何字段反推 → 必须靠一次全量重拉（GET 每个 .ics）回填。
+      //    不回填的后果：把某次发生改期的覆盖实例无法排除主事件在原时间的那次发生，
+      //    App 与系统日历里同一日程会显示两条（幽灵日程）。
+      //    ⚠️ 判据必须是**数据库里的真实状态**：内存标志会被卡片进程/进程重启吃掉
+      //    （2026-09-19 实测两次同步都没触发）。回填完成后计数自然归 0，不会反复重拉。
+      await EventDb.getDb(context);
+      const ridMissing: number = await EventDb.countOverridesMissingRecurrenceId(context);
+      if (ridMissing > 0) {
+        LogUtil.write(`recurrence_id 待回填 ${ridMissing} 条覆盖实例 → 重置"一次性全量重拉"`);
+        await AppSettings.resetFullRefetch(context);
+      }
       // 全量重拉（升级后首次）要逐个 GET 所有资源，放宽超时到 10 分钟；常规 5 分钟
       const fullRefetch: boolean = await AppSettings.isFullRefetchPending(context);
       const timeoutMs: number = fullRefetch ? 600000 : 300000;
@@ -280,6 +292,7 @@ export class SyncEngine {
     r.completed = e.completed;
     r.rrule = e.rrule;
     r.exdate = e.exdate;
+    r.recurrenceId = e.recurrenceId;
     r.reminder = e.reminder;
     r.reminders = e.reminders.slice();
     return r;
@@ -344,6 +357,16 @@ export class SyncEngine {
       } else {
         await EventDb.clearDirty(context, e.id, '');
       }
+    }
+    // ⭐ 顺带清理"同一资源被重复插入"的冗余行（旧版 applyRemote 判重缺陷遗留的脏数据）。
+    //    纯本地去重、不推服务器；放在这里是因为它是每次同步都会经过的收尾步骤。
+    try {
+      const dup: number = await EventDb.dedupeDuplicateRows(context);
+      if (dup > 0) {
+        LogUtil.write(`清理本地重复行：${dup} 条（同一资源被插了多次）`);
+      }
+    } catch (err) {
+      // 忽略：去重失败不影响同步
     }
   }
 

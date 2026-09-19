@@ -20,6 +20,8 @@ import { RruleUtil } from '../common/RruleUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
+import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
+import { MirrorInbound } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
 
@@ -591,6 +593,12 @@ struct Index {
     } catch (err) {
       // 导入失败不影响正常同步
     }
+    // 入站对账：把用户在系统日历里的改动读回来置 dirty，**必须在同步之前**，才能借本次同步一起推送
+    try {
+      await MirrorInbound.reconcile(context);
+    } catch (err) {
+      // 对账失败不影响正常同步
+    }
     for (const acc of this.accounts) {
       if (acc.type !== TYPE_CALDAV) {
         continue;
@@ -615,6 +623,15 @@ struct Index {
     } catch (err) {
       const e = err as BusinessError;
       failMsg = e.message;
+    }
+    // 出站镜像：把服务器最新状态写进系统日历（自动化，无需手点）
+    try {
+      if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+        const mr = await SystemCalendarMirror.syncNow(context);
+        LogUtil.write(`同步后自动镜像：本=${mr.books} 新增=${mr.added} 更新=${mr.updated} 删除=${mr.deleted}`);
+      }
+    } catch (err) {
+      // 镜像失败不影响同步结果
     }
     this.syncing = false;
     await ScreenKeeper.release(context as common.UIAbilityContext);

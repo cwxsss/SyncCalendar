@@ -11,13 +11,22 @@ export class AppSettings {
   private static readonly KEY_SYNC_INTERVAL: string = 'sync_interval_minutes';
   private static readonly KEY_BACKGROUND_SYNC: string = 'background_sync';
   private static readonly KEY_SYS_MODE: string = 'sys_cal_mode';       // 'display' | 'backup'
-  private static readonly KEY_BACKUP_KEY: string = 'sys_backup_cal_key'; // 备份目标 DAV 日历本
+  // ⚠️ 备份目标**必须**用稳定标识 bookId 存（由服务器 href 派生，见 SystemCalendarMirror.listBooks）。
+  //    老键存的是 calKey（`accId_序号`），序号会随"取消勾选某个日历本/服务器新增日历本"整体漂移
+  //    → 目标本会**悄悄变成另一个本**，把系统日历导进用户没选过的本（用户实测发现）。
+  //    KEY_BACKUP_KEY 仅保留用于老值一次性迁移，读到后立即换存 KEY_BACKUP_BOOK_ID 并清空。
+  private static readonly KEY_BACKUP_KEY: string = 'sys_backup_cal_key';   // 【已废弃】备份目标 calKey（仅迁移用）
+  private static readonly KEY_BACKUP_BOOK_ID: string = 'sys_backup_book_id'; // ⭐ 备份目标稳定标识 bookId
   private static readonly KEY_MANUAL_READONLY: string = 'manual_readonly_keys'; // 手动标记只读的 calKey
   private static readonly KEY_MUTED_REMINDER: string = 'muted_reminder_keys';  // 提醒静音的 calKey
   private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
   private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
+  private static readonly KEY_MIRROR_ENABLED: string = 'mirror_enabled';   // 是否把选中 CalDAV 日历本镜像到系统日历（默认关）
+  private static readonly KEY_MIRROR_KEYS: string = 'mirror_cal_keys';     // 要镜像的 DAV 日历本 calKey 列表
+  private static readonly KEY_MIRROR_BOOK_IDS: string = 'mirror_book_ids'; // ⭐ 要镜像的日历本**稳定标识** bookId（由服务器 href 派生，不随序号变）
+  private static readonly KEY_MIRROR_INBOUND: string = 'mirror_inbound';   // 是否把系统日历的改动回写 CalDAV（默认关）
   private static readonly KEY_POLICY_AGREED: string = 'policy_agreed';    // 是否已同意隐私政策与用户协议
   // 首启功能引导"用户已看过并关闭"的标记。键名带版本号：改动引导内容后把 vN 加 1，用户即可再看一次。
   // 注意：只在用户主动关闭（"开始使用" / ✕ / 点遮罩）时才置 true，**不再"显示前就置 true"**——
@@ -146,6 +155,141 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存日程显示方式失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 是否把选中的 CalDAV 日历本镜像到系统日历（默认关）。
+   * ⚠️ 该开关必须与 WRITE_CALENDAR 授权状态一致：未授权即为关（权限按需申请约束）。
+   */
+  static async getMirrorEnabled(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_MIRROR_ENABLED, false) as boolean;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  static async setMirrorEnabled(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MIRROR_ENABLED, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存镜像开关失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * ⚠️ **已废弃**：早期用 calKey 存"要镜像哪些本"，但 calKey 是 `<账号ID>_<序号>`，
+   *     日历本重排后序号会变 → 选中的本串成另一个本、镜像账户名也变 → 系统日历出现重复账户与串本。
+   *     新代码一律用 `getMirrorBookIds()`。这里只为读取历史值做迁移。
+   */
+  static async getMirrorKeys(context: common.Context): Promise<string[]> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const raw: string = await store.get(AppSettings.KEY_MIRROR_KEYS, '') as string;
+      if (raw === '') {
+        return [];
+      }
+      const arr: string[] = JSON.parse(raw) as string[];
+      if (!Array.isArray(arr)) {
+        return [];
+      }
+      const out: string[] = [];
+      for (let i: number = 0; i < arr.length; i++) {
+        const v: string = arr[i];
+        if (typeof v === 'string' && v !== '') {
+          out.push(v);
+        }
+      }
+      return out;
+    } catch (err) {
+      return [];
+    }
+  }
+
+  static async setMirrorKeys(context: common.Context, keys: string[]): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MIRROR_KEYS, JSON.stringify(keys));
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存镜像日历本失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * ⭐ 要镜像到系统日历的日历本**稳定标识** bookId 列表，空 = 未选择。
+   * bookId = `<账号ID>-<href哈希>`，由服务器分配的 href 派生 —— 日历本增删改序都不会变。
+   */
+  static async getMirrorBookIds(context: common.Context): Promise<string[]> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const raw: string = await store.get(AppSettings.KEY_MIRROR_BOOK_IDS, '') as string;
+      if (raw === '') {
+        return [];
+      }
+      const arr: string[] = JSON.parse(raw) as string[];
+      if (!Array.isArray(arr)) {
+        return [];
+      }
+      const out: string[] = [];
+      for (let i: number = 0; i < arr.length; i++) {
+        const v: string = arr[i];
+        if (typeof v === 'string' && v !== '') {
+          out.push(v);
+        }
+      }
+      return out;
+    } catch (err) {
+      return [];
+    }
+  }
+
+  static async setMirrorBookIds(context: common.Context, ids: string[]): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MIRROR_BOOK_IDS, JSON.stringify(ids));
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存镜像日历本(bookId)失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 是否把"用户在系统日历里的改动"回写到 CalDAV（**默认关**）。
+   * ⚠️ 默认关是有意的：这个功能会写用户的服务器数据，首次上线必须先单向观察一轮再开。
+   */
+  static async getMirrorInbound(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_MIRROR_INBOUND, false) as boolean;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  static async setMirrorInbound(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MIRROR_INBOUND, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存回写开关失败: ${e.message}`);
     }
   }
 
@@ -286,9 +430,14 @@ export class AppSettings {
       if (muted2.length !== muted.length) {
         await AppSettings.setMutedReminderKeys(context, muted2);
       }
-      const backupKey: string = await AppSettings.getBackupCalKey(context);
-      if (backupKey.startsWith(`${accId}_`)) {
-        await AppSettings.setBackupCalKey(context, '');
+      // 备份目标指向该账号名下某个本 → 目标必失效：清空目标**并关闭备份功能**
+      // （只清空目标会让"备份到 CalDAV"开关停在开着却什么都不做的状态，状态与实际不符）
+      const bookId: string = await AppSettings.getBackupBookId(context);
+      const legacyKey: string = await AppSettings.getBackupCalKey(context);
+      if (bookId.startsWith(`${accId}-`) || legacyKey.startsWith(`${accId}_`)) {
+        await AppSettings.clearBackupTarget(context);
+        await AppSettings.setSysCalMode(context, 'display');
+        console.log(`删除账号 ${accId}：其名下的系统日历备份目标已失效，备份功能自动关闭`);
       }
     } catch (err) {
       const e = err as BusinessError;
@@ -319,7 +468,12 @@ export class AppSettings {
     }
   }
 
-  /** 备份目标日历本 calKey（accId_序号），空 = 未选择 */
+  /**
+   * 【已废弃，仅供老值迁移】备份目标 calKey（`accId_序号`）。
+   * ⚠️ 不要再用它做判断！序号会漂移（见 KEY_BACKUP_KEY 处注释）。
+   *    新代码一律用 `SystemCalendarMirror.backupTargetRef()` / `checkBackupTarget()`，
+   *    它内部会把这个老值翻译成 bookId 并清空本键。
+   */
   static async getBackupCalKey(context: common.Context): Promise<string> {
     try {
       const store: preferences.Preferences =
@@ -330,6 +484,7 @@ export class AppSettings {
     }
   }
 
+  /** 【已废弃】写老键。新代码请用 setBackupBookId()。 */
   static async setBackupCalKey(context: common.Context, calKey: string): Promise<void> {
     try {
       const store: preferences.Preferences =
@@ -338,8 +493,38 @@ export class AppSettings {
       await store.flush();
     } catch (err) {
       const e = err as BusinessError;
+      console.error(`保存备份目标(老键)失败: ${e.message}`);
+    }
+  }
+
+  /** ⭐ 备份目标日历本的稳定标识 bookId（`<accId>-<href哈希>`），空 = 未选择 */
+  static async getBackupBookId(context: common.Context): Promise<string> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_BACKUP_BOOK_ID, '') as string;
+    } catch (err) {
+      return '';
+    }
+  }
+
+  /** ⭐ 保存备份目标（bookId）。传空字符串 = 取消选择。 */
+  static async setBackupBookId(context: common.Context, bookId: string): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_BACKUP_BOOK_ID, bookId);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
       console.error(`保存备份目标失败: ${e.message}`);
     }
+  }
+
+  /** 一次清空备份目标（新键 + 老键一起清，避免迁移残留又复活） */
+  static async clearBackupTarget(context: common.Context): Promise<void> {
+    await AppSettings.setBackupBookId(context, '');
+    await AppSettings.setBackupCalKey(context, '');
   }
 
   /** 是否开启后台持续同步（长时任务，默认关） */

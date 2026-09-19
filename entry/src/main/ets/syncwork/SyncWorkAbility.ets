@@ -8,6 +8,8 @@ import { SyncEngine } from '../common/SyncEngine';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
+import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
+import { MirrorInbound } from '../common/MirrorInbound';
 import { AppSettings } from '../common/AppSettings';
 import { LogUtil } from '../common/LogUtil';
 
@@ -31,6 +33,12 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
         await SystemCalendarImport.importIfNeeded(context);
       } catch (err) {
         // 导入失败不影响正常同步
+      }
+      // 入站对账：把用户在系统日历里的改动读回来置 dirty（必须在同步之前）
+      try {
+        await MirrorInbound.reconcile(context);
+      } catch (err) {
+        // 对账失败不影响正常同步
       }
       let ok: number = 0;
       let attempted: number = 0;
@@ -58,6 +66,15 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
       // 缺了这一步，后台同步刷到的颜色只留在内存里、进程退出即丢失，
       // 界面下次冷启动仍用旧颜色（表现为"同步之后颜色还是不对"）。
       await AccountStore.saveAll(context, accounts);
+      // 出站镜像：把服务器最新状态写进系统日历（自动化，无需手点）
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          const mr = await SystemCalendarMirror.syncNow(context);
+          LogUtil.write(`延迟任务自动镜像：本=${mr.books} 新增=${mr.added} 更新=${mr.updated} 删除=${mr.deleted}`);
+        }
+      } catch (err) {
+        // 镜像失败不影响同步
+      }
       // 同步后刷新卡片 + 重建提醒，保证后台同步的成果直接可见
       await CardDataService.pushToAllForms(context);
       await ReminderService.refreshReminders(context);

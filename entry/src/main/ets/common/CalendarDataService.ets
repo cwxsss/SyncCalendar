@@ -202,12 +202,14 @@ export class CalendarDataService {
       }
       // 单次覆盖实例（RECURRENCE-ID 独立行）：展开时跳过对应发生，避免重复。
       // 注意：①排除键必须带 calKey（同一系列可能出现在多个日历本）；
-      // ②只有"可见日历本"的覆盖行才参与排除——历史孤儿行（旧账号迁移残留）
+      // ②键必须用 **recurrenceId（原始发生时刻）**——覆盖行的 startTime 是"被改到的新时间"，
+      //   用它做键时主事件在原时间的那次发生不会被排除 → 同一日程显示两条（幽灵日程）；
+      // ③只有"可见日历本"的覆盖行才参与排除——历史孤儿行（旧账号迁移残留）
       //    自己不显示，却会把主事件的对应发生排除掉，导致"第一次不显示"
       const overrideKeys: string[] = [];
       for (const e of rows) {
         if (e.rrule === '' && e.recurring && visibleKeys.includes(e.calKey)) {
-          overrideKeys.push(`${e.calKey}_${e.uid}_${e.startTime}`);
+          overrideKeys.push(EventDb.overrideKey(e.calKey, e.uid, e.recurrenceId, e.startTime));
         }
       }
       let occTotal: number = 0;
@@ -232,7 +234,7 @@ export class CalendarDataService {
           const occs: number[] = RruleUtil.expand(e.rrule, e.startTime, start, end, exNums, 1500);
           if (occs.length > 0) {
             times = occs.filter((occ: number): boolean =>
-              !overrideKeys.includes(`${e.calKey}_${e.uid}_${occ}`));
+              !overrideKeys.includes(EventDb.overrideKey(e.calKey, e.uid, 0, occ)));
           }
         }
         for (const occ of times) {

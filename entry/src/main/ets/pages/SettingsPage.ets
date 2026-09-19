@@ -9,6 +9,8 @@ import { CalendarDataService } from '../common/CalendarDataService';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { BackupTargetCheck, BookRef, MirrorResult, PurgeResult, SystemCalendarMirror } from '../common/SystemCalendarMirror';
 import { DocViewer } from '../common/DocViewer';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
@@ -16,6 +18,7 @@ const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
 /** 日历本选项（备份目标 / 只读标记 / 静音标记共用） */
 class BackupTarget {
   calKey: string = '';
+  bookId: string = '';   // ⭐ 稳定标识（由服务器 href 派生）：镜像选中项用它存，不随序号变
   label: string = '';
   serverWritable: boolean = true; // 服务器探测结果
 }
@@ -27,8 +30,9 @@ struct SettingsPage {
   @State intervalMinutes: number = 1;
   @State backgroundSync: boolean = false;
   @State sysMode: string = 'display'; // display | backup
-  @State backupKey: string = '';
+  @State backupKey: string = '';       // ⭐ 备份目标本的**稳定标识** bookId（不再用会漂移的 calKey）
   @State backupTargets: BackupTarget[] = [];
+  @State backupNotice: string = '';    // 备份目标失效/未选择时的提示文案
   @State allBooks: BackupTarget[] = []; // 全部 DAV 日历本（只读/静音标记管理用）
   @State manualKeys: string[] = [];     // 手动标记只读的 calKey
   @State mutedKeys: string[] = [];      // 提醒静音的 calKey
@@ -40,6 +44,13 @@ struct SettingsPage {
   @State docUrl: string = '';
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   @State displayStyle: string = 'timeline'; // 日程显示方式：timeline（时间轴）| list（列表）
+  @State mirrorEnabled: boolean = false;    // 是否把选中 CalDAV 日历本镜像到系统日历（默认关）
+  @State mirrorKeys: string[] = [];         // 要镜像的 DAV 日历本 **bookId**（稳定标识，不用会变的 calKey）
+  @State mirrorRunning: boolean = false;    // 正在执行镜像
+  @State purgeRunning: boolean = false;     // 正在清理残留镜像账户
+  @State mirrorCandidates: BackupTarget[] = []; // 可镜像的本（已排除"系统日历备份目标本"，防回灌）
+  @State mirrorInbound: boolean = false;         // 是否把系统日历的改动回写 CalDAV（默认关）
+  @State accountDump: string = '';               // 系统日历账户清单（诊断用，清理后填充）
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -84,6 +95,29 @@ struct SettingsPage {
     this.refreshNotifyState();
     this.loadBackupSettings();
     this.loadAllBooks();
+    AppSettings.getMirrorEnabled(ctx).then((v: boolean): void => {
+      this.mirrorEnabled = v;
+      // 状态自洽：记录为"开"但权限已被系统回收 → 自动回落为"关"
+      if (v) {
+        SystemCalendarMirror.hasPermission().then((ok: boolean): void => {
+          if (!ok && this.context !== undefined) {
+            this.mirrorEnabled = false;
+            AppSettings.setMirrorEnabled(this.context, false);
+          }
+        });
+      }
+    });
+    // ⭐ 走 selectedBookRefs：它兼做历史迁移（老版本存的是 calKey）与"排除备份目标本"过滤
+    SystemCalendarMirror.selectedBookRefs(ctx).then((refs: BookRef[]): void => {
+      const ids: string[] = [];
+      for (const r of refs) {
+        ids.push(r.bookId);
+      }
+      this.mirrorKeys = ids;
+    });
+    AppSettings.getMirrorInbound(ctx).then((v: boolean): void => {
+      this.mirrorInbound = v;
+    });
   }
 
   /** 重新检测通知权限状态 */
@@ -138,7 +172,51 @@ struct SettingsPage {
         books.push(b);
       }
     }
+    // ⭐ 补上稳定标识 bookId（由服务器 href 派生）。镜像的"选中状态"必须按它存，
+    //    否则日历本重排后序号一变，选中的本就串成另一个本。
+    if (this.context !== undefined) {
+      const refs: BookRef[] = await SystemCalendarMirror.listBooks(this.context);
+      for (const b of books) {
+        for (const ref of refs) {
+          if (ref.calKey === b.calKey) {
+            b.bookId = ref.bookId;
+            break;
+          }
+        }
+      }
+    }
     this.allBooks = books;
+    await this.refreshMirrorCandidates();
+  }
+
+  /**
+   * 可镜像的日历本 = 全部 DAV 本 **去掉「系统日历备份目标本」**。
+   * 备份目标本里的日程本来就来自系统日历（uid 前缀 syscal-），再镜像回系统日历就是自我复制。
+   */
+  private async refreshMirrorCandidates(): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    const ctx: common.Context = this.context;
+    const blocked: string[] = await SystemCalendarMirror.blockedBookIds(ctx);
+    this.mirrorCandidates =
+      this.allBooks.filter((b: BackupTarget): boolean => b.bookId === '' || !blocked.includes(b.bookId));
+    // 已选中的本若被改成备份目标 → 自动剔除并删掉它在系统日历里的镜像账户
+    const kept: string[] = this.mirrorKeys.filter((k: string): boolean => !blocked.includes(k));
+    if (kept.length !== this.mirrorKeys.length) {
+      for (const k of this.mirrorKeys) {
+        if (blocked.includes(k)) {
+          await SystemCalendarMirror.removeById(ctx, k);
+        }
+      }
+      this.mirrorKeys = kept;
+      await AppSettings.setMirrorBookIds(ctx, kept);
+    }
+  }
+
+  /** 因"是备份目标本"而被隐藏、不能镜像的本的数量 */
+  private mirrorHiddenCount(): number {
+    return this.allBooks.length - this.mirrorCandidates.length;
   }
 
   /** 该日历本是否只读：服务器无写权限（探测结果）或用户手动标记只读 —— 与首页色块/只读标记同一口径 */
@@ -193,12 +271,21 @@ struct SettingsPage {
     });
   }
 
-  /** 加载备份目标候选（可写 DAV 日历本）+ 当前选择 */
+  /**
+   * 加载备份目标候选（可写 DAV 日历本）+ 当前选择。
+   *
+   * ⭐ 当前选择用**稳定标识 bookId** 记录（老版本存 calKey，序号会漂移 → 曾把系统日历
+   *    导进用户没选过的本）。这里统一走 `checkBackupTarget()`：
+   *    - 老值自动迁移为 bookId；
+   *    - 目标本已不存在（被取消勾选/账号删除）→ 它会把备份模式**自动关回 display**，
+   *      这里只负责把结果反映到 UI 并给出提示。
+   */
   private async loadBackupSettings(): Promise<void> {
     if (this.context === undefined) {
       return;
     }
-    const accounts: DavAccount[] = await AccountStore.loadAll(this.context);
+    const ctx: common.Context = this.context;
+    const accounts: DavAccount[] = await AccountStore.loadAll(ctx);
     const targets: BackupTarget[] = [];
     for (const acc of accounts) {
       if (acc.type !== 'caldav') {
@@ -219,49 +306,94 @@ struct SettingsPage {
       }
     }
     // 手动标记只读的本不可作为备份目标
-    const manual: string[] = await AppSettings.getManualReadonlyKeys(this.context);
+    const manual: string[] = await AppSettings.getManualReadonlyKeys(ctx);
     this.backupTargets = targets.filter((t: BackupTarget): boolean => !manual.includes(t.calKey));
-    const saved: string = await AppSettings.getBackupCalKey(this.context);
-    this.backupKey = targets.some((t: BackupTarget): boolean => t.calKey === saved) ? saved : '';
+    // 补 bookId（稳定标识）—— 选择状态必须按它存
+    const refs: BookRef[] = await SystemCalendarMirror.listBooks(ctx);
+    for (const t of this.backupTargets) {
+      for (const r of refs) {
+        if (r.calKey === t.calKey) {
+          t.bookId = r.bookId;
+          break;
+        }
+      }
+    }
+    // 解析当前目标（可能触发失效清理，并在功能开着时自动关闭）
+    const check: BackupTargetCheck = await SystemCalendarMirror.checkBackupTarget(ctx);
+    this.backupKey = check.ref === undefined ? '' : check.ref.bookId;
+    if (check.reason !== '') {
+      this.backupNotice = check.closed
+        ? `${check.reason}，已自动关闭系统日历备份。如需继续备份，请在下方重新选择目标日历本。`
+        : `${check.reason}。请重新选择备份目标日历本后再开启备份。`;
+    } else {
+      this.backupNotice = '';
+    }
+    // 最后再以"落盘值"为准刷新一次选择器：aboutToAppear 里另有一条 getSysCalMode 的异步读取，
+    // 若 checkBackupTarget 刚刚把模式关成了 display，就以这里读到的为准（避免旧值把 UI 覆盖回去）
+    this.sysMode = await AppSettings.getSysCalMode(ctx);
   }
 
+  /**
+   * 切换「系统日历日程的处理方式」。
+   *
+   * ⚠️ 顺序很重要：**先校验备份目标、再申请权限、最后才落盘**。
+   *   - 没有目标本就不允许开启备份（绝不替用户"随便挑一个本"——
+   *     那样会把系统日程导进他没选过的日历本，用户实测反馈的问题）；
+   *   - 校验不过就不申请「读取全部日程」权限，避免为一次注定失败的开启弹权限框。
+   */
   private async saveSysMode(mode: string): Promise<void> {
     if (this.context === undefined) {
       return;
     }
-    // "备份到 CalDAV" 需要读取手机系统（本地）日历 → 只在用户主动选择该模式时申请权限
-    if (mode === 'backup') {
-      const granted: boolean = await CalendarDataService.requestSystemCalendarPermission(
-        this.context as common.UIAbilityContext);
-      if (!granted) {
-        this.sysMode = 'display'; // 回弹选择，保持与实际授权状态一致
-        this.getUIContext().getPromptAction().showToast({
-          message: '未获得"读取全部日程"权限，无法开启系统日历备份'
-        });
-        return;
-      }
+    if (mode !== 'backup') {
+      this.sysMode = 'display';
+      await AppSettings.setSysCalMode(this.context, 'display');
+      this.backupNotice = '';
+      await this.refreshMirrorCandidates(); // 备份模式变化 → 重算可镜像的本（防回灌）
+      this.getUIContext().getPromptAction().showToast({
+        message: '已切换为仅显示：不再把系统日程备份到 CalDAV'
+      });
+      return;
+    }
+    // ① 必须先有明确的备份目标本（见上方 loadBackupSettings / saveBackupTarget）
+    if (this.backupKey === '') {
+      this.sysMode = 'display'; // 回弹，且**不写 preferences**：宁可不开启，也不默认挑一个本
+      this.backupNotice = this.backupTargets.length > 0
+        ? '请先选择备份目标日历本：未选定目标前不会开启备份，也不会导入任何系统日程。'
+        : '没有可写的 CalDAV 日历本，请先添加账号或检查日历本权限。';
+      this.getUIContext().getPromptAction().showToast({
+        message: '请先选择备份目标日历本，再开启备份'
+      });
+      return;
+    }
+    // ② "备份到 CalDAV" 需要读取手机系统（本地）日历 → 只在用户主动选择该模式时申请权限
+    const granted: boolean = await CalendarDataService.requestSystemCalendarPermission(
+      this.context as common.UIAbilityContext);
+    if (!granted) {
+      this.sysMode = 'display'; // 回弹选择，保持与实际授权状态一致
+      this.getUIContext().getPromptAction().showToast({
+        message: '未获得"读取全部日程"权限，无法开启系统日历备份'
+      });
+      return;
     }
     this.sysMode = mode;
     await AppSettings.setSysCalMode(this.context, mode);
-    if (mode === 'backup' && this.backupKey === '') {
-      if (this.backupTargets.length > 0) {
-        this.backupKey = this.backupTargets[0].calKey;
-        await AppSettings.setBackupCalKey(this.context, this.backupKey);
-      }
-    }
+    this.backupNotice = '';
+    await this.refreshMirrorCandidates(); // 备份模式/目标变化 → 重算可镜像的本（防回灌）
     this.getUIContext().getPromptAction().showToast({
-      message: mode === 'backup'
-        ? '已开启备份：下次同步时把系统本地日程导入所选日历本'
-        : '已切换为仅显示：不再把系统日程备份到 CalDAV'
+      message: '已开启备份：下次同步时把系统本地日程导入所选日历本'
     });
   }
 
-  private async saveBackupTarget(calKey: string): Promise<void> {
+  /** 保存备份目标（入参为 **bookId**，稳定标识，不再是会漂移的 calKey） */
+  private async saveBackupTarget(bookId: string): Promise<void> {
     if (this.context === undefined) {
       return;
     }
-    this.backupKey = calKey;
-    await AppSettings.setBackupCalKey(this.context, calKey);
+    this.backupKey = bookId;
+    await AppSettings.setBackupBookId(this.context, bookId);
+    this.backupNotice = ''; // 用户显式选定了目标 → 清掉"失效/未选择"提示
+    await this.refreshMirrorCandidates(); // 备份目标变了 → 可镜像的本也要跟着变（防回灌）
     this.getUIContext().getPromptAction()
       .showToast({ message: '备份目标已更新，下次同步生效' });
   }
@@ -289,6 +421,135 @@ struct SettingsPage {
     await AppSettings.setShowSystemCalendar(this.context, value);
     this.getUIContext().getPromptAction()
       .showToast({ message: value ? '已开启系统日历混合显示，返回首页生效' : '已关闭系统日历混合显示，返回首页生效' });
+  }
+
+  /**
+   * 「镜像到系统日历」开关。
+   * ⚠️ 合规约束（《审核指南》7.17）：写入系统日历依赖 WRITE_CALENDAR 权限，
+   * **只在用户主动打开这个开关时申请**；未授权则开关回弹、不保存设置。
+   * 关闭时会把之前镜像出去的账户一并删掉，避免系统日历里留下"幽灵日程"。
+   */
+  private async saveMirrorEnabled(isOn: boolean): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    if (isOn) {
+      const granted: boolean = await SystemCalendarMirror.requestPermission(
+        this.context as common.UIAbilityContext);
+      if (!granted) {
+        this.mirrorEnabled = false; // 回弹开关，保持与实际授权状态一致
+        this.getUIContext().getPromptAction().showToast({
+          message: '未获得"写入系统日历"权限，无法开启镜像'
+        });
+        return;
+      }
+    }
+    this.mirrorEnabled = isOn;
+    await AppSettings.setMirrorEnabled(this.context, isOn);
+    if (isOn) {
+      this.getUIContext().getPromptAction().showToast({
+        message: '已开启镜像：勾选要同步的日历本后点「立即执行镜像」'
+      });
+      return;
+    }
+    const n: number = await SystemCalendarMirror.removeAll(this.context);
+    this.getUIContext().getPromptAction().showToast({
+      message: n > 0 ? `已关闭镜像，并清除系统日历中的 ${n} 个镜像账户` : '已关闭镜像'
+    });
+  }
+
+  /** 勾选/取消勾选要镜像的日历本；取消勾选会顺手删掉对应的系统日历账户。⚠️ 传的是 bookId */
+  private async toggleMirrorKey(bookId: string, on: boolean): Promise<void> {
+    if (this.context === undefined || bookId === '') {
+      return;
+    }
+    const idx: number = this.mirrorKeys.indexOf(bookId);
+    if (on && idx < 0) {
+      this.mirrorKeys = [...this.mirrorKeys, bookId];
+    } else if (!on && idx >= 0) {
+      this.mirrorKeys = this.mirrorKeys.filter((k: string): boolean => k !== bookId);
+      await SystemCalendarMirror.removeById(this.context, bookId);
+    } else {
+      return;
+    }
+    await AppSettings.setMirrorBookIds(this.context, this.mirrorKeys);
+  }
+
+  /**
+   * 「把系统日历的改动回写」开关（双向闭环的回程）。
+   * 依赖镜像快照（MirrorSnapshot）防回灌：只把"和上次写入值不一样"的当成用户改动。
+   * ⚠️ 默认关，因为它会写用户的服务器数据 —— 建议先单向观察一轮再打开。
+   */
+  private async saveMirrorInbound(isOn: boolean): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    this.mirrorInbound = isOn;
+    await AppSettings.setMirrorInbound(this.context, isOn);
+    this.getUIContext().getPromptAction().showToast({
+      message: isOn
+        ? '已开启回写：系统日历里的新建/修改/删除，下次同步时传回服务器'
+        : '已关闭回写：系统日历的改动不再传回服务器'
+    });
+  }
+
+  /** 手动执行一次镜像（幂等，可反复点） */
+  private async runMirrorNow(): Promise<void> {
+    if (this.context === undefined || this.mirrorRunning) {
+      return;
+    }
+    if (this.mirrorKeys.length === 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先勾选要镜像的日历本' });
+      return;
+    }
+    this.mirrorRunning = true;
+    try {
+      const res: MirrorResult = await SystemCalendarMirror.syncNow(this.context);
+      const skip: string = res.skipped > 0 ? ` / 跳过 ${res.skipped}` : '';
+      this.getUIContext().getPromptAction().showToast({
+        message: `镜像完成：${res.books} 个本，新增 ${res.added} / 更新 ${res.updated} / 删除 ${res.deleted}${skip}`
+      });
+    } catch (err) {
+      const e = err as BusinessError;
+      const msg: string = e.message !== undefined && e.message !== ''
+        ? e.message : '请确认已授予"写入系统日历"权限';
+      this.getUIContext().getPromptAction().showToast({ message: `镜像失败：${msg}` });
+    } finally {
+      this.mirrorRunning = false;
+    }
+  }
+
+  /**
+   * 「清理残留镜像账户（诊断）」按钮：
+   * ① 把系统日历里**全部**账户（含 id / name / displayName / type）写进同步日志；
+   * ② 把"我们建的、但不属于当前选中本"的账户全部删掉（逐个独立 try，失败也继续）；
+   * ③ Toast 汇总成功/失败/残留数量，残留账户名直接显示出来。
+   */
+  private async runPurgeOrphans(): Promise<void> {
+    if (this.context === undefined || this.purgeRunning) {
+      return;
+    }
+    this.purgeRunning = true;
+    try {
+      const r: PurgeResult = await SystemCalendarMirror.forceCleanup(this.context);
+      this.accountDump = r.detail.join('\n');
+      let msg: string = `已清理 ${r.removed} 个残留账户`;
+      if (r.failed > 0) {
+        msg += `，失败 ${r.failed} 个`;
+      }
+      if (r.remaining > 0) {
+        msg += `；仍残留 ${r.remaining} 个：${r.remainingNames.join(' , ')}`;
+      }
+      msg += '（完整账户清单见同步日志）';
+      this.getUIContext().getPromptAction().showToast({ message: msg, duration: 6000 });
+    } catch (err) {
+      const e = err as BusinessError;
+      this.getUIContext().getPromptAction().showToast({
+        message: `清理失败：${e.message ?? '请确认已授予"写入系统日历"权限'}`
+      });
+    } finally {
+      this.purgeRunning = false;
+    }
   }
 
   private async saveInterval(minutes: number): Promise<void> {
@@ -533,31 +794,184 @@ struct SettingsPage {
                   this.saveSysMode(mode);
                 }
               })
-            if (this.sysMode === 'backup') {
-              Text(this.backupTargets.length > 0
-                ? '备份目标（可写日历本）：导入后随同步上传服务器，换机/丢失也有备份'
-                : '没有可写的 CalDAV 日历本，请先添加账号或检查日历本权限')
-                .fontSize(12)
-                .fontColor(this.backupTargets.length > 0
-                  ? $r('app.color.text_secondary') : $r('app.color.error'))
+            // ⭐ 备份目标**始终可配置**（不再只在 backup 模式下显示）：
+            //    否则"先选目标才能开启备份"会变成死锁（Select 只在 backup 模式下渲染）。
+            Text(this.backupTargets.length > 0
+              ? '备份目标（可写日历本）：导入后随同步上传服务器，换机/丢失也有备份'
+              : '没有可写的 CalDAV 日历本，请先添加账号或检查日历本权限')
+              .fontSize(12)
+              .fontColor(this.backupTargets.length > 0
+                ? $r('app.color.text_secondary') : $r('app.color.error'))
+              .width('100%')
+            if (this.backupTargets.length > 0) {
+              Select(this.backupTargets.map((t: BackupTarget): SelectOption => {
+                return { value: t.label } as SelectOption;
+              }) as SelectOption[])
+                .selected(this.backupTargets.findIndex((t: BackupTarget): boolean => t.bookId === this.backupKey))
+                .value(this.backupTargets.find((t: BackupTarget): boolean => t.bookId === this.backupKey)?.label
+                  ?? '请选择日历本')
+                .fontColor($r('app.color.text_primary'))
+                .font({ size: 14 })
+                .optionFont({ size: 14 })
+                .selectedOptionFont({ size: 14 })
                 .width('100%')
-              if (this.backupTargets.length > 0) {
-                Select(this.backupTargets.map((t: BackupTarget): SelectOption => {
-                  return { value: t.label } as SelectOption;
-                }) as SelectOption[])
-                  .selected(this.backupTargets.findIndex((t: BackupTarget): boolean => t.calKey === this.backupKey))
-                  .value(this.backupTargets.find((t: BackupTarget): boolean => t.calKey === this.backupKey)?.label
-                    ?? '请选择日历本')
+                .onSelect((index: number) => {
+                  if (index >= 0 && index < this.backupTargets.length) {
+                    this.saveBackupTarget(this.backupTargets[index].bookId);
+                  }
+                })
+            }
+            // 失效/未选择提示：目标本没了时功能已被自动关闭，必须让用户看得见原因
+            if (this.backupNotice !== '') {
+              Row({ space: 6 }) {
+                Text('⚠️')
+                  .fontSize(12)
+                  .fontColor($r('app.color.error'))
+                Text(this.backupNotice)
+                  .fontSize(12)
+                  .fontColor($r('app.color.error'))
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .padding(8)
+              .borderRadius(8)
+              .backgroundColor($r('app.color.error_bg'))
+            } else if (this.backupTargets.length > 0 && this.backupKey === '') {
+              Text('尚未选择备份目标：请先选择要把系统日历备份到哪个 CalDAV 日历本，否则无法开启备份')
+                .fontSize(12)
+                .fontColor($r('app.color.error'))
+                .width('100%')
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 镜像到系统日历：把选中的 CalDAV 日历本写入系统日历，让小艺 / 桌面卡片 / 手表也能看到
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('镜像到系统日历')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.text_primary'))
-                  .font({ size: 14 })
-                  .optionFont({ size: 14 })
-                  .selectedOptionFont({ size: 14 })
+                Text('把选中的 CalDAV 日历本写入系统日历，这样小艺、桌面日历卡片和手表也能看到你的日程（需授权写入系统日历）')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.mirrorEnabled })
+                .selectedColor($r('app.color.brand'))
+                .onChange((isOn: boolean) => {
+                  this.saveMirrorEnabled(isOn);
+                })
+            }
+            .width('100%')
+
+            if (this.mirrorEnabled) {
+              if (this.mirrorCandidates.length === 0) {
+                Text('没有可镜像的 CalDAV 日历本，请先添加账号')
+                  .fontSize(12)
+                  .fontColor($r('app.color.error'))
                   .width('100%')
-                  .onSelect((index: number) => {
-                    if (index >= 0 && index < this.backupTargets.length) {
-                      this.saveBackupTarget(this.backupTargets[index].calKey);
+              } else {
+                Text('选择要镜像的日历本：每个本在系统日历里是独立账户，可单独设色与隐藏')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+                  .width('100%')
+                if (this.mirrorHiddenCount() > 0) {
+                  Text(`另有 ${this.mirrorHiddenCount()} 个本被设为「系统日历备份目标」，其日程本就来自系统日历，已自动排除以免重复`)
+                    .fontSize(12)
+                    .fontColor($r('app.color.text_hint'))
+                    .width('100%')
+                }
+                Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                  ForEach(this.mirrorCandidates, (b: BackupTarget): void => {
+                    Row({ space: 6 }) {
+                      Text(b.label)
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_primary'))
+                        .layoutWeight(1)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Toggle({ type: ToggleType.Checkbox, isOn: this.mirrorKeys.indexOf(b.bookId) >= 0 })
+                        .selectedColor($r('app.color.brand'))
+                        .onChange((on: boolean) => {
+                          this.toggleMirrorKey(b.bookId, on);
+                        })
                     }
+                    .width('48%')
+                    .padding({ left: 2, right: 2, top: 4, bottom: 4 })
+                  }, (b: BackupTarget): string => b.calKey)
+                }
+                .width('100%')
+
+                Row({ space: 10 }) {
+                  Column({ space: 2 }) {
+                    Text('把系统日历的改动回写')
+                      .fontSize(13)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.text_primary'))
+                    Text('你在系统日历里新建、修改、删除的日程，同步回 CalDAV 服务器')
+                      .fontSize(12)
+                      .fontColor($r('app.color.text_secondary'))
+                  }
+                  .alignItems(HorizontalAlign.Start)
+                  .layoutWeight(1)
+                  Toggle({ type: ToggleType.Switch, isOn: this.mirrorInbound })
+                    .selectedColor($r('app.color.brand'))
+                    .onChange((isOn: boolean) => {
+                      this.saveMirrorInbound(isOn);
+                    })
+                }
+                .width('100%')
+                .padding({ top: 4 })
+
+                Button(this.mirrorRunning ? '正在执行…' : '立即执行镜像')
+                  .fontSize(14)
+                  .width('100%')
+                  .enabled(!this.mirrorRunning)
+                  .onClick(() => {
+                    this.runMirrorNow();
                   })
+
+                Button(this.purgeRunning ? '正在清理…' : '清理残留镜像账户（诊断）')
+                  .fontSize(13)
+                  .fontColor($r('app.color.brand_text'))
+                  .backgroundColor(Color.Transparent)
+                  .width('100%')
+                  .enabled(!this.purgeRunning)
+                  .onClick(() => {
+                    this.runPurgeOrphans();
+                  })
+
+                if (this.accountDump !== '') {
+                  Column({ space: 4 }) {
+                    Text('系统日历账户清单（MINE=我们建的，KEEP=本次保留；长按可复制）：')
+                      .fontSize(11)
+                      .fontColor($r('app.color.text_secondary'))
+                      .width('100%')
+                    Scroll() {
+                      Text(this.accountDump)
+                        .fontSize(10)
+                        .lineHeight(14)
+                        .fontColor($r('app.color.text_primary'))
+                        .copyOption(CopyOptions.LocalDevice)
+                        .width('100%')
+                    }
+                    .height(150)
+                    .width('100%')
+                    .backgroundColor($r('app.color.page_bg'))
+                    .borderRadius(8)
+                    .padding(6)
+                  }
+                  .width('100%')
+                  .padding({ top: 4 })
+                }
               }
             }
           }

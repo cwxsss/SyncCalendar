@@ -16,6 +16,7 @@ class ParsedEvent {
   inAlarm: boolean = false; // 是否处于 VALARM 子组件内（内部属性不参与解析）
   rrule: string = '';       // 原始 RRULE 值
   exdates: string[] = [];   // 原始 EXDATE 值列表
+  recurrenceId: number = 0; // 原始 RECURRENCE-ID（毫秒）——本行覆盖的是主事件的哪一次发生
   reminder: number = 0;     // 主提醒提前分钟数（第一个 VALARM，0 = 不提醒）
   reminders: number[] = []; // 全部提醒提前分钟数（多 VALARM）
 }
@@ -102,6 +103,16 @@ export class IcsUtil {
         current.recurring = true;
         if (propName === 'RRULE') {
           current.rrule = value;
+        } else {
+          // ⭐ 必须**保留 RECURRENCE-ID 的值**：它指出本行覆盖的是主事件哪一次发生。
+          //    覆盖行的 DTSTART 是"被改到的新时间"，只改标题时两者才相同；
+          //    一旦把某次发生改期，用 startTime 排除主事件那次发生就会漏掉 →
+          //    App 与系统日历里同一日程出现两条（2026-09-19 真机事故）。
+          const recDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
+          const rt = IcsUtil.parseTime(value, recDateOnly);
+          if (rt !== null) {
+            current.recurrenceId = rt.time;
+          }
         }
       } else if (propName === 'EXDATE') {
         const exValues: string[] = value.split(',');
@@ -140,6 +151,7 @@ export class IcsUtil {
       r.recurring = p.recurring;
       r.rrule = p.rrule;
       r.exdate = p.exdates.join(';');
+      r.recurrenceId = p.recurrenceId;
       r.reminder = p.reminder;
       r.reminders = p.reminders;
       return r;

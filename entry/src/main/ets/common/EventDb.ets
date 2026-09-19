@@ -25,6 +25,10 @@ export class LocalEvent {
   completed: boolean = false; // 待办是否已完成（STATUS:COMPLETED）
   rrule: string = '';       // 原始 RRULE（空 = 非重复）；显示时按规则展开多次发生
   exdate: string = '';      // 原始 EXDATE 排除日期，分号分隔
+  /** ⭐ RECURRENCE-ID：本行"覆盖"的是主事件的哪一次发生（毫秒，0 = 无/旧数据未回填）。
+   *  只改标题时它等于 startTime；**把某次发生改期**时它才是原始时刻——
+   *  排除主事件对应发生时必须用它，否则原时间会残留成"幽灵日程"。 */
+  recurrenceId: number = 0;
   reminder: number = 0;     // 主提醒提前分钟数（第一个提醒，兼容旧字段），0 = 不提醒
   reminders: number[] = []; // 全部提醒提前分钟数（多选），按添加顺序
 }
@@ -44,12 +48,43 @@ export class RemoteEvent {
   completed: boolean = false; // VTODO STATUS:COMPLETED
   rrule: string = '';         // 原始 RRULE
   exdate: string = '';        // 原始 EXDATE（分号分隔）
+  recurrenceId: number = 0;   // 原始 RECURRENCE-ID（毫秒；0 = 无）
   reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
   reminders: number[] = [];   // 全部提醒提前分钟数（多选）
 }
 
 export class EventDb {
   private static db: relationalStore.RdbStore | null = null;
+
+  /**
+   * ⭐ 统计"是覆盖实例（RECURRENCE-ID 行）但还没回填 recurrence_id"的行数。
+   *
+   * 语义：`recurring=1 且 rrule=''` ⟺ 这一行的 .ics 里有 RECURRENCE-ID。
+   * 老库升级后这些行的 recurrence_id 一律是 0（字段以前被丢弃，无法从本地反推），
+   * 必须靠一次全量重拉（GET 每个 .ics）才能填上。
+   * **用数据本身当标志，而不是内存变量** —— 卡片进程/进程重启会把内存标志吃掉
+   *（实测 2026-09-19 18:30/18:36 两次同步都没触发全量重拉）。
+   * 回填完成后返回值自然变 0，不会反复触发。
+   */
+  static async countOverridesMissingRecurrenceId(context: common.Context): Promise<number> {
+    try {
+      const store = await EventDb.getDb(context);
+      const rs = await store.querySql(
+        "select count(*) c from events " +
+        "where deleted = 0 and recurring = 1 and rrule = '' and recurrence_id = 0");
+      let n: number = 0;
+      try {
+        if (rs.goToNextRow()) {
+          n = rs.getLong(rs.getColumnIndex('c'));
+        }
+      } finally {
+        rs.close();
+      }
+      return n;
+    } catch (err) {
+      return 0;
+    }
+  }
 
   static async getDb(context: common.Context): Promise<relationalStore.RdbStore> {
     if (EventDb.db !== null) {
@@ -104,6 +139,12 @@ export class EventDb {
     } catch (err) {
       // 列已存在
     }
+    // ⭐ 覆盖实例的"原始发生时刻"（RECURRENCE-ID）。老库升级后该列一律为 0，需要一次全量重拉回填
+    try {
+      await store.executeSql('ALTER TABLE events ADD COLUMN recurrence_id INTEGER DEFAULT 0');
+    } catch (err) {
+      // 列已存在
+    }
     EventDb.db = store;
     return store;
   }
@@ -122,6 +163,18 @@ export class EventDb {
   /** 提醒数组比较键（规范化后逗号连接，用于增量比对） */
   static remKey(list: number[]): string {
     return EventDb.normalizeReminders(list).join(',');
+  }
+
+  /**
+   * ⭐ 覆盖实例（RECURRENCE-ID 独立行）"排除主事件哪一次发生"用的键。
+   *
+   * 必须优先用 **recurrenceId**（原始发生时刻）：覆盖行的 startTime 是**被改到的新时间**，
+   * 用它做键时主事件在**原时间**的那次发生不会被排除 → App 与系统日历里同一日程出现两条
+   * （2026-09-19 真机实测：窗口内 63 条这种"幽灵日程"）。
+   * recurrenceId = 0 表示旧库数据（还没回填）→ 回退到 startTime，保持老行为不变。
+   */
+  static overrideKey(calKey: string, uid: string, recurrenceId: number, startTime: number): string {
+    return `${calKey}_${uid}_${recurrenceId > 0 ? recurrenceId : startTime}`;
   }
 
   private static fromRow(rs: relationalStore.ResultSet): LocalEvent {
@@ -146,6 +199,7 @@ export class EventDb {
     e.completed = rs.getLong(rs.getColumnIndex('completed')) === 1;
     e.rrule = rs.getString(rs.getColumnIndex('rrule'));
     e.exdate = rs.getString(rs.getColumnIndex('exdate'));
+    e.recurrenceId = rs.getLong(rs.getColumnIndex('recurrence_id'));
     e.reminder = rs.getLong(rs.getColumnIndex('reminder'));
     // 多提醒（逗号分隔分钟数）；旧数据无该列时回退单提醒
     const remStr: string = rs.getString(rs.getColumnIndex('reminders'));
@@ -178,6 +232,7 @@ export class EventDb {
       'completed': e.completed ? 1 : 0,
       'rrule': e.rrule,
       'exdate': e.exdate,
+      'recurrence_id': e.recurrenceId,
       'reminder': e.reminders.length > 0 ? e.reminders[0] : 0,
       'reminders': e.reminders.map((n: number): string => String(n)).join(',')
     };
@@ -371,12 +426,22 @@ export class EventDb {
     }
 
     const remoteKeys: string[] = [];
+    // ⭐ 同一次解析里可能出现同一资源的多条相同 VEVENT（同 uid + 同 DTSTART）。
+    //    旧版用循环前的 existing 快照判重，插入后不回写 → 第二条仍判为"新增"又插一行，
+    //    在本地库留下 href/etag/remote_path 完全相同的冗余行（2026-09-19 实测 10 组）。
+    const seenKeys: Set<string> = new Set<string>();
     for (const r of remote) {
-      // 重复日程实例共享 UID，唯一标识 = uid + 开始时间
-      const key: string = `${r.uid}_${r.startTime}`;
+      // 重复日程实例共享 UID，唯一标识 = uid + 开始时间 + RECURRENCE-ID
+      //（同一时刻可能同时存在"主事件"与"覆盖该次发生的实例行"，只带上 recurrenceId 才唯一）
+      const key: string = `${r.uid}_${r.startTime}_${r.recurrenceId}`;
+      if (seenKeys.has(key)) {
+        continue; // 同一资源内的重复条目 → 只保留一条
+      }
+      seenKeys.add(key);
       remoteKeys.push(key);
       const found = existing.find((x: LocalEvent): boolean =>
-        !x.dirty && x.uid === r.uid && x.startTime === r.startTime);
+        !x.dirty && x.uid === r.uid && x.startTime === r.startTime
+        && x.recurrenceId === r.recurrenceId);
       if (found === undefined) {
         // 新增
         const e = new LocalEvent();
@@ -398,6 +463,7 @@ export class EventDb {
         e.completed = r.completed;
         e.rrule = r.rrule;
         e.exdate = r.exdate;
+        e.recurrenceId = r.recurrenceId;
         e.reminder = r.reminder;
         e.reminders = r.reminders;
         await store.insert('events', EventDb.toBucket(e));
@@ -420,6 +486,7 @@ export class EventDb {
         found.completed = r.completed;
         found.rrule = r.rrule;
         found.exdate = r.exdate;
+        found.recurrenceId = r.recurrenceId;
         found.reminder = r.reminder;
         found.reminders = r.reminders;
         const up = new relationalStore.RdbPredicates('events');
@@ -435,7 +502,7 @@ export class EventDb {
       if (local.dirty) {
         continue;
       }
-      const localKey: string = `${local.uid}_${local.startTime}`;
+      const localKey: string = `${local.uid}_${local.startTime}_${local.recurrenceId}`;
       if (!remoteKeys.includes(localKey)) {
         const del = new relationalStore.RdbPredicates('events');
         del.equalTo('id', local.id);
@@ -446,11 +513,72 @@ export class EventDb {
     return `新增${added} 更新${updated} 删除${removed} 不变${unchanged}`;
   }
 
-  /** 查询某日历本下同类型的全部行（同步 etag 比对用，含 dirty 行） */
+  /**
+   * 清理"同一资源"的冗余重复行（**纯本地去重，绝不触碰服务器**）。
+   *
+   * 起因：旧版 applyRemote 用循环前的一次性 existing 快照判重，同一个 .ics 里若含
+   * 多条相同 (UID, DTSTART) 的 VEVENT，第二条仍被判为"新增"再插一行 →
+   * 本地库出现 href / etag / remote_path 完全相同的重复行（2026-09-19 实测 10 组）。
+   * 影响：① App 里同一日程显示两条；② 镜像到系统日历后同一 identifier 互相覆盖，
+   *      出现"计划 984 条、系统只写出 983 条"的口径差。
+   *
+   * 口径：同 (cal_key, uid, start_time, recurrence_id) 且在**同一资源**（href 非空）下，
+   * 只保留 id 最小的一行。
+   * 含本地未推送修改（dirty=1）的行整个不参与，绝不会连带删掉待推送数据。
+   * 被删行**不置 dirty/deleted**，因此不会向服务器推送任何删除。
+   * ⚠️ 分组必须带上 recurrence_id：主事件与"覆盖该次发生的实例行"可能同 uid 同 start_time，
+   *    它们是两条**合法**的不同发生，不能被当成冗余行删掉。
+   * @returns 删除的冗余行数
+   */
+  static async dedupeDuplicateRows(context: common.Context): Promise<number> {
+    let removed: number = 0;
+    try {
+      const store = await EventDb.getDb(context);
+      // 只处理"远端资源、已删标记为 0、且没有本地未推送修改（dirty=0）"的行。
+      // 某个组里只要有一行是 dirty，它就不参与分组 → 组内只剩 1 行 → count(*)>1 不成立 → 不动。
+      // 这样绝不会把"待推送的本地修改"连带删掉。
+      const rs = await store.querySql(
+        "select group_concat(id) ids from events " +
+        "where deleted = 0 and dirty = 0 and href <> '' " +
+        "group by cal_key, uid, start_time, recurrence_id having count(*) > 1");
+      const groups: string[] = [];
+      try {
+        while (rs.goToNextRow()) {
+          const v: string = rs.getString(rs.getColumnIndex('ids'));
+          if (v !== undefined && v !== null && v !== '') {
+            groups.push(v);
+          }
+        }
+      } finally {
+        rs.close();
+      }
+      for (const g of groups) {
+        const ids: number[] = g.split(',')
+          .map((s: string): number => Number(s.trim()))
+          .filter((n: number): boolean => !Number.isNaN(n));
+        ids.sort((a: number, b: number): number => a - b);
+        for (let i: number = 1; i < ids.length; i++) { // 0 号（最小 id）保留
+          const del = new relationalStore.RdbPredicates('events');
+          del.equalTo('id', ids[i]);
+          await store.delete(del);
+          removed++;
+        }
+      }
+    } catch (err) {
+      // 去重失败不影响主流程
+      return removed;
+    }
+    return removed;
+  }
+
+  /** 查询某日历本下同类型的全部行（同步 etag 比对用，含 dirty 行）
+   *  ⭐ 固定按 id 升序：镜像/展示遇到"同 uid 多行"时谁先谁后必须稳定，
+   *  否则同一 identifier 每次换一行 → 系统日历在两处之间反复翻转（实测过）。 */
   static async queryByCalKey(context: common.Context, calKey: string, kind: string): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
     predicates.equalTo('cal_key', calKey).and().equalTo('kind', kind);
+    predicates.orderByAsc('id');
     const rs = await store.query(predicates);
     const list: LocalEvent[] = [];
     try {

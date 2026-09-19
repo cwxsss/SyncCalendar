@@ -39,6 +39,16 @@
         }
       },
       {
+        "name": "ohos.permission.WRITE_CALENDAR",
+        "reason": "$string:perm_write_calendar",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
         "name": "ohos.permission.LOCATION",
         "reason": "$string:perm_location",
         "usedScene": {

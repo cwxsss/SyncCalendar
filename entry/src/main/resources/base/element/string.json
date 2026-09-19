@@ -18,7 +18,7 @@
     },
     {
       "name": "perm_write_calendar",
-      "value": "写入系统日历，用于保存您创建的日程"
+      "value": "写入系统日历，用于把您选择的 CalDAV 日历本镜像到系统日历，让小艺、桌面日历卡片和手表也能看到您的日程"
     },
     {
       "name": "perm_read_whole_calendar",
