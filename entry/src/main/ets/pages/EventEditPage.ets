@@ -1,6 +1,6 @@
 // entry/src/main/ets/pages/EventEditPage.ets
 // 日程编辑页：新建 / 修改 / 删除日程（一律属于某个 CalDAV 日历本，不再支持"本机"日程）
-import { router } from '@kit.ArkUI';
+import { curves, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
@@ -658,6 +658,19 @@ struct EventEditPage {
       backgroundColor: $r('app.color.card_bg')
     })
   }
+
+  /**
+   * 页面转场：淡入淡出。
+   * 不做左右平移 / 上下位移（不调用 .slide() / .translate()），只做透明度变化，
+   * 避免单帧直接切换；曲线使用弹簧曲线（springMotion）。
+   */
+  pageTransition() {
+    PageTransitionEnter({ type: RouteType.None, duration: 300, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+    PageTransitionExit({ type: RouteType.None, duration: 250, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+  }
+
 
   @Builder
   timeRow(label: string, isStart: boolean) {

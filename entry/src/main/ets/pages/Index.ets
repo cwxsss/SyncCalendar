@@ -1,7 +1,7 @@
 // entry/src/main/ets/pages/Index.ets
 // 同步日历主界面：月视图（左右滑动翻月）/ 周视图 / 日视图 / 日程列表
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
-import { mediaquery, router } from '@kit.ArkUI';
+import { curves, mediaquery, router } from '@kit.ArkUI';
 import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
@@ -54,8 +54,13 @@ struct Index {
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
-  @State isLandscape: boolean = false; // 横屏：月视图切左右双栏（左月历/右当日日程）
-  private landscapeListener: mediaquery.MediaQueryListener | null = null;
+  // 宽屏（平板 / 折叠屏展开态）：月视图切左右双栏（左月历 / 右当日日程）。
+  // 判据是窗口**短边**是否达到大屏断点 840vp：短边在旋转时不变（宽高互换），
+  // 所以横竖屏布局天然保持一致 —— 满足"屏幕比例接近 1:1 的设备，横竖屏布局需保持一致"；
+  // 同时不锁死屏幕方向，折叠屏展开态与平板仍可自由横竖屏切换。
+  @State wideLayout: boolean = false;
+  private widthListener: mediaquery.MediaQueryListener | null = null;
+  private heightListener: mediaquery.MediaQueryListener | null = null;
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
@@ -112,7 +117,7 @@ struct Index {
       }
     }
     this.rebuildPages();
-    this.initLandscapeListener();
+    this.initLayoutListener();
     // 首启同意门禁：未同意《隐私政策》与《用户协议》前，不申请任何系统权限、不加载/同步数据（AGC 硬性要求）
     if (ctx === undefined) {
       this.policyChecked = true;
@@ -142,19 +147,47 @@ struct Index {
       clearInterval(this.nowTimer);
       this.nowTimer = -1;
     }
-    if (this.landscapeListener !== null) {
-      this.landscapeListener.off('change');
-      this.landscapeListener = null;
+    if (this.widthListener !== null) {
+      this.widthListener.off('change');
+      this.widthListener = null;
+    }
+    if (this.heightListener !== null) {
+      this.heightListener.off('change');
+      this.heightListener = null;
     }
   }
 
-  /** 监听横竖屏：旋转后 isLandscape 驱动月视图在上下/左右布局间切换 */
-  private initLandscapeListener(): void {
-    this.landscapeListener =
-      this.getUIContext().getMediaQuery().matchMediaSync('(orientation: landscape)');
-    this.isLandscape = this.landscapeListener.matches;
-    this.landscapeListener.on('change', (result: mediaquery.MediaQueryResult) => {
-      this.isLandscape = result.matches;
+  /**
+   * 宽屏判据：窗口短边 min(宽, 高) 是否达到大屏断点 840vp。
+   * min(w,h) >= 840vp 等价于 (width >= 840vp) && (height >= 840vp)，用两条 mediaquery 合成。
+   *
+   * 为什么用"短边"而不是"是否横屏"：
+   *   1) 旋转时短边不变 → 横竖屏布局自动保持一致。屏幕比例接近 1:1 的设备（折叠屏展开态、
+   *      平板）在旋转时不会出现"单栏 ⇄ 双栏"的布局跳变；
+   *   2) 不锁死屏幕方向，仍支持折叠屏展开态与平板的横竖屏自由切换显示。
+   */
+  private applyLayoutMetrics(): void {
+    let wOk: boolean = false;
+    let hOk: boolean = false;
+    if (this.widthListener !== null) {
+      wOk = this.widthListener.matches;
+    }
+    if (this.heightListener !== null) {
+      hOk = this.heightListener.matches;
+    }
+    this.wideLayout = wOk && hOk;
+  }
+
+  private initLayoutListener(): void {
+    const mq = this.getUIContext().getMediaQuery();
+    this.widthListener = mq.matchMediaSync('(width >= 840vp)');
+    this.heightListener = mq.matchMediaSync('(height >= 840vp)');
+    this.applyLayoutMetrics();
+    this.widthListener.on('change', (): void => {
+      this.applyLayoutMetrics();
+    });
+    this.heightListener.on('change', (): void => {
+      this.applyLayoutMetrics();
     });
   }
 
@@ -1072,6 +1105,19 @@ struct Index {
   }
 
   /**
+   * 页面转场：淡入淡出。
+   * 不做左右平移 / 上下位移（不调用 .slide() / .translate()），只做透明度变化，
+   * 避免单帧直接切换；曲线使用弹簧曲线（springMotion）。
+   */
+  pageTransition() {
+    PageTransitionEnter({ type: RouteType.None, duration: 300, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+    PageTransitionExit({ type: RouteType.None, duration: 250, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+  }
+
+
+  /**
    * 首启隐私政策同意门禁（整页渲染，不用弹窗 —— 弹窗在本环境实测无法弹出）。
    * AGC 要求：明确同意前不得申请权限、不得收集/处理个人信息，故未同意时整页挡住主界面。
    */
@@ -1598,8 +1644,8 @@ struct Index {
 
   @Builder
   monthBody() {
-    if (this.isLandscape) {
-      // 横屏（平板适配）：左右双栏——左侧月历，右侧当日日程
+    if (this.wideLayout) {
+      // 宽屏（平板 / 折叠屏展开态）：左右双栏——左侧月历，右侧当日日程
       Row() {
         Column() {
           this.monthWeekHeader()
@@ -1667,7 +1713,7 @@ struct Index {
               }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
             }
             .width('100%')
-            .layoutWeight(this.isLandscape ? 1 : 0)
+            .layoutWeight(this.wideLayout ? 1 : 0)
           }, (week: MonthCell[], idx: number) => String(idx))
         }
         .width('100%')
@@ -1679,7 +1725,7 @@ struct Index {
     .loop(false)
     .indicator(false)
     .width('100%')
-    .layoutWeight(this.isLandscape ? 1 : 0)
+    .layoutWeight(this.wideLayout ? 1 : 0)
     .onChange((index: number) => {
       this.handleSwiperChange(index);
     })
@@ -1890,7 +1936,7 @@ struct Index {
 
   @Builder
   weekBody() {
-    if (this.isLandscape) {
+    if (this.wideLayout) {
       // 横屏（平板适配）：左侧一周日期，右侧选中日日程
       Row() {
         Column() {
@@ -2525,20 +2571,20 @@ struct Index {
   dayCell(cell: MonthCell) {
     Column({ space: 2 }) {
       Text(String(cell.day))
-        .fontSize(this.isLandscape ? 12 : 13)
+        .fontSize(this.wideLayout ? 12 : 13)
         .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
         .fontColor(!cell.inMonth
           ? $r('app.color.text_hint')
           : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
-        .width(this.isLandscape ? 22 : 26)
-        .height(this.isLandscape ? 22 : 26)
+        .width(this.wideLayout ? 22 : 26)
+        .height(this.wideLayout ? 22 : 26)
         .textAlign(TextAlign.Center)
-        .borderRadius(this.isLandscape ? 11 : 13)
+        .borderRadius(this.wideLayout ? 11 : 13)
         .backgroundColor(cell.dateMs === this.selectedDate
           ? $r('app.color.selected_bg')
           : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-      if (!this.isLandscape) {
-        // 横屏高度有限，省略农历腾出空间
+      if (!this.wideLayout) {
+        // 宽屏下月历格子变窄，省略农历腾出空间
         Text(cell.lunar)
           .fontSize(8)
           .fontColor(cell.dateMs === this.selectedDate

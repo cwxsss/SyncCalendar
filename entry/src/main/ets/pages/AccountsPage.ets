@@ -1,6 +1,6 @@
 // entry/src/main/ets/pages/AccountsPage.ets
 // DAV 账号管理（由原 CalDAVSync 首页移植）
-import { router } from '@kit.ArkUI';
+import { curves, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_KEYS, TYPE_CALDAV, TYPE_CARDDAV } from '../common/AccountStore';
@@ -251,6 +251,19 @@ struct AccountsPage {
     .backgroundColor($r('app.color.page_bg'))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
+
+  /**
+   * 页面转场：淡入淡出。
+   * 不做左右平移 / 上下位移（不调用 .slide() / .translate()），只做透明度变化，
+   * 避免单帧直接切换；曲线使用弹簧曲线（springMotion）。
+   */
+  pageTransition() {
+    PageTransitionEnter({ type: RouteType.None, duration: 300, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+    PageTransitionExit({ type: RouteType.None, duration: 250, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+  }
+
 
   @Builder
   emptyState() {
