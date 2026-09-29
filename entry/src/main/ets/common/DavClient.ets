@@ -36,6 +36,20 @@ export class DavCalendarDiscovery {
   entries: DavCalendarEntry[] = [];
 }
 
+/**
+ * 带 HTTP 状态码的 DAV 请求错误。
+ * 同步引擎据此区分「404 日历本/资源在服务器上已不存在」（可降级处理：
+ * 单本跳过、自动从账号移除）与其它网络/服务器故障（整个账号同步失败）。
+ */
+export class DavHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export class DavClient {
   /**
    * PROPFIND 拉取某路径下所有集合的 calendar-color
@@ -346,7 +360,7 @@ export class DavClient {
       });
       LogUtil.write(`HTTP REPORT(etag) ${href} → ${resp.responseCode}`);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
-        throw new Error(`服务器返回状态码 ${resp.responseCode}`);
+        throw new DavHttpError(resp.responseCode, `服务器返回状态码 ${resp.responseCode}`);
       }
       const xml: string = resp.result as string;
       const items: RemoteItem[] = [];
@@ -403,11 +417,11 @@ export class DavClient {
       LogUtil.write(`HTTP REPORT(${compName}) ${href} → ${resp.responseCode}`);
       if (resp.responseCode === 401) {
         LogUtil.write(`HTTP REPORT(${compName}) 401 拒绝凭据`);
-        throw new Error('服务器拒绝凭据(401)');
+        throw new DavHttpError(401, '服务器拒绝凭据(401)');
       }
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
         LogUtil.write(`HTTP REPORT(${compName}) 异常状态码 ${resp.responseCode}`);
-        throw new Error(`服务器返回状态码 ${resp.responseCode}`);
+        throw new DavHttpError(resp.responseCode, `服务器返回状态码 ${resp.responseCode}`);
       }
       const xml: string = resp.result as string;
       LogUtil.write(`HTTP REPORT(${compName}) 响应体 ${xml.length} 字符`);
@@ -459,7 +473,7 @@ export class DavClient {
       console.info(`PUT ${url} 响应码: ${resp.responseCode}`);
       LogUtil.write(`HTTP PUT ${url} → ${resp.responseCode}`);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
-        throw new Error(`推送失败，服务器返回 ${resp.responseCode}`);
+        throw new DavHttpError(resp.responseCode, `推送失败，服务器返回 ${resp.responseCode}`);
       }
       const headers = resp.header as Record<string, string>;
       if (headers !== undefined && headers !== null) {
@@ -489,7 +503,7 @@ export class DavClient {
       LogUtil.write(`HTTP DELETE ${url} → ${resp.responseCode}`);
       // 404 视为已删除，成功
       if ((resp.responseCode < 200 || resp.responseCode >= 300) && resp.responseCode !== 404) {
-        throw new Error(`删除失败，服务器返回 ${resp.responseCode}`);
+        throw new DavHttpError(resp.responseCode, `删除失败，服务器返回 ${resp.responseCode}`);
       }
     } finally {
       httpRequest.destroy();

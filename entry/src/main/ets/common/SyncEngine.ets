@@ -2,12 +2,13 @@
 // 双向同步引擎：先推本地修改（PUT/DELETE），再拉远端变更（REPORT + etag 增量）
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { DavAccount } from './AccountStore';
+import { DavAccount, AccountStore } from './AccountStore';
 import { EventDb, LocalEvent, RemoteEvent } from './EventDb';
 import { IcsUtil } from './IcsUtil';
-import { DavClient, DavColorEntry, RemoteItem } from './DavClient';
+import { DavClient, DavColorEntry, DavHttpError, RemoteItem } from './DavClient';
 import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
+import { SystemCalendarMirror } from './SystemCalendarMirror';
 
 export class SyncEngine {
   /** 正在同步中的账号 id → 开始时间：防止超时后的"僵尸同步"与新一轮同步并发写库 */
@@ -91,13 +92,28 @@ export class SyncEngine {
       LogUtil.write('一次性全量重拉：忽略 etag 复用，全部资源 GET 完整 ICS');
     }
     let changed: number = 0;
+    // 服务器上已不存在的日历本（REPORT 404）：先跳过继续同步其它日历本，
+    // 循环结束后统一从账号移除（见 removeDeadBooks）。
+    // 2026-09-29 实测：服务器上删掉一个日历本后，本地仍勾选它 → 每次同步 404 →
+    // 旧版直接抛错让整个账号同步失败，且后台同步每轮都失败（一天半没同步成功过）。
+    const deadIdxs: number[] = [];
     for (let i = 0; i < acc.calendarHrefs.length; i++) {
       const href: string = acc.calendarHrefs[i];
       const calKey: string = `${acc.id}_${i}`;
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
       LogUtil.write(`日历本[${i}]「${calName}」开始同步：${href}`);
       const t1: number = Date.now();
-      const items: RemoteItem[] = await DavClient.reportEtags(href, auth);
+      let items: RemoteItem[] = [];
+      try {
+        items = await DavClient.reportEtags(href, auth);
+      } catch (err) {
+        if (err instanceof DavHttpError && (err as DavHttpError).status === 404) {
+          LogUtil.write(`日历本[${i}]「${calName}」在服务器上已不存在(404)，本轮跳过，收尾时自动从账号移除`);
+          deadIdxs.push(i);
+          continue;
+        }
+        throw err as Error;
+      }
       LogUtil.write(`日历本[${i}]「${calName}」REPORT 返回 ${items.length} 个资源`);
       // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
       const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
@@ -197,7 +213,90 @@ export class SyncEngine {
         LogUtil.write(`日历本[${i}]「${calName}」拉取待办失败(忽略)：${te.message}`);
       }
     }
+    // 收尾：把本轮发现的"服务器上已删除"的日历本从账号移除并清理本地数据。
+    // 放在循环后（而非循环中）是因为移除会让后续序号前移，循环中途改数组会打乱 calKey。
+    if (deadIdxs.length > 0) {
+      await SyncEngine.removeDeadBooks(context, acc, deadIdxs);
+    }
     return changed;
+  }
+
+  /**
+   * 从账号移除「服务器上已不存在（404）」的日历本：收窄配置、迁移序号、清理本地数据并持久化。
+   * 只要有至少一个日历本保留就自动移除；若全部失效则不动配置（避免把账号清空），
+   * 抛错交给上层提示用户去服务器/编辑账号处理。
+   */
+  private static async removeDeadBooks(context: common.Context, acc: DavAccount,
+    deadIdxs: number[]): Promise<void> {
+    if (deadIdxs.length >= acc.calendarHrefs.length) {
+      throw new Error('该账号下所有日历本在服务器上均已不存在(404)，请检查服务器或重新编辑账号');
+    }
+    const deadSet: Set<number> = new Set<number>();
+    for (const d of deadIdxs) {
+      deadSet.add(d);
+    }
+    const removedHrefs: string[] = [];
+    const newHrefs: string[] = [];
+    const newNames: string[] = [];
+    const newColors: string[] = [];
+    const newWritable: string[] = [];
+    for (let i = 0; i < acc.calendarHrefs.length; i++) {
+      if (deadSet.has(i)) {
+        removedHrefs.push(acc.calendarHrefs[i]);
+        continue;
+      }
+      newHrefs.push(acc.calendarHrefs[i]);
+      newNames.push(i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`);
+      newColors.push(i < acc.calendarColors.length ? acc.calendarColors[i] : '');
+      newWritable.push(i < acc.calendarWritable.length ? acc.calendarWritable[i] : '1');
+    }
+    LogUtil.write(`自动移除 ${removedHrefs.length} 个在服务器上不存在的日历本，保留 ${newHrefs.length} 个`);
+    // 1) 先按 href 删掉被移除日历本的本地行——必须在序号迁移之前，
+    //    否则序号收窄后这些行会混进接替该序号的其它日历本（pruneByHrefs 注释详述）
+    await EventDb.pruneByHrefs(context, acc.id, removedHrefs);
+    // 2) 序号迁移：保留的日历本按原顺序收紧（旧序号 → 新序号）
+    const oldHrefs: string[] = acc.calendarHrefs.slice();
+    const pairs: Array<[string, string]> = [];
+    let ni: number = 0;
+    for (let oi = 0; oi < oldHrefs.length; oi++) {
+      if (deadSet.has(oi)) {
+        continue;
+      }
+      if (ni !== oi) {
+        pairs.push([`${acc.id}_${oi}`, `${acc.id}_${ni}`]);
+      }
+      ni++;
+    }
+    if (pairs.length > 0) {
+      const moved: number = await EventDb.remapCalKeys(context, pairs);
+      LogUtil.write(`移除失效日历本后迁移日程 ${moved} 行（${pairs.length} 个日历本序号前移）`);
+    }
+    // 3) 收窄账号配置并持久化
+    acc.calendarHrefs = newHrefs;
+    acc.calendarNames = newNames;
+    acc.calendarColors = newColors;
+    acc.calendarWritable = newWritable;
+    const all: DavAccount[] = await AccountStore.loadAll(context);
+    const idx: number = all.findIndex((a: DavAccount): boolean => a.id === acc.id);
+    if (idx >= 0) {
+      all[idx] = acc;
+      await AccountStore.saveAll(context, all);
+    }
+    // 4) 兜底：该账号下 calKey 不在有效列表的行全部清掉
+    const validKeys: string[] = [];
+    for (let i = 0; i < newHrefs.length; i++) {
+      validKeys.push(`${acc.id}_${i}`);
+    }
+    await EventDb.pruneAccountEvents(context, acc.id, validKeys);
+    // 5) 若被移除的日历本正是「系统日历 → CalDAV」的备份目标，当场判失效并关闭备份
+    try {
+      const backupCheck = await SystemCalendarMirror.checkBackupTarget(context);
+      if (backupCheck.closed) {
+        LogUtil.write('备份目标日历本已在服务器上删除，备份功能已自动关闭');
+      }
+    } catch (err) {
+      // 检查失败不影响主流程
+    }
   }
 
   /**
@@ -329,15 +428,25 @@ export class SyncEngine {
         LogUtil.write(`推送重复主事件（标题已脱敏）uid=${e.uid}`);
       }
       const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
-      if (e.deleted) {
-        await DavClient.deleteRemote(url, auth);
-        await EventDb.purge(context, e.id);
-        LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
-      } else {
-        const ics: string = IcsUtil.build(e);
-        const etag: string = await DavClient.putEvent(url, auth, ics);
-        await EventDb.clearDirty(context, e.id, etag);
-        LogUtil.write(`推送保存（标题已脱敏）uid=${e.uid} → ${url}（${ics.length} 字节，提醒=${e.reminders.map((n: number): string => String(n)).join('/')}分钟，VALARM=${ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'}）`);
+      try {
+        if (e.deleted) {
+          await DavClient.deleteRemote(url, auth);
+          await EventDb.purge(context, e.id);
+          LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
+        } else {
+          const ics: string = IcsUtil.build(e);
+          const etag: string = await DavClient.putEvent(url, auth, ics);
+          await EventDb.clearDirty(context, e.id, etag);
+          LogUtil.write(`推送保存（标题已脱敏）uid=${e.uid} → ${url}（${ics.length} 字节，提醒=${e.reminders.map((n: number): string => String(n)).join('/')}分钟，VALARM=${ics.toUpperCase().includes('BEGIN:VALARM') ? '有' : '无'}）`);
+        }
+      } catch (err) {
+        // 单条推送失败不再中断整个账号（旧行为：一条 404 就让整个账号同步失败）。
+        // 401（凭据失效）例外：后续每条也必然失败，直接抛出让上层提示。
+        if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
+          throw err as Error;
+        }
+        const pe = err as Error;
+        LogUtil.write(`推送单条失败(跳过，保留待推送)：uid=${e.uid} → ${pe.message}`);
       }
     }
   }
@@ -387,6 +496,19 @@ export class SyncEngine {
       const removed: number = await EventDb.pruneOrphanCalKeys(context, accIds);
       if (removed > 0) {
         LogUtil.write(`清理孤儿日程行：${removed} 条（calKey 不属于任何现有账号）`);
+      }
+      // 兜底清扫：行上 href 已不属于任何已选日历本的残留行（calKey 可能因历史迁移
+      // 缺陷混在有效日历本名下，calKey 维度抓不到，href 才暴露真实归属）。
+      // 典型如服务器删除日历本后残留的"幽灵"数据——不清掉的话镜像会一直把它写进系统日历。
+      const validHrefs: string[] = [];
+      for (const a of accounts) {
+        for (const h of a.calendarHrefs) {
+          validHrefs.push(h);
+        }
+      }
+      const stale: number = await EventDb.pruneStaleHrefs(context, validHrefs);
+      if (stale > 0) {
+        LogUtil.write(`清理失效日历本残留行：${stale} 条（href 已不属于任何已选日历本）`);
       }
     } catch (err) {
       const e = err as BusinessError;

@@ -470,8 +470,13 @@ export class EventDb {
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
         || found.reminder !== r.reminder || found.recurring !== r.recurring
-        || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)) {
-        // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填）
+        || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
+        || found.href !== href) {
+        // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填；
+        // href 变化也要更新——服务器上日历本被删除重建后集合 URL 变了，
+        // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
+        // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
+        found.href = href;
         found.title = r.title;
         found.description = r.description;
         found.location = r.location;
@@ -495,6 +500,15 @@ export class EventDb {
         updated++;
       } else {
         unchanged++;
+        // etag 未变也要校正 href：日历本被删除重建后集合 URL 变化，etag 比对仍然全部命中，
+        // 不在这里刷新的话旧 URL 会一直残留在行上（见上方更新分支的注释）
+        if (found.href !== href) {
+          found.href = href;
+          const hp = new relationalStore.RdbPredicates('events');
+          hp.equalTo('id', found.id);
+          const hb: relationalStore.ValuesBucket = { 'href': href };
+          await store.update(hb, hp);
+        }
       }
     }
     // 删除远端已不存在的（排除本地修改未推送的）
@@ -643,6 +657,46 @@ export class EventDb {
       predicates.and().notIn('cal_key', validCalKeys);
     }
     await store.delete(predicates);
+  }
+
+  /**
+   * 删除某账号下、属于指定日历本集合（按 href 匹配）的全部本地日程/待办。
+   *
+   * 用途：日历本在服务器上被删除（同步 REPORT 返回 404）或用户取消勾选时，
+   * 必须在 calKey 序号迁移**之前**先删掉这些行——否则序号收窄后，被移除日历本的
+   * 旧行会与新搬到该序号下的其它日历本行混在同一个 calKey 里（2026-09-29 实测：
+   * 「读书」被服务器删除后重选，其 988 行混进「轻舟」的 calKey）。
+   * 行上自带 href（日历本集合 URL），按 href 删比按 calKey 删更稳——
+   * 历史原因（旧版迁移缺陷）行可能挂在错误的 calKey 下，href 才是行的真实归属。
+   */
+  static async pruneByHrefs(context: common.Context, accId: string, hrefs: string[]): Promise<number> {
+    if (hrefs.length === 0) {
+      return 0;
+    }
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.like('cal_key', `${accId}_%`);
+    predicates.and().in('href', hrefs);
+    return await store.delete(predicates);
+  }
+
+  /**
+   * 清理「href 已不属于任何已选日历本」的残留行（跨账号兜底清扫）。
+   * 典型：服务器删除日历本后，旧版把其残留行混进其它日历本的 calKey（见 pruneByHrefs 注释），
+   * 这类行 calKey 看似有效、pruneOrphanCalKeys 抓不到，但 href 暴露了真实归属。
+   * ⚠️ 跳过 dirty 行（用户未推送的本地修改绝不能被清扫掉）与 local 行。
+   */
+  static async pruneStaleHrefs(context: common.Context, validHrefs: string[]): Promise<number> {
+    if (validHrefs.length === 0) {
+      return 0;
+    }
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.notEqualTo('cal_key', 'local');
+    predicates.and().notEqualTo('href', '');
+    predicates.and().notIn('href', validHrefs);
+    predicates.and().equalTo('dirty', 0);
+    return await store.delete(predicates);
   }
 
   /**

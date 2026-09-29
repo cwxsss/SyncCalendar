@@ -224,6 +224,24 @@ struct EditAccountPage {
       target.calendarColors = selectedItems.map((c: EditCalendarItem): string => c.color);
       LogUtil.write(`编辑账号保存：id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
       // 按 href 求出「旧序号 → 新序号」，迁移已落库日程到正确的 calKey
+      // ⭐ 迁移前必须先删掉被取消勾选日历本的行（按 href）：
+      //    序号收窄后，被取消本的旧 calKey 会被前面位移下来的本"接管"，
+      //    不先删的话旧行会与新主的行混在同一个 calKey 里（2026-09-29 实测：
+      //    服务器删除「读书」后重选，其 988 行混进「轻舟」的 calKey，镜像一直复活幽灵数据）。
+      const newHrefSet: Set<string> = new Set<string>();
+      for (const c of newHrefs) {
+        newHrefSet.add(c);
+      }
+      const removedHrefs: string[] = [];
+      for (const h of oldHrefs) {
+        if (!newHrefSet.has(h)) {
+          removedHrefs.push(h);
+        }
+      }
+      if (removedHrefs.length > 0) {
+        const pruned: number = await EventDb.pruneByHrefs(context, target.id, removedHrefs);
+        LogUtil.write(`编辑账号保存：取消勾选/已失效 ${removedHrefs.length} 个日历本，清理本地日程 ${pruned} 行`);
+      }
       const remapPairs: Array<[string, string]> = [];
       for (let oi: number = 0; oi < oldHrefs.length; oi++) {
         const oldNorm: string = DavClient.normalizeHref(oldHrefs[oi]);
