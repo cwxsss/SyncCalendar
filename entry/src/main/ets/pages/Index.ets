@@ -1,7 +1,7 @@
 // entry/src/main/ets/pages/Index.ets
 // 同步日历主界面：月视图（左右滑动翻月）/ 周视图 / 日视图 / 日程列表
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
-import { curves, mediaquery, router } from '@kit.ArkUI';
+import { curves, display, router, window } from '@kit.ArkUI';
 import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
@@ -54,13 +54,16 @@ struct Index {
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
-  // 宽屏（平板 / 折叠屏展开态）：月视图切左右双栏（左月历 / 右当日日程）。
-  // 判据是窗口**短边**是否达到大屏断点 840vp：短边在旋转时不变（宽高互换），
-  // 所以横竖屏布局天然保持一致 —— 满足"屏幕比例接近 1:1 的设备，横竖屏布局需保持一致"；
-  // 同时不锁死屏幕方向，折叠屏展开态与平板仍可自由横竖屏切换。
+  // 宽屏（双栏：月视图左月历 / 右当日日程，周视图同理）判据，两条满足其一即双栏：
+  //   ① 窗口短边 ≥ 840vp —— 折叠屏展开态 / 平板这类"大屏"。短边在旋转时不变，
+  //      故横竖屏布局天然一致，满足"屏幕比例接近 1:1 的设备，横竖屏布局需保持一致"；
+  //   ② 横屏且宽高比 ≥ 1.5 —— 长条形屏幕（普通手机、折叠屏**合上后的外屏**）。
+  //      这类设备比例远离 1:1，旋转应当切换布局（0.0.2 起即如此，用户已习惯）。
+  //      加比例下限是为了兜底"短边不足 840 但比例接近 1:1"的小方屏：旋转依旧不变。
+  // 2026-09-29 修复：上一版只留了判据 ①，导致 Mate X7 合盖后旋转屏幕布局不再变化。
   @State wideLayout: boolean = false;
-  private widthListener: mediaquery.MediaQueryListener | null = null;
-  private heightListener: mediaquery.MediaQueryListener | null = null;
+  private winObj: window.Window | null = null;
+  private winSizeCallback: ((size: window.Size) => void) | null = null;
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
@@ -147,47 +150,57 @@ struct Index {
       clearInterval(this.nowTimer);
       this.nowTimer = -1;
     }
-    if (this.widthListener !== null) {
-      this.widthListener.off('change');
-      this.widthListener = null;
-    }
-    if (this.heightListener !== null) {
-      this.heightListener.off('change');
-      this.heightListener = null;
+    if (this.winObj !== null && this.winSizeCallback !== null) {
+      try {
+        this.winObj.off('windowSizeChange', this.winSizeCallback);
+      } catch (err) {
+        // 窗口可能已销毁（页面退出），忽略
+      }
+      this.winSizeCallback = null;
+      this.winObj = null;
     }
   }
 
   /**
-   * 宽屏判据：窗口短边 min(宽, 高) 是否达到大屏断点 840vp。
-   * min(w,h) >= 840vp 等价于 (width >= 840vp) && (height >= 840vp)，用两条 mediaquery 合成。
-   *
-   * 为什么用"短边"而不是"是否横屏"：
-   *   1) 旋转时短边不变 → 横竖屏布局自动保持一致。屏幕比例接近 1:1 的设备（折叠屏展开态、
-   *      平板）在旋转时不会出现"单栏 ⇄ 双栏"的布局跳变；
-   *   2) 不锁死屏幕方向，仍支持折叠屏展开态与平板的横竖屏自由切换显示。
+   * 由窗口实际尺寸（px → vp）计算单栏/双栏。判据见 wideLayout 字段注释：
+   * 短边 ≥ 840vp（大屏，旋转不变）或 横屏且宽高比 ≥ 1.5（长条形屏幕，旋转切换）。
    */
-  private applyLayoutMetrics(): void {
-    let wOk: boolean = false;
-    let hOk: boolean = false;
-    if (this.widthListener !== null) {
-      wOk = this.widthListener.matches;
+  private applyLayoutFromWindow(win: window.Window): void {
+    try {
+      const rect = win.getWindowProperties().windowRect;
+      const density: number = display.getDefaultDisplaySync().densityPixels;
+      if (density <= 0) {
+        return;
+      }
+      const w: number = rect.width / density;
+      const h: number = rect.height / density;
+      const shortEdge: number = Math.min(w, h);
+      const ratio: number = h > 0 ? w / h : 1;
+      const wide: boolean = shortEdge >= 840 || (w > h && ratio >= 1.5);
+      LogUtil.write(`窗口尺寸 ${Math.round(w)}x${Math.round(h)}vp（短边 ${Math.round(shortEdge)}，宽高比 ${ratio.toFixed(2)}）→ ${wide ? '双栏' : '单栏'}`);
+      if (wide !== this.wideLayout) {
+        this.wideLayout = wide;
+      }
+    } catch (err) {
+      // 取窗口信息失败时保持现状（罕见：窗口已销毁）
     }
-    if (this.heightListener !== null) {
-      hOk = this.heightListener.matches;
-    }
-    this.wideLayout = wOk && hOk;
   }
 
   private initLayoutListener(): void {
-    const mq = this.getUIContext().getMediaQuery();
-    this.widthListener = mq.matchMediaSync('(width >= 840vp)');
-    this.heightListener = mq.matchMediaSync('(height >= 840vp)');
-    this.applyLayoutMetrics();
-    this.widthListener.on('change', (): void => {
-      this.applyLayoutMetrics();
-    });
-    this.heightListener.on('change', (): void => {
-      this.applyLayoutMetrics();
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    window.getLastWindow(ctx).then((win: window.Window): void => {
+      this.winObj = win;
+      this.applyLayoutFromWindow(win);
+      this.winSizeCallback = (_size: window.Size): void => {
+        // size 参数为 px；重新读取属性并换算（折叠/展开、旋转都会触发）
+        this.applyLayoutFromWindow(win);
+      };
+      win.on('windowSizeChange', this.winSizeCallback);
+    }).catch((err: BusinessError): void => {
+      LogUtil.write(`窗口尺寸监听初始化失败(保持默认单栏)：${err.message}`);
     });
   }
 
