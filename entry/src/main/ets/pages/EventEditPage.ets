@@ -45,14 +45,22 @@ struct EventEditPage {
   @State isExisting: boolean = false;
   @State repeatMode: string = 'none'; // none|daily|workday|weekly|monthly|yearly|custom
   @State reminderList: number[] = []; // 提前提醒分钟数（多选），空 = 不提醒
-  @State pickerShow: boolean = false; // 开始/结束时间选择底部弹层（日期+时间一次选完）
+  /**
+   * ⭐ 底部弹层：**整个页面只能挂一个 `bindSheet`**。
+   *  ArkUI 里同一组件挂多个 bindSheet 时，后一个会覆盖前一个 —— 实测表现就是
+   *  "时间选择框白框一闪而过、什么都没出来"（范围弹层把时间弹层顶掉了）。
+   *  因此这里用一个状态 + 一个模式来复用同一个弹层：
+   *    sheetMode = 'picker' → 日期/时间选择
+   *    sheetMode = 'scope'  → 重复日程范围选择
+   */
+  @State sheetShow: boolean = false;
+  @State sheetMode: string = 'picker';
   @State pickerIsEnd: boolean = false;
   @State pickDate: Date = new Date();
   @State pickHour: number = 9;
   @State pickMin: number = 0;
   /** ⭐ 重复日程编辑范围：'one' 仅此次 / 'future' 此次及以后 / 'all' 全部 */
   @State scope: string = 'all';
-  @State scopeConfirmShow: boolean = false;   // 保存重复日程时的范围选择弹层
   private pendingDelete: boolean = false;     // 该弹层是"保存"还是"删除"流程
   /**
    * ⭐ 载入时的**原始行快照**（不可变）。
@@ -254,7 +262,8 @@ struct EventEditPage {
     this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
     this.pickHour = base.getHours();
     this.pickMin = base.getMinutes();
-    this.pickerShow = true;
+    this.sheetMode = 'picker';
+    this.sheetShow = true;
   }
 
   private applyPicker(): void {
@@ -499,7 +508,8 @@ struct EventEditPage {
     //    永远等不到范围选择弹层（表现为"编辑重复日程没有那三个选项"）。
     if (this.isSeriesOccurrence()) {
       this.pendingDelete = false;
-      this.scopeConfirmShow = true;
+      this.sheetMode = 'scope';
+      this.sheetShow = true;
       LogUtil.write('保存判定：重复系列 → 弹出范围选择');
       return;
     }
@@ -641,7 +651,8 @@ struct EventEditPage {
     // ⭐ 重复日程：先让用户选择"删这一次 / 此次及以后 / 全部"
     if (this.isSeriesOccurrence()) {
       this.pendingDelete = true;
-      this.scopeConfirmShow = true;
+      this.sheetMode = 'scope';
+      this.sheetShow = true;
       return;
     }
     const label: string = this.title.trim() === '' ? '该日程' : `「${this.title.trim()}」`;
@@ -987,18 +998,25 @@ struct EventEditPage {
     .backgroundColor($r('app.color.page_bg'))
     // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .bindSheet($$this.pickerShow, this.dateTimePickerSheet(), {
-      height: 380,
+    // ⚠️ 整个页面**只允许一个 bindSheet**：挂两个时后者会覆盖前者，
+    //    表现为"时间选择框白框一闪而过"（范围弹层顶掉了它）。
+    //    这里用 sheetMode 在同一个弹层里切换内容。
+    .bindSheet($$this.sheetShow, this.bottomSheet(), {
+      height: this.sheetMode === 'scope' ? 320 : 380,
       showClose: false,
       dragBar: true,
       backgroundColor: $r('app.color.card_bg')
     })
-    .bindSheet($$this.scopeConfirmShow, this.scopeSheet(), {
-      height: 300,
-      showClose: false,
-      dragBar: true,
-      backgroundColor: $r('app.color.card_bg')
-    })
+  }
+
+  /** ⭐ 唯一的底部弹层：按 sheetMode 切换显示"时间选择"或"重复范围选择" */
+  @Builder
+  bottomSheet() {
+    if (this.sheetMode === 'scope') {
+      this.scopeSheet()
+    } else {
+      this.dateTimePickerSheet()
+    }
   }
 
   /** ⭐ 重复日程"作用范围"选择弹层：保存/删除前让用户明确改哪几次 */
@@ -1031,7 +1049,7 @@ struct EventEditPage {
         .textAlign(TextAlign.Center)
         .padding({ top: 12, bottom: 16 })
         .onClick(() => {
-          this.scopeConfirmShow = false;
+          this.sheetShow = false;
         })
     }
     .width('100%')
@@ -1058,7 +1076,7 @@ struct EventEditPage {
     .borderRadius(12)
     .backgroundColor($r('app.color.chip_off_bg'))
     .onClick(() => {
-      this.scopeConfirmShow = false;
+      this.sheetShow = false;
       if (this.pendingDelete) {
         this.removeEvent(mode);
       } else {
@@ -1216,7 +1234,7 @@ struct EventEditPage {
         .backgroundColor($r('app.color.brand'))
         .onClick(() => {
           this.applyPicker();
-          this.pickerShow = false;
+          this.sheetShow = false;
         })
     }
     .width('100%')
