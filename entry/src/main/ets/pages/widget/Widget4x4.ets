@@ -110,40 +110,32 @@ struct Widget4x4Card {
     return r >= 0 && Math.floor(r * 24) === h;
   }
 
-  /** 视窗范围：最早日程 ~ 最晚日程结束（今天再并入当前时刻）。
-   *  不做"最大跨度截断" —— 现在可以滑动了，没必要砍掉日程。 */
+  /** 视窗范围：**8:00~18:00 恒显示**；仅当 8 点前 / 18 点后有日程时才向该侧扩展。
+   *  （与 App 内时间轴 TimelineUtil.viewRange 同一口径，避免两处漂移。） */
   private w4Range(): W4Range {
     const rg = new W4Range();
     const bs: TBlock[] = this.parseBlocks();
-    let s: number = -1;
-    let e: number = -1;
+    let s: number = 8;
+    let e: number = 18;
     for (const b of bs) {
       const bh: number = Math.floor(b.topRatio * 24);
       const eh: number = Math.ceil((b.topRatio + b.heightRatio) * 24 - 0.0001);
-      if (s < 0 || bh < s) {
+      if (bh < s) {
         s = bh;
       }
-      if (e < 0 || eh > e) {
+      if (eh > e) {
         e = eh;
       }
     }
     const r: number = this.w4NowR();
     // 只有"今天 + 还有未结束的定时日程"时才把当前小时并入视窗（红线会显示）；
-    // 定时日程已全部结束 → 不并入 → 时间刻度直接截断到最晚日程
+    // 且仅在该侧本来就有日程时才允许继续向外扩（不因当前时刻把 8 点前/18 点后空档重新显示）
     const nh: number = (r >= 0 && !this.w4AllTimedEnded()) ? Math.floor(r * 24) : -1;
-    if (s < 0) {
-      s = nh >= 0 ? nh : 8;
+    if (nh >= 0 && nh < s && s < 8) {
+      s = nh;
     }
-    if (e < 0) {
-      e = nh >= 0 ? nh + 1 : 20;
-    }
-    if (nh >= 0) {
-      if (nh < s) {
-        s = nh;
-      }
-      if (nh + 1 > e) {
-        e = nh + 1;
-      }
+    if (nh >= 0 && nh + 1 > e && e > 18) {
+      e = nh + 1;
     }
     if (s < 0) {
       s = 0;

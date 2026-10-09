@@ -404,6 +404,9 @@ export class SyncEngine {
     const dirty: LocalEvent[] = await EventDb.getDirty(context);
     const mine: LocalEvent[] = dirty.filter((e: LocalEvent): boolean => acc.calendarHrefs.includes(e.href));
     LogUtil.write(`推送本地修改：全部待推送 ${dirty.length} 条，属于账号 id=${acc.id} 的 ${mine.length} 条`);
+    // ⭐ 同一个重复系列（uid + 日历本）在一次推送里只处理一次：整份 .ics（主事件 + 各覆盖实例）
+    //    一起重建后推送，避免"先 PUT 覆盖实例、后 PUT 主事件"互相覆盖。
+    const pushedSeries: Set<string> = new Set<string>();
     for (const e of mine) {
       // 只读日历本：推送必然 403，跳过并保留 dirty（权限恢复后可再推）
       const bookIdx: number = acc.calendarHrefs.indexOf(e.href);
@@ -417,15 +420,17 @@ export class SyncEngine {
         await EventDb.clearDirty(context, e.id, e.etag);
         continue;
       }
-      if (e.recurring && e.rrule === '') {
-        // 重复日程的"单次覆盖实例"（RECURRENCE-ID）推送会破坏服务器整个序列，暂不支持
-        await EventDb.clearDirty(context, e.id, e.etag);
-        LogUtil.write(`推送跳过重复日程实例（标题已脱敏）uid=${e.uid}`);
+      // ⭐ 重复系列（含覆盖实例）：按 uid 取全系列行，重建整份 .ics 后一次性 PUT。
+      //    旧版对"覆盖实例"直接跳过（不推送），导致 App 里的单次改期/删除无法上传到服务器；
+      //    现在支持标准写法（同资源内多 VEVENT + RECURRENCE-ID）。
+      const seriesKey: string = `${e.calKey}|${e.uid}`;
+      if ((e.recurring || e.rrule !== '') && !pushedSeries.has(seriesKey)) {
+        pushedSeries.add(seriesKey);
+        await SyncEngine.pushSeries(context, acc, auth, e);
         continue;
       }
-      if (e.recurring) {
-        // 重复主事件（含 RRULE，含本机新建的重复日程）：整条 PUT 覆盖推送
-        LogUtil.write(`推送重复主事件（标题已脱敏）uid=${e.uid}`);
+      if ((e.recurring || e.rrule !== '') && pushedSeries.has(seriesKey)) {
+        continue; // 该系列已在上面整体推送过
       }
       const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
       try {
@@ -448,6 +453,75 @@ export class SyncEngine {
         const pe = err as Error;
         LogUtil.write(`推送单条失败(跳过，保留待推送)：uid=${e.uid} → ${pe.message}`);
       }
+    }
+  }
+
+  /**
+   * ⭐ 推送一个"重复系列"：取该 uid 下的主事件与全部覆盖实例，合成整份 .ics 后 PUT。
+   *
+   * - 主事件行若被标记删除（deleted）→ 视为"整个系列删除"，DELETE 整个资源并清掉本地该 uid 全部行。
+   * - 否则重建（主事件可能带上了 EXDATE / 被截断的 UNTIL，覆盖实例带 RECURRENCE-ID），
+   *   一次性 PUT 覆盖服务器上的同一资源；成功后清掉本系列全部行的 dirty。
+   */
+  private static async pushSeries(context: common.Context, acc: DavAccount, auth: string,
+    trigger: LocalEvent): Promise<void> {
+    const calKey: string = trigger.calKey;
+    const uid: string = trigger.uid;
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, calKey, uid);
+    // 主事件：优先取带 RRULE 的行；退而取最早一行
+    let master: LocalEvent | null = null;
+    for (const r of rows) {
+      if (r.rrule !== '') {
+        master = r;
+        break;
+      }
+    }
+    if (master === null && rows.length > 0) {
+      master = rows[0];
+    }
+    if (master === null) {
+      return;
+    }
+    const href: string = master.href;
+    const path: string = master.remotePath !== '' ? master.remotePath : encodeURIComponent(uid) + '.ics';
+    const url: string = href.endsWith('/') ? href + path : `${href}/${path}`;
+    // 整个系列被删除（主事件行 deleted）→ DELETE 资源 + 清掉该 uid 全部本地行
+    if (master.deleted) {
+      try {
+        await DavClient.deleteRemote(url, auth);
+      } catch (err) {
+        if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
+          throw err as Error;
+        }
+        LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+        return;
+      }
+      await EventDb.purgeByUid(context, calKey, uid);
+      LogUtil.write(`推送删除重复系列（标题已脱敏）uid=${uid} → ${url}`);
+      return;
+    }
+    const overrides: LocalEvent[] = [];
+    for (const r of rows) {
+      if (r.id !== master.id && r.rrule === '' && r.recurrenceId > 0) {
+        overrides.push(r);
+      }
+    }
+    overrides.sort((a: LocalEvent, b: LocalEvent): number => a.recurrenceId - b.recurrenceId);
+    const ics: string = IcsUtil.buildSeries(master, overrides);
+    try {
+      const etag: string = await DavClient.putEvent(url, auth, ics);
+      // 清掉本系列全部行的 dirty（第一条写回 etag）
+      let first: boolean = true;
+      for (const r of rows) {
+        await EventDb.clearDirty(context, r.id, first ? etag : '');
+        first = false;
+      }
+      LogUtil.write(`推送重复系列（标题已脱敏）uid=${uid} → ${url}（${ics.length} 字节，覆盖实例=${overrides.length}）`);
+    } catch (err) {
+      if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
+        throw err as Error;
+      }
+      LogUtil.write(`推送重复系列失败(保留待推送)：uid=${uid} → ${(err as Error).message}`);
     }
   }
 

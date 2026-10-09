@@ -11,6 +11,15 @@ import { DavClient } from '../common/DavClient';
 import { SyncEngine } from '../common/SyncEngine';
 import { ReminderService } from '../common/ReminderService';
 import { LogUtil } from '../common/LogUtil';
+import { IcsUtil } from '../common/IcsUtil';
+import { RruleUtil } from '../common/RruleUtil';
+
+/** 重复系列某次发生的前后边界（用于 EXDATE / UNTIL / 拆分） */
+class SeriesBounds {
+  thisOcc: number = 0;    // 本次目标的（原始）发生时刻
+  beforeThis: number = 0; // 此次之前一点（截断 UNTIL 用），= 上一次与本次的中点或本次-1s
+  nextOcc: number = 0;    // 下一次发生时刻（0 = 已是最后一次）
+}
 
 /** 可选的日历本 */
 class BookChoice {
@@ -41,6 +50,12 @@ struct EventEditPage {
   @State pickDate: Date = new Date();
   @State pickHour: number = 9;
   @State pickMin: number = 0;
+  /** ⭐ 重复日程编辑范围：'one' 仅此次 / 'future' 此次及以后 / 'all' 全部 */
+  @State scope: string = 'all';
+  @State scopeConfirmShow: boolean = false;   // 保存重复日程时的范围选择弹层
+  private pendingDelete: boolean = false;     // 该弹层是"保存"还是"删除"流程
+  /** 本次编辑的"目标发生时刻"（未改期时 = 原发生时刻；用户改了开始时间 → 新时刻） */
+  private occStartMs: number = 0;
   private event: LocalEvent | null = null;
 
   aboutToAppear(): Promise<void> {
@@ -92,6 +107,8 @@ struct EventEditPage {
         this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders
           : (loaded.reminder > 0 ? [loaded.reminder] : []);
+        // ⭐ 目标发生时刻：优先用 RECURRENCE-ID（覆盖行=被改写的原始时刻），否则用行本身开始时间
+        this.occStartMs = loaded.recurrenceId > 0 ? loaded.recurrenceId : loaded.startTime;
         return;
       }
     }
@@ -226,13 +243,182 @@ struct EventEditPage {
     return true;
   }
 
-  private async save(): Promise<void> {
-    if (this.isSaving || !this.validate()) {
+  /**
+   * 当前编辑的是不是一个"重复系列中的某一次发生"？
+   * - 主事件行（rrule 非空）：用户点开的可能就是第一次发生或其展开实例 → 需要询问范围
+   * - 覆盖实例行（recurring && rrule==''）：明确就是被单独改写过的那一次 → 需要询问范围
+   * 非重复的普通日程返回 false，直接按原逻辑保存/删除。
+   */
+  private isSeriesOccurrence(): boolean {
+    if (this.event === null) {
+      return false;
+    }
+    return this.event.recurring || this.event.rrule !== '';
+  }
+
+  /** 取本系列的主事件行（带 RRULE 的那行；找不到则退回当前行） */
+  private async loadMaster(context: common.Context): Promise<LocalEvent | null> {
+    if (this.event === null) {
+      return null;
+    }
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, this.event.calKey, this.event.uid);
+    for (const r of rows) {
+      if (r.rrule !== '') {
+        return r;
+      }
+    }
+    return this.event;
+  }
+
+  /** 该次发生之前一次发生与之后一次发生的边界（用于 EXDATE / UNTIL / 拆分） */
+  private async seriesBoundaries(context: common.Context): Promise<SeriesBounds> {
+    const b = new SeriesBounds();
+    const occ: number = this.occStartMs;
+    b.thisOcc = occ;
+    const master: LocalEvent | null = await this.loadMaster(context);
+    if (master === null) {
+      b.beforeThis = occ - 1000;
+      b.nextOcc = 0;
+      return b;
+    }
+    const exNums: number[] = [];
+    if (master.exdate !== '') {
+      for (const raw of master.exdate.split(';')) {
+        const t = IcsUtil.parseTime(raw, !raw.includes('T'));
+        if (t !== null) {
+          exNums.push(t.time);
+        }
+      }
+    }
+    // 展开窗口：主事件开始 ~ "该次"之后一年的发生，用于找"前后相邻"的两次
+    const winEnd: number = occ + 366 * 86400000;
+    const occs: number[] = RruleUtil.expand(master.rrule, master.startTime,
+      master.startTime, winEnd, exNums, 3000);
+    let prev: number = 0;
+    let next: number = 0;
+    for (const o of occs) {
+      if (o < occ) {
+        prev = o;
+      } else if (o > occ) {
+        next = o;
+        break;
+      }
+    }
+    b.beforeThis = prev > 0 ? (prev + occ) / 2 : (occ - 1000);
+    b.nextOcc = next;
+    return b;
+  }
+
+  /**
+   * ⭐ 按用户选择的"重复日程编辑范围"落库：
+   * - all    ：原逻辑，直接改这一行（若是覆盖实例则改覆盖行），整系列由 pushSeries 重建
+   * - one    ：单次改写 ——
+   *              · 原行是覆盖实例 → 直接更新它
+   *              · 原行是主事件（用户点开了系列）→ 为主事件加 EXDATE 排除该次，另插一条覆盖行
+   * - future ：此次及以后 —— 先把主事件的 RRULE 截断到"此次之前"（加 UNTIL），
+   *              再把"此次及以后"的内容作为**新的独立系列**（新 uid）插入。
+   */
+  private async applySeriesEdit(context: common.Context, e: LocalEvent, isNew: boolean,
+    scope: string): Promise<void> {
+    const target: LocalEvent = e;
+    if (isNew || !this.isSeriesOccurrence() || this.event === null) {
+      if (isNew) {
+        await EventDb.insertLocal(context, target);
+      } else {
+        await EventDb.updateLocal(context, target);
+      }
       return;
     }
-    // 仅阻止"单次覆盖实例"（RECURRENCE-ID）的修改；重复主事件（含 RRULE）允许编辑
-    if (this.event !== null && this.event.recurring && this.event.rrule === '') {
-      this.statusMsg = '重复日程的单次修改暂不支持，请到服务器端调整重复规则';
+    const cur: LocalEvent = this.event;
+    const bounds: SeriesBounds = await this.seriesBoundaries(context);
+    if (scope === 'all') {
+      // 全部：直接更新当前行。若当前行是某次覆盖实例 → 保留其 recurrenceId 改内容；
+      // 若当前行是主事件 → 更新主事件（DTSTART 若被改 → 整系列平移，符合"修改全部"直觉）
+      await EventDb.updateLocal(context, target);
+      return;
+    }
+    if (scope === 'one') {
+      if (cur.rrule === '' && cur.recurrenceId > 0) {
+        // 已经是覆盖实例 → 直接改它
+        await EventDb.updateLocal(context, target);
+        return;
+      }
+      // 主事件上的"仅此次"：加 EXDATE 排除该次 + 插入覆盖行
+      const master: LocalEvent | null = await this.loadMaster(context);
+      if (master === null) {
+        return;
+      }
+      const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+      const occIcs: string = IcsUtil.fmtIcsTime(bounds.thisOcc, master.isAllDay);
+      if (!exList.includes(occIcs)) {
+        exList.push(occIcs);
+      }
+      await EventDb.setExdate(context, master.id, exList.join(';'));
+      // 覆盖行：uid 同主事件、DTSTART=改到的新时间、RECURRENCE-ID=原始发生时刻
+      const ov = new LocalEvent();
+      ov.uid = master.uid;
+      ov.calKey = master.calKey;
+      ov.href = master.href;
+      ov.remotePath = master.remotePath;
+      ov.title = target.title;
+      ov.description = target.description;
+      ov.location = target.location;
+      ov.startTime = target.startTime;
+      ov.endTime = target.endTime;
+      ov.isAllDay = target.isAllDay;
+      ov.recurring = true;
+      ov.rrule = '';
+      ov.recurrenceId = bounds.thisOcc;
+      ov.reminders = target.reminders;
+      ov.reminder = target.reminder;
+      await EventDb.insertLocal(context, ov);
+      return;
+    }
+    // scope === 'future'
+    const master: LocalEvent | null = await this.loadMaster(context);
+    if (master === null) {
+      return;
+    }
+    // 主事件本身被改期 → "此次及以后"里包含主事件（第一次发生）本身，
+    // 需要让新系列从"改到的时间"开始（否则原 DTSTART 会被原系列继续展开）。
+    const startedAtThis: boolean =
+      (cur.rrule !== '' && Math.abs(cur.startTime - bounds.thisOcc) < 1000);
+    // 1) 先把"此次及以后"的覆盖实例行搬到新 uid（主事件行 recurrenceId=0，不受影响）
+    const newUid: string = `syncal-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    const newPath: string = encodeURIComponent(newUid) + '.ics';
+    await EventDb.reassignOverridesFrom(context, master.calKey, master.uid,
+      newUid, newPath, bounds.thisOcc);
+    // 2) 创建新系列主事件（本次编辑内容）
+    const newMaster = new LocalEvent();
+    newMaster.uid = newUid;
+    newMaster.calKey = master.calKey;
+    newMaster.href = master.href;
+    newMaster.remotePath = newPath;
+    newMaster.title = target.title;
+    newMaster.description = target.description;
+    newMaster.location = target.location;
+    newMaster.startTime = target.startTime;
+    newMaster.endTime = target.endTime;
+    newMaster.isAllDay = target.isAllDay;
+    newMaster.recurring = true;
+    // 新的重复规则：沿用原系列（用户没显式改规则时），保持"此次及以后"的重复节奏
+    newMaster.rrule = target.rrule !== '' ? target.rrule : master.rrule;
+    newMaster.reminders = target.reminders;
+    newMaster.reminder = target.reminder;
+    await EventDb.insertLocal(context, newMaster);
+    // 3) 原主事件系列截断到"此次之前"。
+    //    若主事件本身就代表"此次"（第一次发生且被改期）→ 原系列整个让位给新系列，
+    //    直接标记原主事件删除（pushSeries 会 DELETE 原资源），避免旧时间残留成幽灵日程。
+    if (startedAtThis) {
+      await EventDb.markDeleted(context, master.id);
+    } else {
+      const truncated: string = IcsUtil.rruleWithUntil(master.rrule, bounds.beforeThis);
+      await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
+    }
+  }
+
+  private async save(): Promise<void> {
+    if (this.isSaving || !this.validate()) {
       return;
     }
     // 日程必须落在某个 CalDAV 日历本上（"本机"不再是可选目标）——没选到就直接拦下
@@ -241,6 +427,24 @@ struct EventEditPage {
       this.statusMsg = this.books.length === 0
         ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
         : '请选择要同步到的 CalDAV 日历本';
+      return;
+    }
+    // ⭐ 重复日程：先让用户选择"改这一次 / 此次及以后 / 全部"
+    if (this.isSeriesOccurrence()) {
+      this.pendingDelete = false;
+      this.scopeConfirmShow = true;
+      return;
+    }
+    await this.doSave('all');
+  }
+
+  /** 真正执行保存（scope 已被用户确认） */
+  private async doSave(scope: string): Promise<void> {
+    if (this.isSaving) {
+      return;
+    }
+    const book = this.chosenBook();
+    if (book === null) {
       return;
     }
     this.isSaving = true;
@@ -276,7 +480,8 @@ struct EventEditPage {
         e.remotePath = encodeURIComponent(e.uid) + '.ics';
         await EventDb.insertLocal(context, e);
       } else {
-        await EventDb.updateLocal(context, e);
+        // 重复系列的"仅此次/此次及以后"需要特殊落库（EXDATE / UNTIL / 拆分）
+        await this.applySeriesEdit(context, e, false, scope);
       }
       // 立即推送（尽力而为，失败不打断，下次同步会再推）
       if (e.href !== '') {
@@ -290,7 +495,7 @@ struct EventEditPage {
         await SyncEngine.settleLocalEvents(context);
       }
       // 日志仅记录 uid 与提醒/重复设置，不落盘日程标题（避免隐私内容进入可备份的 sync.log）
-      LogUtil.write(`本地保存日程（标题已脱敏）uid=${e.uid} 提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
+      LogUtil.write(`本地保存日程（标题已脱敏）uid=${e.uid} 范围=${scope} 提醒=${e.reminders.join('/')}分钟 重复=${e.rrule === '' ? '否' : e.rrule}`);
       // 设置了提醒 → 此刻才申请通知权限（用户刚主动使用了依赖通知的功能，
       // 符合《审核指南》7.17"在用户主动点击对应功能时申请"，不随 App 启动自动弹窗）
       if (e.reminders.length > 0) {
@@ -344,6 +549,12 @@ struct EventEditPage {
     if (this.event === null || this.isSaving) {
       return;
     }
+    // ⭐ 重复日程：先让用户选择"删这一次 / 此次及以后 / 全部"
+    if (this.isSeriesOccurrence()) {
+      this.pendingDelete = true;
+      this.scopeConfirmShow = true;
+      return;
+    }
     const label: string = this.title.trim() === '' ? '该日程' : `「${this.title.trim()}」`;
     this.getUIContext().showAlertDialog({
       title: '删除日程',
@@ -358,18 +569,18 @@ struct EventEditPage {
         value: '删除',
         fontColor: $r('app.color.error'),
         action: (): void => {
-          this.removeEvent();
+          this.removeEvent('all');
         }
       }
     });
   }
 
-  private async removeEvent(): Promise<void> {
+  /**
+   * ⭐ 按范围删除：one = 仅此次（EXDATE 排除该次发生）/ future = 此次及以后（截断 RRULE）/
+   * all = 删除全部（DELETE 整个系列资源）。
+   */
+  private async removeEvent(scope: string): Promise<void> {
     if (this.event === null || this.isSaving) {
-      return;
-    }
-    if (this.event !== null && this.event.recurring && this.event.rrule === '') {
-      this.statusMsg = '重复日程的单次删除暂不支持，请到服务器端调整重复规则';
       return;
     }
     this.isSaving = true;
@@ -378,10 +589,46 @@ struct EventEditPage {
       if (context === undefined) {
         return;
       }
-      await EventDb.markDeleted(context, this.event.id);
-      if (this.event.href !== '') {
+      const cur: LocalEvent = this.event;
+      const isSeries: boolean = this.isSeriesOccurrence();
+      if (!isSeries || scope === 'all') {
+        // 普通日程 / 删除全部：整行标记删除（系列删除由 pushSeries 处理成 DELETE 资源）
+        await EventDb.markDeleted(context, cur.id);
+      } else if (scope === 'one') {
+        // 仅此次：主事件加 EXDATE 排除该次；若该行本身就是覆盖实例 → 直接删掉这一行
+        if (cur.rrule === '' && cur.recurrenceId > 0) {
+          await EventDb.markDeleted(context, cur.id);
+        } else {
+          const master: LocalEvent | null = await this.loadMaster(context);
+          if (master !== null) {
+            const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+            const occIcs: string = IcsUtil.fmtIcsTime(this.occStartMs, master.isAllDay);
+            if (!exList.includes(occIcs)) {
+              exList.push(occIcs);
+            }
+            await EventDb.setExdate(context, master.id, exList.join(';'));
+            // 若该次此前被单独改写过（存在覆盖行），一并清掉
+            const rows: LocalEvent[] = await EventDb.queryByUid(context, cur.calKey, cur.uid);
+            for (const r of rows) {
+              if (r.rrule === '' && r.recurrenceId > 0) {
+                await EventDb.markDeleted(context, r.id);
+              }
+            }
+          }
+        }
+      } else {
+        // 此次及以后：主事件 RRULE 截断到"此次之前"；该次及以后的本地行物理删除
+        const master: LocalEvent | null = await this.loadMaster(context);
+        if (master !== null) {
+          const bounds: SeriesBounds = await this.seriesBoundaries(context);
+          const truncated: string = IcsUtil.rruleWithUntil(master.rrule, bounds.beforeThis);
+          await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
+          await EventDb.purgeByUidFrom(context, master.calKey, master.uid, bounds.thisOcc);
+        }
+      }
+      if (cur.href !== '') {
         const accounts: DavAccount[] = await AccountStore.loadAll(context);
-        const acc = accounts.find((a: DavAccount): boolean => a.calendarHrefs.includes(this.event?.href ?? ''));
+        const acc = accounts.find((a: DavAccount): boolean => a.calendarHrefs.includes(cur.href));
         if (acc !== undefined) {
           const auth: string = DavClient.authHeader(acc.username, acc.password);
           await SyncEngine.pushDirtyForAccount(context, acc, auth);
@@ -390,7 +637,7 @@ struct EventEditPage {
         await SyncEngine.settleLocalEvents(context);
       }
       // 日志不落盘日程标题，仅以 uid 追踪
-      LogUtil.write(`本地删除日程（标题已脱敏）uid=${this.event?.uid ?? ''}`);
+      LogUtil.write(`本地删除日程（标题已脱敏）uid=${cur.uid} 范围=${scope}`);
       // 立即刷新提醒（取消已发布但日程已删的提醒）
       try {
         await ReminderService.refreshReminders(context as common.UIAbilityContext);
@@ -656,6 +903,78 @@ struct EventEditPage {
       showClose: false,
       dragBar: true,
       backgroundColor: $r('app.color.card_bg')
+    })
+    .bindSheet($$this.scopeConfirmShow, this.scopeSheet(), {
+      height: 300,
+      showClose: false,
+      dragBar: true,
+      backgroundColor: $r('app.color.card_bg')
+    })
+  }
+
+  /** ⭐ 重复日程"作用范围"选择弹层：保存/删除前让用户明确改哪几次 */
+  @Builder
+  scopeSheet() {
+    Column({ space: 8 }) {
+      Text(this.pendingDelete ? '删除重复日程' : '修改重复日程')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 14, bottom: 4 })
+      Text('这是一个重复日程，请选择作用的范围')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ bottom: 6 })
+      this.scopeOption('one', this.pendingDelete ? '仅删除这一次' : '仅修改这一次',
+        '只影响所选日期的这一次，其余保持不变')
+      this.scopeOption('future', this.pendingDelete ? '删除此次及以后' : '修改此次及以后',
+        '从这一次开始到最后一次都' + (this.pendingDelete ? '删除' : '修改'))
+      this.scopeOption('all', this.pendingDelete ? '删除全部' : '修改全部',
+        '整条重复日程的所有发生都' + (this.pendingDelete ? '删除' : '修改'))
+      Text('取消')
+        .fontSize(15)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12, bottom: 16 })
+        .onClick(() => {
+          this.scopeConfirmShow = false;
+        })
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20 })
+  }
+
+  @Builder
+  scopeOption(mode: string, title: string, desc: string) {
+    Column({ space: 3 }) {
+      Text(title)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      Text(desc)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    .borderRadius(12)
+    .backgroundColor($r('app.color.chip_off_bg'))
+    .onClick(() => {
+      this.scopeConfirmShow = false;
+      if (this.pendingDelete) {
+        this.removeEvent(mode);
+      } else {
+        this.doSave(mode);
+      }
     })
   }
 

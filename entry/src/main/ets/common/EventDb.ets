@@ -625,6 +625,116 @@ export class EventDb {
   }
 
   /**
+   * ⭐ 取同一个 UID 在同一个日历本下的**全部行**（主事件 + 覆盖实例）。
+   * 用于"重复日程的单次/后续/全部"编辑与删除：重建整个系列后一次性推送。
+   * 只返回未删除的行。
+   */
+  static async queryByUid(context: common.Context, calKey: string, uid: string): Promise<LocalEvent[]> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
+    predicates.orderByAsc('id');
+    const rs = await store.query(predicates);
+    const list: LocalEvent[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        const e = EventDb.fromRow(rs);
+        if (!e.deleted) {
+          list.push(e);
+        }
+      }
+    } finally {
+      rs.close();
+    }
+    return list;
+  }
+
+  /** 物理删除某 uid 在某个日历本下的全部行（"删除全部"用） */
+  static async purgeByUid(context: common.Context, calKey: string, uid: string): Promise<number> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
+    return await store.delete(predicates);
+  }
+
+  /** 物理删除某 uid 在某个日历本下、开始时间 >= from 的全部行（"此次及以后"删除用） */
+  static async purgeByUidFrom(context: common.Context, calKey: string, uid: string,
+    from: number): Promise<number> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid)
+      .and().greaterThanOrEqualTo('start_time', from);
+    return await store.delete(predicates);
+  }
+
+  /**
+   * ⭐ 把某个 uid 系列下、开始时间 >= from 的行搬到另一个 uid（"此次及以后"改期的实现）：
+   * 主事件被截断（加 UNTIL）后，剩余部分作为**新的独立系列**存在，否则会被原系列覆盖。
+   * 返回被搬迁的行数。
+   */
+  static async reassignUidFrom(context: common.Context, calKey: string, oldUid: string,
+    newUid: string, newPath: string, from: number): Promise<number> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'uid': newUid,
+      'remote_path': newPath,
+      'etag': '',
+      'dirty': 1
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', oldUid)
+      .and().greaterThanOrEqualTo('start_time', from);
+    return await store.update(bucket, predicates);
+  }
+
+  /** 给单行写入 EXDATE（"仅删除这一次"→ 排除主事件的该次发生） */
+  static async setExdate(context: common.Context, id: number, exdate: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = { 'exdate': exdate, 'dirty': 1 };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  /**
+   * ⭐ 把某 uid 系列下、**RECURRENCE-ID >= from** 的覆盖实例行搬到新 uid
+   * （"此次及以后"拆分系列时用；主事件行 recurrenceId=0，天然不会被命中）。
+   */
+  static async reassignOverridesFrom(context: common.Context, calKey: string, oldUid: string,
+    newUid: string, newPath: string, from: number): Promise<number> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'uid': newUid,
+      'remote_path': newPath,
+      'etag': '',
+      'dirty': 1
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', oldUid)
+      .and().greaterThanOrEqualTo('recurrence_id', from);
+    return await store.update(bucket, predicates);
+  }
+
+  /**
+   * ⭐ 给某个 uid 系列（指定日历本）的主事件写入 RRULE（"此次及以后"截断/改期时用）。
+   * 只作用于有 RRULE 的主事件行。
+   */
+  static async setRruleForUid(context: common.Context, calKey: string, uid: string,
+    rrule: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = { 'rrule': rrule, 'dirty': 1 };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid)
+      .and().notEqualTo('rrule', '');
+    await store.update(bucket, predicates);
+  }
+
+  /** 新增一行（供拆分系列时插入新主事件；已置 dirty） */
+  static async insertRow(context: common.Context, e: LocalEvent): Promise<number> {
+    return await EventDb.insertLocal(context, e);
+  }
+
+  /**
    * 清理孤儿行：calKey 既不是本机日历（local）、也不属于任何现有账号（accId_ 前缀）的历史残留数据。
    * 典型来源：账号删除重建、日历重选后序号变化遗留的旧 calKey（如 `_13`、`acc1789274273124_0_13`）。
    * 这些行会参与重复日程的 override 排除计算，导致重复日程的第一次发生不显示，必须物理删除。

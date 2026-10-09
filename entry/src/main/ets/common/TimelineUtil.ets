@@ -272,38 +272,43 @@ export class TimelineUtil {
     return out;
   }
 
+  /** 时间轴"基准可视区"的起止小时：8:00 ~ 18:00 **恒定显示**（与用户确认）。 */
+  static readonly BASE_START_HOUR: number = 8;
+  static readonly BASE_END_HOUR: number = 18;
+
   /**
-   * 计算"需要显示的小时区间"（视窗截断）：
-   *  - 起点 = 最早日程所在整点（无日程默认 8 点），终点 = 最晚日程结束时刻向上取整（无日程默认 20 点）
-   *  - includeNowHour=true（今天）时，把当前时刻所在小时并进来，保证红线可见
+   * 计算"需要显示的小时区间"（视窗截断）。规则（与用户确认）：
+   *  - **8:00 ~ 18:00 恒定显示**（即使当天没有任何日程，也至少显示这一段，避免"只有一条日程
+   *    就只显示那 1 小时"的奇怪观感）；
+   *  - 若某天在 **8 点之前**有日程 → 起点向前扩到最早日程所在整点；否则 8 点之前的刻度不显示；
+   *  - 若某天在 **18 点之后**有日程 → 终点向后扩到最晚日程结束时刻向上取整；否则 18 点之后的刻度不显示。
+   *  - includeNowHour=true（今天）时，把当前时刻所在小时并进来以保证红线可见 —— 但**仍遵守上面的
+   *    "无日程则不显示"约束**：只有当该侧本来就有日程（起点已 <8 / 终点已 >18）时才允许继续向外扩，
+   *    否则不会因为"当前时刻"而把 8 点前 / 18 点后的空档重新显示出来。
    * 视图渲染与"列表视图按天计算卡片高度"共用这一份逻辑，避免两边算法漂移。
    */
   static viewRange(blocks: TimelineBlock[], includeNowHour: boolean, nowMs: number): ViewRange {
     const rg = new ViewRange();
-    let s: number = -1;
-    let e: number = -1;
+    // 基准：8~18 恒显示
+    let s: number = TimelineUtil.BASE_START_HOUR;
+    let e: number = TimelineUtil.BASE_END_HOUR;
     for (const b of blocks) {
       const bh: number = Math.floor(b.topRatio * 24);
       const eh: number = Math.ceil((b.topRatio + b.heightRatio) * 24 - 0.0001);
-      if (s < 0 || bh < s) {
+      if (bh < s) {
         s = bh;
       }
-      if (e < 0 || eh > e) {
+      if (eh > e) {
         e = eh;
       }
     }
-    if (s < 0) {
-      s = 8;
-    }
-    if (e < 0) {
-      e = 20;
-    }
     if (includeNowHour) {
       const nh: number = Math.floor(TimelineUtil.nowRatio(nowMs) * 24);
-      if (nh < s) {
+      // 只有"该侧本来就有日程"时才允许把当前小时并进来（否则会违反"8 点前/18 点后无日程则不显示"）
+      if (nh < s && s < TimelineUtil.BASE_START_HOUR) {
         s = nh;
       }
-      if (nh + 1 > e) {
+      if (nh + 1 > e && e > TimelineUtil.BASE_END_HOUR) {
         e = nh + 1;
       }
     }

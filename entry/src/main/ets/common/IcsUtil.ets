@@ -236,6 +236,42 @@ export class IcsUtil {
    * 若线上出现"标题被截断"反馈，需在此补 escapeIcsText()。
    */
   static build(e: LocalEvent): string {
+    const now: string = IcsUtil.fmtUtcNow();
+    return 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Calendar//CN\r\n' +
+      'CALSCALE:GREGORIAN\r\n' +
+      IcsUtil.vevent(e, now) +
+      'END:VCALENDAR\r\n';
+  }
+
+  /**
+   * ⭐ 构建"一个重复系列"的完整资源：**主事件 + 全部覆盖实例**放在同一个 VCALENDAR 里。
+   *
+   * 为什么必须合在一起：CalDAV 里"重复日程的某一次发生被单独修改"的标准表示法是
+   * 在**同一个 .ics 资源**里放第二个 VEVENT，带 `RECURRENCE-ID` 指向被覆盖的那一次。
+   * 早先 App 直接把每个实例当独立资源 PUT，会破坏服务器上的整个系列，所以那时干脆
+   * 禁止了单次修改（见旧版"重复日程的单次修改暂不支持"）。现在改为重建整份系列后推送。
+   *
+   * @param master 主事件行（含 RRULE / EXDATE）
+   * @param overrides 覆盖实例行（rrule 为空、recurrenceId > 0），已排除 deleted
+   */
+  static buildSeries(master: LocalEvent, overrides: LocalEvent[]): string {
+    const now: string = IcsUtil.fmtUtcNow();
+    let out: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Calendar//CN\r\n' +
+      'CALSCALE:GREGORIAN\r\n' +
+      IcsUtil.vevent(master, now);
+    for (const ov of overrides) {
+      out += IcsUtil.vevent(ov, now);
+    }
+    out += 'END:VCALENDAR\r\n';
+    return out;
+  }
+
+  /** 单个 VEVENT 块（主事件带 RRULE/EXDATE，覆盖行带 RECURRENCE-ID） */
+  private static vevent(e: LocalEvent, now: string): string {
     const pad = (n: number): string => n < 10 ? '0' + n : String(n);
     const fmtUtc = (ms: number): string => {
       const d = new Date(ms);
@@ -256,24 +292,88 @@ export class IcsUtil {
       dtstart = 'DTSTART:' + fmtUtc(e.startTime);
       dtend = 'DTEND:' + fmtUtc(e.endTime);
     }
-    const now: string = fmtUtc(Date.now());
-    return 'BEGIN:VCALENDAR\r\n' +
-      'VERSION:2.0\r\n' +
-      'PRODID:-//SyncCalendar//Calendar//CN\r\n' +
-      'CALSCALE:GREGORIAN\r\n' +
-      'BEGIN:VEVENT\r\n' +
+    // ⭐ 覆盖实例（RECURRENCE-ID 行）：必须写出 RECURRENCE-ID，否则服务器无法把它
+    //    关联到主事件的哪一次发生 → 要么整系列被破坏，要么原时间残留成"幽灵日程"。
+    let recId: string = '';
+    if (e.rrule === '' && e.recurrenceId > 0) {
+      recId = e.isAllDay
+        ? `RECURRENCE-ID;VALUE=DATE:${fmtDate(e.recurrenceId)}\r\n`
+        : `RECURRENCE-ID:${fmtUtc(e.recurrenceId)}\r\n`;
+    }
+    // ⭐ EXDATE：主事件排除掉的若干次发生（"仅删除这一次"就是往这里加）
+    let exdate: string = '';
+    if (e.exdate !== '') {
+      const vals: string[] = [];
+      for (const raw of e.exdate.split(';')) {
+        const t = IcsUtil.parseTime(raw, !raw.includes('T'));
+        if (t !== null) {
+          vals.push(t.allDay ? fmtDate(t.time) : fmtUtc(t.time));
+        }
+      }
+      if (vals.length > 0) {
+        exdate = e.isAllDay
+          ? `EXDATE;VALUE=DATE:${vals.join(',')}\r\n`
+          : `EXDATE:${vals.join(',')}\r\n`;
+      }
+    }
+    return 'BEGIN:VEVENT\r\n' +
       `UID:${e.uid}\r\n` +
       `DTSTAMP:${now}\r\n` +
       `${dtstart}\r\n` +
       `${dtend}\r\n` +
+      recId +
       (e.rrule !== '' ? `RRULE:${e.rrule}\r\n` : '') +
+      exdate +
       `SUMMARY:${IcsUtil.escape(e.title)}\r\n` +
       (e.location !== '' ? `LOCATION:${IcsUtil.escape(e.location)}\r\n` : '') +
       (e.description !== '' ? `DESCRIPTION:${IcsUtil.escape(e.description)}\r\n` : '') +
       IcsUtil.valarms(e.reminders.length > 0 ? e.reminders
         : (e.reminder > 0 ? [e.reminder] : [])) +
-      'END:VEVENT\r\n' +
-      'END:VCALENDAR\r\n';
+      'END:VEVENT\r\n';
+  }
+
+  /** 当前时刻的 UTC 形式（DTSTAMP） */
+  private static fmtUtcNow(): string {
+    const pad = (n: number): string => n < 10 ? '0' + n : String(n);
+    const d = new Date();
+    return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+      `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+  }
+
+  /**
+   * 毫秒时间戳 → 用于 EXDATE / RECURRENCE-ID 的 ICS 时间串。
+   * @param dateOnly 全天日程用 `YYYYMMDD`，否则用 UTC 的 `YYYYMMDDTHHMMSSZ`
+   */
+  static fmtIcsTime(ms: number, dateOnly: boolean): string {
+    const pad = (n: number): string => n < 10 ? '0' + n : String(n);
+    const d = new Date(ms);
+    if (dateOnly) {
+      return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+    }
+    return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+      `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+  }
+
+  /**
+   * ⭐ 给 RRULE 加上/替换 UNTIL（"此次及以后"改期/删除时，把原系列截断到指定时刻之前）。
+   * - 会**移除 COUNT**（RFC 5545：UNTIL 与 COUNT 不可同时出现）
+   * - UNTIL 用 UTC 形式；`untilMs` 一般是"该次发生的开始时刻 − 1 秒"
+   */
+  static rruleWithUntil(rrule: string, untilMs: number): string {
+    const pad = (n: number): string => n < 10 ? '0' + n : String(n);
+    const d = new Date(untilMs);
+    const until: string = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+      `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+    const kept: string[] = [];
+    for (const part of rrule.split(';')) {
+      const k: string = part.split('=')[0].trim().toUpperCase();
+      if (k === 'UNTIL' || k === 'COUNT' || k === '') {
+        continue;
+      }
+      kept.push(part);
+    }
+    kept.push(`UNTIL=${until}`);
+    return kept.join(';');
   }
 
   /** 由提醒分钟数组生成多个 VALARM（已规范化去重） */
