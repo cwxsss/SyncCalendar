@@ -44,6 +44,19 @@ struct EventEditPage {
   @State statusMsg: string = '';
   @State isExisting: boolean = false;
   @State repeatMode: string = 'none'; // none|daily|workday|weekly|monthly|yearly|custom
+  /**
+   * ⭐ 重复的"结束条件"（新建与编辑都可用）：
+   *   never  永不结束
+   *   until  重复到某个日期为止（界面上选具体日期）
+   *   count  重复固定次数
+   */
+  @State repeatEnd: string = 'never';
+  @State repeatUntil: number = 0;   // 截止日期（当天 0 点毫秒）
+  @State repeatCount: number = 10;  // 重复次数
+  /** ⭐ 编辑时载入的原始 RRULE：用于判断"新建的结束条件是否会覆盖已有规则" */
+  private originalRrule: string = '';
+  /** ⭐ 发生时刻是否由调用方传入（true=用户点的是某一次，false=用户点的是主事件本身） */
+  private occProvided: boolean = false;
   @State reminderList: number[] = []; // 提前提醒分钟数（多选），空 = 不提醒
   /**
    * ⭐ 底部弹层：**整个页面只能挂一个 `bindSheet`**。
@@ -106,13 +119,18 @@ struct EventEditPage {
       const loaded = await EventDb.getById(context, pendingId);
       if (loaded !== null) {
         this.event = loaded;
-        // ⭐ 原始行快照：series 范围计算必须用"载入时"的值（doSave 会改写 this.event）
+        // ⭐ 原始行快照：series 范围计算必须用"载入时"的值（doSave 会改写 this.event）。
+        //    ⚠️ 必须是**完整**拷贝 —— 曾经漏了 title/description/location/reminders，
+        //    导致"只改这一次"时把这一行还原成空标题（BUG：已有标题被删没）。
         const snap = new LocalEvent();
         snap.id = loaded.id;
         snap.uid = loaded.uid;
         snap.calKey = loaded.calKey;
         snap.href = loaded.href;
         snap.remotePath = loaded.remotePath;
+        snap.title = loaded.title;
+        snap.description = loaded.description;
+        snap.location = loaded.location;
         snap.startTime = loaded.startTime;
         snap.endTime = loaded.endTime;
         snap.recurrenceId = loaded.recurrenceId;
@@ -121,7 +139,10 @@ struct EventEditPage {
         snap.isAllDay = loaded.isAllDay;
         snap.recurring = loaded.recurring;
         snap.deleted = loaded.deleted;
+        snap.reminder = loaded.reminder;
+        snap.reminders = loaded.reminders.slice();
         this.original = snap;
+        this.originalRrule = loaded.rrule;
         this.isExisting = true;
         this.title = loaded.title;
         this.location = loaded.location;
@@ -152,10 +173,32 @@ struct EventEditPage {
           this.statusMsg = '这条日程原先只存在「本机」（不同步）。请选一个 CalDAV 日历本，保存后即会同步到服务器。';
         }
         this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
+        this.parseRepeatEnd(loaded.rrule);
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders
           : (loaded.reminder > 0 ? [loaded.reminder] : []);
-        // ⭐ 目标发生时刻：优先用 RECURRENCE-ID（覆盖行=被改写的原始时刻），否则用行本身开始时间
-        this.occStartMs = loaded.recurrenceId > 0 ? loaded.recurrenceId : loaded.startTime;
+        // ⭐ 目标发生时刻（"仅这一次"要排除/覆盖的那一次）：
+        //  ① 覆盖行 → 用 RECURRENCE-ID（原始发生时刻）
+        //  ② 调用方显式传入了"用户点的是哪一次" → 用它（列表里点开的某次发生，行的 id 是主事件 id，
+        //     若不传，就会把"主事件的第一次发生"当成目标 → 表现出来就是"选仅这一次却改了全部"）
+        //  ③ 兜底才用行本身的开始时间
+        const occFromCaller: number | undefined = AppStorage.get<number>('pendingOccurrenceTs');
+        if (loaded.recurrenceId > 0) {
+          this.occStartMs = loaded.recurrenceId;
+        } else if (occFromCaller !== undefined && occFromCaller > 0) {
+          this.occStartMs = occFromCaller;
+          this.occProvided = true;
+        } else {
+          this.occStartMs = loaded.startTime;
+        }
+        // ⭐ 用户点开的是"某一次发生"时，编辑页必须显示**那一次**的实际时间，
+        //    而不是重复主事件第一次发生的时间（否则时间框显示错误，用户改时间也改错基准）。
+        if (this.occProvided && this.occStartMs > 0) {
+          const dur: number = Math.max(0, loaded.endTime - loaded.startTime);
+          this.startMs = this.occStartMs;
+          this.endMs = this.allDay ? this.occStartMs + 86399999 : this.occStartMs + dur;
+        }
+        // 消费后立即清掉，避免影响下一次新建/编辑
+        AppStorage.setOrCreate<number>('pendingOccurrenceTs', 0);
         return;
       }
     }
@@ -240,6 +283,106 @@ struct EventEditPage {
       return 'yearly';
     }
     return 'custom';
+  }
+
+  /** 从已有 RRULE 解析出"结束条件"（用于编辑时回显"重复到某天/共几次"） */
+  private parseRepeatEnd(rrule: string): void {
+    if (rrule === '') {
+      this.repeatEnd = 'never';
+      return;
+    }
+    const u: string = rrule.toUpperCase();
+    // COUNT=n
+    const cm = /COUNT=(\d+)/.exec(u);
+    if (cm !== null) {
+      this.repeatEnd = 'count';
+      this.repeatCount = Number(cm[1]) > 0 ? Number(cm[1]) : 10;
+      return;
+    }
+    // UNTIL=yyyymmddThhmmssZ 或 yyyymmdd
+    const um = /UNTIL=(\d{8})(T\d{6}Z?)?/.exec(u);
+    if (um !== null) {
+      this.repeatEnd = 'until';
+      const y: number = Number(um[1].substring(0, 4));
+      const mo: number = Number(um[1].substring(4, 6));
+      const d: number = Number(um[1].substring(6, 8));
+      this.repeatUntil = new Date(y, mo - 1, d).getTime();
+      return;
+    }
+    this.repeatEnd = 'never';
+  }
+
+  /** 把当前"重复模式 + 结束条件"合成 RRULE 字符串 */
+  private buildRrule(): string {
+    const base: string = this.rruleForMode(this.repeatMode);
+    if (base === '' || this.repeatMode === 'custom') {
+      return ''; // custom 由调用方保留原规则
+    }
+    if (this.repeatEnd === 'count') {
+      return `${base};COUNT=${Math.max(1, Math.round(this.repeatCount))}`;
+    }
+    if (this.repeatEnd === 'until' && this.repeatUntil > 0) {
+      // UNTIL 用"截止日当天 23:59:59"（本地时区），避免把当天那次排除掉
+      const d = new Date(this.repeatUntil);
+      const end: number = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59).getTime();
+      return `${base};UNTIL=${IcsUtil.fmtIcsTime(end, false)}`;
+    }
+    return base; // 永不结束
+  }
+
+  /**
+   * ⭐ 编辑既有重复日程时：用户在界面上调整了"结束条件"才覆盖原 RRULE；
+   * 没动过就原样保留（防止把服务器上的复杂规则简单化掉）。
+   */
+  private effectiveRrule(): string {
+    if (this.repeatMode === 'custom') {
+      return this.originalRrule;
+    }
+    const built: string = this.buildRrule();
+    if (this.originalRrule === '') {
+      return built;
+    }
+    // 原有规则的 FREQ 与当前模式一致、且用户没有显式改结束条件 → 保留原规则
+    const freqOf = (m: string): string => this.modeFromRrule(m);
+    if (freqOf(this.originalRrule) === this.repeatMode
+      && this.repeatEndMatches(this.originalRrule)) {
+      return this.originalRrule;
+    }
+    return built;
+  }
+
+  /** 原 RRULE 的结束条件是否与界面当前选择一致 */
+  private repeatEndMatches(rrule: string): boolean {
+    const u: string = rrule.toUpperCase();
+    if (this.repeatEnd === 'never') {
+      return !u.includes('COUNT=') && !u.includes('UNTIL=');
+    }
+    if (this.repeatEnd === 'count') {
+      const m = /COUNT=(\d+)/.exec(u);
+      return m !== null && Number(m[1]) === Math.round(this.repeatCount);
+    }
+    if (this.repeatEnd === 'until') {
+      const m = /UNTIL=(\d{8})/.exec(u);
+      if (m === null) {
+        return false;
+      }
+      const y = Number(m[1].substring(0, 4));
+      const mo = Number(m[1].substring(4, 6));
+      const d = Number(m[1].substring(6, 8));
+      const a = new Date(y, mo - 1, d);
+      const b = new Date(this.repeatUntil);
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
+        && a.getDate() === b.getDate();
+    }
+    return false;
+  }
+
+  /** 打开"重复结束条件"日期选择弹层（复用唯一的底部弹层） */
+  private openRepeatUntilPicker(): void {
+    const base = this.repeatUntil > 0 ? new Date(this.repeatUntil) : new Date(this.startMs);
+    this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+    this.sheetMode = 'repeatEnd';
+    this.sheetShow = true;
   }
 
   private reminderLabel(m: number): string {
@@ -336,13 +479,17 @@ struct EventEditPage {
     return src;
   }
 
-  /** 该次发生之前一次发生与之后一次发生的边界（用于 EXDATE / UNTIL / 拆分） */
+  /** 该次发生之前一次发生与之后一次发生的边界（用于 EXDATE / UNTIL / 拆分）。
+   *  ⭐ 会用展开结果**校正 occStartMs**：调用方传来的时刻可能带秒/毫秒偏差
+   *  （列表里点开的那次发生时间是精确的，但主事件运行到卡片等路径可能有偏差），
+   *  必须吸附到"真实存在的那一次"，否则 EXDATE 写出的时刻匹配不上任何发生 →
+   *  表现为"选了仅这一次，却把所有次都改了"。 */
   private async seriesBoundaries(context: common.Context): Promise<SeriesBounds> {
     const b = new SeriesBounds();
-    const occ: number = this.occStartMs;
+    let occ: number = this.occStartMs;
     b.thisOcc = occ;
     const master: LocalEvent | null = await this.loadMaster(context);
-    if (master === null) {
+    if (master === null || master.rrule === '') {
       b.beforeThis = occ - 1000;
       b.nextOcc = 0;
       return b;
@@ -356,10 +503,30 @@ struct EventEditPage {
         }
       }
     }
-    // 展开窗口：主事件开始 ~ "该次"之后一年的发生，用于找"前后相邻"的两次
-    const winEnd: number = occ + 366 * 86400000;
+    // 展开窗口：主事件开始 ~ "该次"之后一年（覆盖主事件的首次发生）
+    const winEnd: number = Math.max(occ, master.startTime) + 366 * 86400000;
     const occs: number[] = RruleUtil.expand(master.rrule, master.startTime,
       master.startTime, winEnd, exNums, 3000);
+    // ⭐ 吸附：找与 occ 最接近的那一次真实发生（容差 12 小时，足以跨时区/跨日误差）
+    let snapped: number = 0;
+    let bestDiff: number = -1;
+    for (const o of occs) {
+      const d: number = Math.abs(o - occ);
+      if (bestDiff < 0 || d < bestDiff) {
+        bestDiff = d;
+        snapped = o;
+      }
+    }
+    if (snapped > 0 && bestDiff <= 12 * 3600000) {
+      occ = snapped;
+      b.thisOcc = snapped;
+      this.occStartMs = snapped; // 回写，保证后续 EXDATE / 覆盖行用同一时刻
+    } else if (!this.occProvided && master.startTime > 0) {
+      // 没有可信的"点选时刻"时，退回主事件的首次发生（至少是真实存在的一次）
+      occ = master.startTime;
+      b.thisOcc = occ;
+      this.occStartMs = occ;
+    }
     let prev: number = 0;
     let next: number = 0;
     for (const o of occs) {
@@ -390,6 +557,10 @@ struct EventEditPage {
     // ⚠️ 用**原始快照**判据：doSave 已把 e（= this.event）的 calKey/href/startTime 改成新值，
     //    直接用 this.event 会把"改后的日期/日历本"当成原系列，导致 EXDATE / UNTIL 算错。
     const cur: LocalEvent | null = this.original;
+    // 用户点开的是"某一次发生"（occProvided=true）时，list/周视图里的行 id 是**主事件 id**，
+    // 所以"改全部"也必须给用户明确的确认——但语义上就是改整条系列：
+    //   · 点开的是主事件行本身（occProvided=false）→ 直接改这一行就是改整个系列，无需特殊处理
+    //   · 点开的是某一次发生 且选了"全部" → 把改动写到主事件行上（整系列平移/改名）
     if (isNew || cur === null || !this.isSeriesOccurrence()) {
       if (isNew) {
         await EventDb.insertLocal(context, target);
@@ -400,8 +571,24 @@ struct EventEditPage {
     }
     const bounds: SeriesBounds = await this.seriesBoundaries(context);
     if (scope === 'all') {
-      // 全部：直接更新当前行。若当前行是某次覆盖实例 → 保留其 recurrenceId 改内容；
-      // 若当前行是主事件 → 更新主事件（DTSTART 若被改 → 整系列平移，符合"修改全部"直觉）
+      // 全部：改到**主事件行**上（整系列一起改）。
+      // ⚠️ 不能直接 updateLocal(target)：target 是"用户点开的那一行"，
+      //    当用户点的是某次发生、而该行其实是主事件行时没问题；
+      //    但若这一行是覆盖实例（rrule=''），把整系列的属性写进覆盖行只会改到那一次。
+      const masterForAll: LocalEvent | null = await this.loadMaster(context);
+      if (masterForAll !== null && masterForAll.rrule !== '') {
+        // 把编辑内容写到主事件行（保留主事件的 uid / rrule / exdate）
+        masterForAll.title = target.title;
+        masterForAll.description = target.description;
+        masterForAll.location = target.location;
+        masterForAll.startTime = target.startTime;
+        masterForAll.endTime = target.endTime;
+        masterForAll.isAllDay = target.isAllDay;
+        masterForAll.reminders = target.reminders;
+        masterForAll.reminder = target.reminder;
+        await EventDb.updateLocal(context, masterForAll);
+        return;
+      }
       await EventDb.updateLocal(context, target);
       return;
     }
@@ -417,17 +604,18 @@ struct EventEditPage {
       if (master === null) {
         return;
       }
-      const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+      // ⚠️ **顺序很重要**：先把主事件行还原为原值（用户在编辑页改的标题/时间只属于"这一次"，
+      //    不能污染主事件），**再**写 EXDATE。反过来会被还原操作覆盖掉 EXDATE
+      //    （快照里存的是旧的 exdate），导致排除失效 → 原时间残留一条、看起来"没删掉/改错了"。
+      if (cur.rrule !== '' && master.id === cur.id) {
+        await EventDb.restoreRowById(context, master.id, cur);
+      }
+      const exList: string[] = cur.exdate === '' ? [] : cur.exdate.split(';');
       const occIcs: string = IcsUtil.fmtIcsTime(bounds.thisOcc, master.isAllDay);
       if (!exList.includes(occIcs)) {
         exList.push(occIcs);
       }
       await EventDb.setExdate(context, master.id, exList.join(';'));
-      // ⚠️ 主事件行本身的内容保持不变（"仅这一次"只影响这一次）；
-      //    如果用户是在主事件行上改的，需要把主事件改回原值（target 已被写成新时间）
-      if (cur.rrule !== '') {
-        await EventDb.restoreRowById(context, master.id, cur);
-      }
       // 覆盖行：uid 同主事件、DTSTART=改到的新时间、RECURRENCE-ID=原始发生时刻
       const ov = new LocalEvent();
       ov.uid = master.uid;
@@ -455,6 +643,8 @@ struct EventEditPage {
     }
     // 主事件本身被改期 → "此次及以后"里包含主事件（第一次发生）本身，
     // 需要让新系列从"改到的时间"开始（否则原 DTSTART 会被原系列继续展开）。
+    // ⚠️ 判据要用**原始主事件的开始时间**（cur.startTime 是"载入时的行时间"，
+    //    对主事件行而言就是它的第一次发生时刻）。
     const startedAtThis: boolean =
       (cur.rrule !== '' && Math.abs(cur.startTime - bounds.thisOcc) < 1000);
     // 1) 先把"此次及以后"的覆盖实例行搬到新 uid（主事件行 recurrenceId=0，不受影响）
@@ -475,7 +665,8 @@ struct EventEditPage {
     newMaster.endTime = target.endTime;
     newMaster.isAllDay = target.isAllDay;
     newMaster.recurring = true;
-    // 新的重复规则：沿用原系列（用户没显式改规则时），保持"此次及以后"的重复节奏
+    // 新的重复规则：优先用界面上设置的（含"重复到某天 / 共几次"），
+    // 否则沿用原系列的重复节奏，保持"此次及以后"不变
     newMaster.rrule = target.rrule !== '' ? target.rrule : master.rrule;
     newMaster.reminders = target.reminders;
     newMaster.reminder = target.reminder;
@@ -486,13 +677,13 @@ struct EventEditPage {
     if (startedAtThis) {
       await EventDb.markDeleted(context, master.id);
     } else {
-      const truncated: string = IcsUtil.rruleWithUntil(master.rrule, bounds.beforeThis);
-      await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
-      // ⚠️ 若用户编辑的正是"主事件这一行"，target（= this.event）已被 doSave 写成新值，
-      //    而它属于被截断的旧系列 → 必须还原为原值，否则旧系列末尾会多出一条被改过的幽灵行。
-      if (cur.rrule !== '') {
+      // ⚠️ 顺序：先还原主事件行（本次编辑只属于"此次及以后"的新系列，
+      //    不能留在原主事件上），**再**截断 RRULE；反过来会被还原覆盖掉截断结果。
+      if (cur.rrule !== '' && master.id === cur.id) {
         await EventDb.restoreRowById(context, master.id, cur);
       }
+      const truncated: string = IcsUtil.rruleWithUntil(master.rrule, bounds.beforeThis);
+      await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
     }
   }
 
@@ -564,13 +755,8 @@ struct EventEditPage {
       // 一律写入所选 CalDAV 日历本（新建/编辑/从「本机」迁过来都一样）
       e.calKey = book.calKey;
       e.href = book.href;
-      // 重复规则与提醒
-      if (this.repeatMode === 'custom') {
-        // 无法识别的既有规则原样保留
-        e.rrule = this.event !== null ? this.event.rrule : '';
-      } else {
-        e.rrule = this.rruleForMode(this.repeatMode);
-      }
+      // 重复规则与提醒（含"重复到某天 / 共几次"的结束条件）
+      e.rrule = this.effectiveRrule();
       e.recurring = e.rrule !== '';
       e.reminders = EventDb.normalizeReminders(this.reminderList);
       e.reminder = e.reminders.length > 0 ? e.reminders[0] : 0;
@@ -845,6 +1031,71 @@ struct EventEditPage {
               }
             }
             .width('100%')
+            // ⭐ 结束条件：永不结束 / 重复到某天 / 共重复几次
+            //    （新建与编辑都可用；编辑时会回显服务器上已有的 COUNT / UNTIL）
+            if (this.repeatMode !== 'none' && this.repeatMode !== 'custom') {
+              Divider().color($r('app.color.shadow_color'))
+              Text('结束条件')
+                .fontSize(14)
+                .fontColor($r('app.color.text_secondary'))
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+                this.repeatEndChip('never', '永不结束')
+                this.repeatEndChip('until', '重复到某天')
+                this.repeatEndChip('count', '共几次')
+              }
+              .width('100%')
+              if (this.repeatEnd === 'until') {
+                Row({ space: 8 }) {
+                  Text('截止日期')
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_secondary'))
+                  Text(this.repeatUntil > 0 ? this.fmtDate(this.repeatUntil) : '请选择')
+                    .fontSize(15)
+                    .fontColor($r('app.color.brand'))
+                    .layoutWeight(1)
+                  Text('›')
+                    .fontSize(16)
+                    .fontColor($r('app.color.text_hint'))
+                }
+                .width('100%')
+                .padding({ left: 8, right: 8, top: 10, bottom: 10 })
+                .onClick(() => {
+                  this.openRepeatUntilPicker();
+                })
+              }
+              if (this.repeatEnd === 'count') {
+                Row({ space: 8 }) {
+                  Text('重复次数')
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_secondary'))
+                  Blank()
+                  Text('−')
+                    .fontSize(20)
+                    .fontColor($r('app.color.brand'))
+                    .padding({ left: 14, right: 14 })
+                    .onClick(() => {
+                      this.repeatCount = Math.max(1, Math.round(this.repeatCount) - 1);
+                    })
+                  Text(String(Math.round(this.repeatCount)))
+                    .fontSize(16)
+                    .fontColor($r('app.color.text_primary'))
+                    .width(44)
+                    .textAlign(TextAlign.Center)
+                  Text('＋')
+                    .fontSize(18)
+                    .fontColor($r('app.color.brand'))
+                    .padding({ left: 14, right: 14 })
+                    .onClick(() => {
+                      this.repeatCount = Math.min(999, Math.round(this.repeatCount) + 1);
+                    })
+                  Text('次')
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_secondary'))
+                }
+                .width('100%')
+                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+              }
+            }
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
@@ -1002,21 +1253,67 @@ struct EventEditPage {
     //    表现为"时间选择框白框一闪而过"（范围弹层顶掉了它）。
     //    这里用 sheetMode 在同一个弹层里切换内容。
     .bindSheet($$this.sheetShow, this.bottomSheet(), {
-      height: this.sheetMode === 'scope' ? 320 : 380,
+      height: this.sheetMode === 'scope' ? 320 : (this.sheetMode === 'repeatEnd' ? 340 : 380),
       showClose: false,
       dragBar: true,
       backgroundColor: $r('app.color.card_bg')
     })
   }
 
-  /** ⭐ 唯一的底部弹层：按 sheetMode 切换显示"时间选择"或"重复范围选择" */
+  /** ⭐ 唯一的底部弹层：按 sheetMode 切换显示"时间选择"/"重复范围选择"/"重复截止日期" */
   @Builder
   bottomSheet() {
     if (this.sheetMode === 'scope') {
       this.scopeSheet()
+    } else if (this.sheetMode === 'repeatEnd') {
+      this.repeatEndSheet()
     } else {
       this.dateTimePickerSheet()
     }
+  }
+
+  /** 重复"截止日期"选择弹层（只选日期） */
+  @Builder
+  repeatEndSheet() {
+    Column({ space: 14 }) {
+      Text('重复到哪一天')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+      DatePicker({
+        start: new Date(2000, 0, 1),
+        end: new Date(2060, 11, 31),
+        selected: this.pickDate
+      })
+        .onDateChange((value: Date) => {
+          this.pickDate = value;
+        })
+        .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+        .selectedTextStyle({
+          color: $r('app.color.text_primary'),
+          font: { size: 16, weight: FontWeight.Medium }
+        })
+        .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+        .layoutWeight(1)
+        .height(210)
+        .width('100%')
+      Button('确定')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .backgroundColor($r('app.color.brand'))
+        .onClick(() => {
+          const d = this.pickDate;
+          this.repeatUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+          this.sheetShow = false;
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
   }
 
   /** ⭐ 重复日程"作用范围"选择弹层：保存/删除前让用户明确改哪几次 */
@@ -1135,6 +1432,31 @@ struct EventEditPage {
       .backgroundColor(this.repeatMode === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
       .onClick(() => {
         this.repeatMode = mode;
+        // 切换到"重复"时给个合理默认：永不结束（用户可按需改为到某天/共几次）
+        if (mode !== 'none' && this.repeatEnd === '') {
+          this.repeatEnd = 'never';
+        }
+      })
+  }
+
+  /** 结束条件 chip：永不结束 / 重复到某天 / 共几次 */
+  @Builder
+  repeatEndChip(mode: string, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontColor(this.repeatEnd === mode
+        ? $r('app.color.button_text') : $r('app.color.text_primary'))
+      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .borderRadius(14)
+      .margin({ right: 8, bottom: 8 })
+      .backgroundColor(this.repeatEnd === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+      .onClick(() => {
+        this.repeatEnd = mode;
+        if (mode === 'until' && this.repeatUntil <= 0) {
+          // 默认给"从开始时间起 3 个月后"
+          const s = new Date(this.startMs);
+          this.repeatUntil = new Date(s.getFullYear(), s.getMonth() + 3, s.getDate()).getTime();
+        }
       })
   }
 

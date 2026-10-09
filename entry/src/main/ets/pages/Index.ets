@@ -1030,9 +1030,13 @@ struct Index {
           .borderRadius(12)
           .onClick(() => {
             const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
+            // ⭐ 把"用户点的是哪一次发生"一起带过去：重复日程展开后所有次共用主事件的 id，
+            //    不带发生时刻的话，编辑页无法知道用户点的是哪一次 → "仅这一次"会算错。
+            const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
             this.detailShow = false;
             if (id > 0) {
               AppStorage.setOrCreate<number>('pendingEventId', id);
+              AppStorage.setOrCreate<number>('pendingOccurrenceTs', occ);
               router.pushUrl({ url: 'pages/EventEditPage' });
             }
           })
