@@ -284,20 +284,27 @@ struct AccountsPage {
   @Builder
   emptyState() {
     Column({ space: 12 }) {
-      Text('＋')
-        .fontSize(30)
-        .fontColor($r('app.color.text_hint'))
-        .width(72)
-        .height(72)
-        .textAlign(TextAlign.Center)
-        .borderRadius(20)
-        .backgroundColor($r('app.color.card_bg'))
-        .border({ width: 1.5, color: $r('app.color.shadow_color') })
+      // ⭐ 空状态的「＋」本身可点击 → 直接进入添加账号页（此前只是个静态图标，点了没反应）
+      Button() {
+        Text('＋')
+          .fontSize(34)
+          .fontColor($r('app.color.brand'))
+          .fontWeight(FontWeight.Medium)
+      }
+      .width(84)
+      .height(84)
+      .borderRadius(24)
+      .backgroundColor($r('app.color.card_bg'))
+      .border({ width: 1.5, color: $r('app.color.brand') })
+      .shadow({ radius: 8, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 2 })
+      .onClick(() => {
+        this.openAddPage();
+      })
       Text('还没有任何 CalDAV 账号')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.text_primary'))
-      Text('点击右下角 + 添加 CalDAV 账号')
+      Text('点击上方 + 或右下角 + 添加 CalDAV 账号')
         .fontSize(13)
         .fontColor($r('app.color.text_secondary'))
         .textAlign(TextAlign.Center)
