@@ -735,6 +735,34 @@ export class EventDb {
   }
 
   /**
+   * ⭐ 用一份原始快照**还原**某一行的内容（仅内容字段，不动 id）。
+   * 用途：编辑重复日程的"仅这一次 / 此次及以后"时，`doSave` 会把当前行就地写成新值，
+   * 但该行属于"原系列"（被 EXDATE 排除或被 UNTIL 截断），必须还原，
+   * 否则原系列里会残留一条被改过的幽灵行。
+   */
+  static async restoreRowById(context: common.Context, id: number, src: LocalEvent): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'title': src.title,
+      'description': src.description,
+      'location': src.location,
+      'start_time': src.startTime,
+      'end_time': src.endTime,
+      'is_all_day': src.isAllDay ? 1 : 0,
+      'rrule': src.rrule,
+      'exdate': src.exdate,
+      'recurrence_id': src.recurrenceId,
+      'recurring': src.recurring ? 1 : 0,
+      'reminder': src.reminders.length > 0 ? src.reminders[0] : src.reminder,
+      'reminders': src.reminders.map((n: number): string => String(n)).join(','),
+      'dirty': 1
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  /**
    * 清理孤儿行：calKey 既不是本机日历（local）、也不属于任何现有账号（accId_ 前缀）的历史残留数据。
    * 典型来源：账号删除重建、日历重选后序号变化遗留的旧 calKey（如 `_13`、`acc1789274273124_0_13`）。
    * 这些行会参与重复日程的 override 排除计算，导致重复日程的第一次发生不显示，必须物理删除。

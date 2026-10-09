@@ -4,7 +4,7 @@ import { curves, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_KEYS, TYPE_CALDAV, TYPE_CARDDAV } from '../common/AccountStore';
-import { SyncEngine } from '../common/SyncEngine';
+import { SyncEngine, SyncBusyError } from '../common/SyncEngine';
 import { EditNavParams } from './EditAccountPage';
 import { EventDb } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
@@ -91,6 +91,12 @@ struct AccountsPage {
       this.getUIContext().getPromptAction()
         .showToast({ message: `「${acc.name}」同步完成` });
     } catch (err) {
+      // ⭐ 已有同步在进行中 → 提示"请耐心等待"，不报"失败"（避免用户误解）
+      if (err instanceof SyncBusyError) {
+        this.getUIContext().getPromptAction()
+          .showToast({ message: '有同步任务正在进行中，请耐心等待' });
+        return;
+      }
       const e = err as BusinessError;
       this.getUIContext().getPromptAction()
         .showToast({ message: `「${acc.name}」同步失败：${e.message}` });

@@ -10,11 +10,48 @@ import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { SystemCalendarMirror } from './SystemCalendarMirror';
 
+/**
+ * ⭐ "已有同步任务正在进行"专用错误类型。
+ *
+ * 背景（用户反馈）：后台同步进行中时，用户再点「手动同步」或在账号管理点「保存并同步」，
+ * 会并发触发第二轮同步；互斥锁把它拦下来，但那时抛的是普通 Error → 界面统一显示
+ * "同步失败：该账号正在同步中，请稍后再试"。用户看到"失败"会误以为出了问题。
+ *
+ * 正确做法：并发被拦下时**不是失败**，而应提示"有同步任务正在进行中，请耐心等待"。
+ * 因此用这个独立类型与真正的同步故障区分开，界面据此改提示语（而非报错）。
+ */
+export class SyncBusyError extends Error {
+  constructor() {
+    super('SYNC_BUSY');
+  }
+}
+
 export class SyncEngine {
   /** 正在同步中的账号 id → 开始时间：防止超时后的"僵尸同步"与新一轮同步并发写库 */
   private static activeSyncs: Map<string, number> = new Map();
   /** 互斥锁最长持有时间：超过视为异常残留（如进程挂起后网络停摆），允许抢占 */
   private static readonly LOCK_STALE_MS: number = 15 * 60 * 1000;
+
+  /** 某账号当前是否正在同步（供界面判断，不触发任何操作） */
+  static isSyncing(accId: string): boolean {
+    const heldSince: number | undefined = SyncEngine.activeSyncs.get(accId);
+    if (heldSince === undefined) {
+      return false;
+    }
+    return Date.now() - heldSince < SyncEngine.LOCK_STALE_MS;
+  }
+
+  /** 当前是否有任意账号正在同步 */
+  static isAnySyncing(): boolean {
+    const now: number = Date.now();
+    for (const id of SyncEngine.activeSyncs.keys()) {
+      const since: number | undefined = SyncEngine.activeSyncs.get(id);
+      if (since !== undefined && now - since < SyncEngine.LOCK_STALE_MS) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /**
    * 给异步操作加超时保护，防止网络挂起导致界面一直转圈
@@ -38,7 +75,8 @@ export class SyncEngine {
     const heldSince: number | undefined = SyncEngine.activeSyncs.get(acc.id);
     if (heldSince !== undefined) {
       if (Date.now() - heldSince < SyncEngine.LOCK_STALE_MS) {
-        throw new Error('该账号正在同步中，请稍后再试');
+        // ⭐ 抛专用类型：界面据此提示"同步进行中，请耐心等待"而非"失败"
+        throw new SyncBusyError();
       }
       LogUtil.write(`同步互斥锁超时残留（账号 id=${acc.id}），强制释放并重新同步`);
     }
@@ -71,6 +109,10 @@ export class SyncEngine {
       LogUtil.write(`同步账号 id=${acc.id} 完成：拉取 ${r} 条日程，耗时 ${Math.round((Date.now() - t0) / 1000)} 秒`);
       return r;
     } catch (err) {
+      // ⭐ "正在同步中"原样抛出（界面据此提示"请耐心等待"，不当成失败）
+      if (err instanceof SyncBusyError) {
+        throw err;
+      }
       const e = err as BusinessError;
       LogUtil.write(`同步账号 id=${acc.id} 失败：${e.message}（耗时 ${Math.round((Date.now() - t0) / 1000)} 秒）`);
       throw new Error(e.message !== '' ? e.message : `错误码 ${e.code}`);

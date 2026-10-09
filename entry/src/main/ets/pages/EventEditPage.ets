@@ -54,6 +54,13 @@ struct EventEditPage {
   @State scope: string = 'all';
   @State scopeConfirmShow: boolean = false;   // 保存重复日程时的范围选择弹层
   private pendingDelete: boolean = false;     // 该弹层是"保存"还是"删除"流程
+  /**
+   * ⭐ 载入时的**原始行快照**（不可变）。
+   * `doSave` 会就地改写 `this.event` 的 calKey/href/startTime 等字段，
+   * 而"重复系列"的范围计算（EXDATE / UNTIL / 拆系列）必须依据**原始**的
+   * 系列标识（原 calKey、原 href、原发生时刻），否则会算错。
+   */
+  private original: LocalEvent | null = null;
   /** 本次编辑的"目标发生时刻"（未改期时 = 原发生时刻；用户改了开始时间 → 新时刻） */
   private occStartMs: number = 0;
   private event: LocalEvent | null = null;
@@ -91,6 +98,22 @@ struct EventEditPage {
       const loaded = await EventDb.getById(context, pendingId);
       if (loaded !== null) {
         this.event = loaded;
+        // ⭐ 原始行快照：series 范围计算必须用"载入时"的值（doSave 会改写 this.event）
+        const snap = new LocalEvent();
+        snap.id = loaded.id;
+        snap.uid = loaded.uid;
+        snap.calKey = loaded.calKey;
+        snap.href = loaded.href;
+        snap.remotePath = loaded.remotePath;
+        snap.startTime = loaded.startTime;
+        snap.endTime = loaded.endTime;
+        snap.recurrenceId = loaded.recurrenceId;
+        snap.rrule = loaded.rrule;
+        snap.exdate = loaded.exdate;
+        snap.isAllDay = loaded.isAllDay;
+        snap.recurring = loaded.recurring;
+        snap.deleted = loaded.deleted;
+        this.original = snap;
         this.isExisting = true;
         this.title = loaded.title;
         this.location = loaded.location;
@@ -99,6 +122,22 @@ struct EventEditPage {
         this.startMs = loaded.startTime;
         this.endMs = loaded.endTime;
         this.chosenKey = loaded.calKey;
+        // ⭐ 若这条日程所属的日历本不在"可写日历本"列表里（例如该本被标记只读、
+        //    或服务器写权限探测暂时失败），把它补进选择列表，保证 chosenBook() 一定能解析到 ——
+        //    否则保存会被拦下，用户永远进不到"重复日程范围选择"这一步。
+        if (loaded.calKey !== LOCAL_CAL_KEY
+          && !choices.some((c: BookChoice): boolean => c.calKey === loaded.calKey)) {
+          const info: BookLookup | null =
+            await CalendarDataBridge.lookupBook(context, loaded.calKey, loaded.href);
+          if (info !== null) {
+            const b = new BookChoice();
+            b.calKey = info.calKey;
+            b.href = info.href;
+            b.name = info.name;
+            b.color = info.color;
+            this.books = this.books.concat([b]);
+          }
+        }
         // 历史遗留的"本机"日程：本应用已不再支持本机日程，改为引导用户挑一个 CalDAV 日历本
         // （保存时 calKey/href 会改写为该日历本，事件随后被推送到服务器）
         if (loaded.calKey === LOCAL_CAL_KEY) {
@@ -125,7 +164,22 @@ struct EventEditPage {
   }
 
   private chosenBook(): BookChoice | null {
-    return this.books.find((b: BookChoice): boolean => b.calKey === this.chosenKey) ?? null;
+    const found = this.books.find((b: BookChoice): boolean => b.calKey === this.chosenKey);
+    if (found !== undefined) {
+      return found;
+    }
+    // ⭐ 兜底：编辑既有日程时，若它的日历本恰好不在"可写日历本"列表里
+    //    （例如该本被标记只读、或服务器写权限探测暂时失败），
+    //    仍然用这条日程自己的 calKey/href 构造一个目标 —— 否则 chosenBook() 返回 null，
+    //    保存会被直接拦下，用户只看到一行错误提示，永远进不到"重复日程范围选择"。
+    if (this.event !== null && this.event.calKey !== '' && this.event.calKey === this.chosenKey) {
+      const b = new BookChoice();
+      b.calKey = this.event.calKey;
+      b.href = this.event.href;
+      b.name = '';
+      return b;
+    }
+    return null;
   }
 
   private fmtDate(ms: number): string {
@@ -250,24 +304,27 @@ struct EventEditPage {
    * 非重复的普通日程返回 false，直接按原逻辑保存/删除。
    */
   private isSeriesOccurrence(): boolean {
-    if (this.event === null) {
+    const src: LocalEvent | null = this.original ?? this.event;
+    if (src === null) {
       return false;
     }
-    return this.event.recurring || this.event.rrule !== '';
+    return src.recurring || src.rrule !== '';
   }
 
-  /** 取本系列的主事件行（带 RRULE 的那行；找不到则退回当前行） */
+  /** 取本系列的主事件行（带 RRULE 的那行；找不到则退回当前行）。
+   *  ⚠️ 必须按**原始** calKey/uid 查找（doSave 会改写 this.event 的 calKey）。 */
   private async loadMaster(context: common.Context): Promise<LocalEvent | null> {
-    if (this.event === null) {
+    const src: LocalEvent | null = this.original ?? this.event;
+    if (src === null) {
       return null;
     }
-    const rows: LocalEvent[] = await EventDb.queryByUid(context, this.event.calKey, this.event.uid);
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, src.calKey, src.uid);
     for (const r of rows) {
       if (r.rrule !== '') {
         return r;
       }
     }
-    return this.event;
+    return src;
   }
 
   /** 该次发生之前一次发生与之后一次发生的边界（用于 EXDATE / UNTIL / 拆分） */
@@ -321,7 +378,10 @@ struct EventEditPage {
   private async applySeriesEdit(context: common.Context, e: LocalEvent, isNew: boolean,
     scope: string): Promise<void> {
     const target: LocalEvent = e;
-    if (isNew || !this.isSeriesOccurrence() || this.event === null) {
+    // ⚠️ 用**原始快照**判据：doSave 已把 e（= this.event）的 calKey/href/startTime 改成新值，
+    //    直接用 this.event 会把"改后的日期/日历本"当成原系列，导致 EXDATE / UNTIL 算错。
+    const cur: LocalEvent | null = this.original;
+    if (isNew || cur === null || !this.isSeriesOccurrence()) {
       if (isNew) {
         await EventDb.insertLocal(context, target);
       } else {
@@ -329,7 +389,6 @@ struct EventEditPage {
       }
       return;
     }
-    const cur: LocalEvent = this.event;
     const bounds: SeriesBounds = await this.seriesBoundaries(context);
     if (scope === 'all') {
       // 全部：直接更新当前行。若当前行是某次覆盖实例 → 保留其 recurrenceId 改内容；
@@ -339,7 +398,8 @@ struct EventEditPage {
     }
     if (scope === 'one') {
       if (cur.rrule === '' && cur.recurrenceId > 0) {
-        // 已经是覆盖实例 → 直接改它
+        // 已经是覆盖实例 → 直接改它（保留 recurrenceId）
+        target.recurrenceId = cur.recurrenceId;
         await EventDb.updateLocal(context, target);
         return;
       }
@@ -354,6 +414,11 @@ struct EventEditPage {
         exList.push(occIcs);
       }
       await EventDb.setExdate(context, master.id, exList.join(';'));
+      // ⚠️ 主事件行本身的内容保持不变（"仅这一次"只影响这一次）；
+      //    如果用户是在主事件行上改的，需要把主事件改回原值（target 已被写成新时间）
+      if (cur.rrule !== '') {
+        await EventDb.restoreRowById(context, master.id, cur);
+      }
       // 覆盖行：uid 同主事件、DTSTART=改到的新时间、RECURRENCE-ID=原始发生时刻
       const ov = new LocalEvent();
       ov.uid = master.uid;
@@ -414,11 +479,32 @@ struct EventEditPage {
     } else {
       const truncated: string = IcsUtil.rruleWithUntil(master.rrule, bounds.beforeThis);
       await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
+      // ⚠️ 若用户编辑的正是"主事件这一行"，target（= this.event）已被 doSave 写成新值，
+      //    而它属于被截断的旧系列 → 必须还原为原值，否则旧系列末尾会多出一条被改过的幽灵行。
+      if (cur.rrule !== '') {
+        await EventDb.restoreRowById(context, master.id, cur);
+      }
     }
   }
 
   private async save(): Promise<void> {
-    if (this.isSaving || !this.validate()) {
+    if (this.isSaving) {
+      return;
+    }
+    // 便于诊断：记录这次保存走了哪条分支（标题已脱敏）
+    LogUtil.write(`保存判定：isExisting=${this.isExisting} recurring=${this.original !== null ? this.original.recurring : '?'} rrule=${this.original !== null && this.original.rrule !== '' ? '有' : '无'} 选本=${this.books.length} chosenKey=${this.chosenKey}`);
+    // ⭐ 重复日程：**先让用户选择范围（仅这一次 / 此次及以后 / 全部）**，再校验与落库。
+    //    必须放在最前面 —— 与"删除"路径保持一致。若把校验/日历本检查放在前面，
+    //    任一条件不满足就会提前 return，用户看到的只是表单底部一行小字，
+    //    永远等不到范围选择弹层（表现为"编辑重复日程没有那三个选项"）。
+    if (this.isSeriesOccurrence()) {
+      this.pendingDelete = false;
+      this.scopeConfirmShow = true;
+      LogUtil.write('保存判定：重复系列 → 弹出范围选择');
+      return;
+    }
+    if (!this.validate()) {
+      LogUtil.write(`保存判定：校验未通过（${this.statusMsg}）`);
       return;
     }
     // 日程必须落在某个 CalDAV 日历本上（"本机"不再是可选目标）——没选到就直接拦下
@@ -427,12 +513,7 @@ struct EventEditPage {
       this.statusMsg = this.books.length === 0
         ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
         : '请选择要同步到的 CalDAV 日历本';
-      return;
-    }
-    // ⭐ 重复日程：先让用户选择"改这一次 / 此次及以后 / 全部"
-    if (this.isSeriesOccurrence()) {
-      this.pendingDelete = false;
-      this.scopeConfirmShow = true;
+      LogUtil.write(`保存判定：日历本解析失败（选本=${this.books.length} chosenKey=${this.chosenKey}）`);
       return;
     }
     await this.doSave('all');
@@ -443,8 +524,16 @@ struct EventEditPage {
     if (this.isSaving) {
       return;
     }
+    // ⭐ 范围确认后回到这里再校验一次：范围弹层打开时并未跳过校验，
+    //    只是把它推迟到"选完范围"之后（失败时弹层已关闭，错误显示在表单状态行）。
+    if (!this.validate()) {
+      return;
+    }
     const book = this.chosenBook();
     if (book === null) {
+      this.statusMsg = this.books.length === 0
+        ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
+        : '请选择要同步到的 CalDAV 日历本';
       return;
     }
     this.isSaving = true;
@@ -589,7 +678,7 @@ struct EventEditPage {
       if (context === undefined) {
         return;
       }
-      const cur: LocalEvent = this.event;
+      const cur: LocalEvent = this.original ?? this.event;
       const isSeries: boolean = this.isSeriesOccurrence();
       if (!isSeries || scope === 'all') {
         // 普通日程 / 删除全部：整行标记删除（系列删除由 pushSeries 处理成 DELETE 资源）
@@ -1171,6 +1260,45 @@ class CalendarDataBridge {
     }
     return result;
   }
+
+  /**
+   * ⭐ 按 calKey（必要时回退按 href 匹配）解析一个日历本的基本信息，
+   * 用于"编辑既有日程时，它的日历本不在可写清单里"的兜底补全。
+   * 找不到时返回 null（界面会给出明确提示，不静默失败）。
+   */
+  static async lookupBook(context: common.Context, calKey: string,
+    href: string): Promise<BookLookup | null> {
+    const accounts: DavAccount[] = await AccountStore.loadAll(context);
+    for (const acc of accounts) {
+      for (let i = 0; i < acc.calendarHrefs.length; i++) {
+        const key: string = `${acc.id}_${i}`;
+        if (key !== calKey && !(href !== '' && acc.calendarHrefs[i] === href)) {
+          continue;
+        }
+        const out = new BookLookup();
+        out.calKey = key;
+        out.href = acc.calendarHrefs[i];
+        let name: string = i < acc.calendarNames.length ? acc.calendarNames[i] : '';
+        if (name === '') {
+          name = acc.calendarHrefs.length === 1 ? acc.name : `日历本 ${i + 1}`;
+        }
+        out.name = `${acc.name} · ${name}`;
+        let color: string = i < acc.calendarColors.length
+          ? AccountStore.normalizeColor(acc.calendarColors[i]) : '';
+        out.color = color !== '' ? color : BookPalette.colorForHref(acc.calendarHrefs[i]);
+        return out;
+      }
+    }
+    return null;
+  }
+}
+
+/** lookupBook 的返回值（命名 class：ArkTS 不许用内联对象字面量类型） */
+class BookLookup {
+  calKey: string = '';
+  href: string = '';
+  name: string = '';
+  color: string = '#007DFF';
 }
 
 class CalSourceWithHref extends CalSource {

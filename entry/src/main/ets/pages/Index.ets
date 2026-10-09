@@ -7,7 +7,7 @@ import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
-import { SyncEngine } from '../common/SyncEngine';
+import { SyncEngine, SyncBusyError } from '../common/SyncEngine';
 import { LogUtil } from '../common/LogUtil';
 import { LunarUtil } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
@@ -584,6 +584,12 @@ struct Index {
       this.getUIContext().getPromptAction()
         .showToast({ message: `「${acc.name}」同步完成` });
     } catch (err) {
+      // ⭐ 已有同步在进行中 → 提示"请耐心等待"，不报"失败"
+      if (err instanceof SyncBusyError) {
+        this.getUIContext().getPromptAction()
+          .showToast({ message: '有同步任务正在进行中，请耐心等待' });
+        return;
+      }
       const e = err as BusinessError;
       this.getUIContext().getPromptAction()
         .showToast({ message: `同步失败：${e.message}` });
@@ -633,6 +639,8 @@ struct Index {
     await ScreenKeeper.acquire(context as common.UIAbilityContext);
     let ok: number = 0;
     let failMsg: string = '';
+    // ⭐ 是否因为"已有同步在进行"而被跳过（这不算失败，只提示等待）
+    let busySkipped: boolean = false;
     // 备份模式：先把系统本地日历导入目标日历本（幂等），再随正常同步推送上服务器
     try {
       await SystemCalendarImport.importIfNeeded(context);
@@ -654,6 +662,11 @@ struct Index {
         acc.lastSyncTime = this.formatNow();
         ok++;
       } catch (err) {
+        // ⭐ 并发被互斥锁拦下：不是失败，只是"已有同步在跑"，稍后自动同步会覆盖，直接略过
+        if (err instanceof SyncBusyError) {
+          busySkipped = true;
+          continue;
+        }
         const e = err as BusinessError;
         failMsg = e.message;
       }
@@ -684,6 +697,10 @@ struct Index {
     if (failMsg !== '') {
       this.getUIContext().getPromptAction()
         .showToast({ message: ok > 0 ? `同步完成 ${ok} 个，失败：${failMsg}` : `同步失败：${failMsg}` });
+    } else if (busySkipped && ok === 0) {
+      // 全部账号都因"已有同步在进行"被跳过 → 只提示等待，不说失败
+      this.getUIContext().getPromptAction()
+        .showToast({ message: '有同步任务正在进行中，请耐心等待' });
     } else if (ok > 0 && manual) {
       this.getUIContext().getPromptAction()
         .showToast({ message: `同步完成（${ok} 个账号）` });
