@@ -10,6 +10,7 @@ import { EventDb } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
 import { AppSettings } from '../common/AppSettings';
 import { ScreenKeeper } from '../common/ScreenKeeper';
+import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
 
 @Entry
 @Component
@@ -142,13 +143,24 @@ struct AccountsPage {
     });
   }
 
-  /** 执行删除：账号配置 + 该账号全部本地日程/待办 */
+  /** 执行删除：账号配置 + 该账号全部本地日程/待办 + 该系统日历中该账号的全部镜像日历本 */
   private async confirmDeleteAccount(acc: DavAccount): Promise<void> {
     const context = this.getUIContext().getHostContext();
     if (context === undefined) {
       return;
     }
     try {
+      // ⭐ 先清系统日历里属于**本账号**的镜像日历本（按 bookId 里的 accId 前缀匹配，
+      //    绝不按显示名 → 不同账号的同名日历本不会误删）。
+      //    必须在改账号配置**之前**做：一旦账号配置被删，bookId 就再也解析不出来，
+      //    那些幽灵账户就永远清不掉了（这正是本次要修的 bug）。
+      let mirrored: number = 0;
+      try {
+        mirrored = await SystemCalendarMirror.removeByAccount(context, acc.id);
+      } catch (err) {
+        // 系统日历清理失败不阻断账号删除（用户至少能删掉账号）
+        LogUtil.write(`删除账号 ${acc.id}：清理系统日历镜像失败 ${(err as BusinessError).message}`);
+      }
       this.accounts = this.accounts.filter((a: DavAccount): boolean => a.id !== acc.id);
       // force=true：删除最后一个账号时列表为空是合法场景，允许覆盖
       await AccountStore.saveAll(context, this.accounts, true);
@@ -156,7 +168,11 @@ struct AccountsPage {
       await EventDb.deleteAccountEvents(context, acc.id);
       await AppSettings.cleanupAccountSettings(context, acc.id);
       this.getUIContext().getPromptAction()
-        .showToast({ message: `「${acc.name}」已删除` });
+        .showToast({
+          message: mirrored > 0
+            ? `「${acc.name}」已删除，并清除系统日历中 ${mirrored} 个镜像日历本`
+            : `「${acc.name}」已删除`
+        });
     } catch (err) {
       const e = err as BusinessError;
       this.getUIContext().getPromptAction()

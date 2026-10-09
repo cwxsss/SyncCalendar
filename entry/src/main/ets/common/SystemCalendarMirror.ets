@@ -320,6 +320,14 @@ export class SystemCalendarMirror {
     }
     // ⭐ 选中项一律走**稳定标识** bookId（由服务器 href 派生），并顺带迁移历史 calKey 选中项
     const refs: BookRef[] = await SystemCalendarMirror.selectedBookRefs(context);
+    // ⭐ 兜底：无论有没有选中本，都顺手清掉"账号已删除"的孤儿镜像账户。
+    //    否则"删掉一个账号后系统日历里还留着它的日历本"永远不会被自动修掉
+    //    （旧代码在这里 return 之前根本不做清理，这正是本次要修的 bug）。
+    try {
+      await SystemCalendarMirror.purgeOrphanAccountMirrors(context);
+    } catch (err) {
+      // 兜底清理失败不影响正常镜像
+    }
     if (refs.length === 0) {
       LogUtil.write('镜像中止：未选择要镜像的日历本（或全部是备份目标本）');
       return res;
@@ -419,6 +427,175 @@ export class SystemCalendarMirror {
     const ref: BookRef | undefined = refs.get(calKey);
     const bookId: string = ref !== undefined ? ref.bookId : calKey;
     return SystemCalendarMirror.removeById(context, bookId);
+  }
+
+  /**
+   * ⭐ 删除**某一个 DAV 账号**名下的全部镜像账户（在 App 里删除该账号时调用）。
+   *
+   * 背景（用户反馈）：删掉一个 CalDAV 账号后，之前镜像进系统日历的那些"日历本"
+   * 仍然留在系统日历里（幽灵账户 + 幽灵日程）。旧代码只清了账号配置与本地库，
+   * 完全没碰系统日历侧；而自动兜底（syncNow 里的 purgeOrphans）在"解析不到任何选中本"时
+   * **会提前 return**，所以删完账号后根本不会触发兜底清理。
+   *
+   * ⭐ **绝不按日历本显示名匹配**：镜像账户名是 `synccalendar.mirror.<bookId>`，
+   *    而 bookId = `<accId>-<href哈希>` 天然带账号前缀。因此这里只按
+   *    `synccalendar.mirror.<accId>-` 前缀匹配 —— 即使**不同账号下有同名日历本**
+   *    （比如两个账号各有一个「工作」），它们的 bookId 不同、账户名也不同，绝不会删错。
+   *
+   * 幂等；未授权 / 无匹配时返回 0。每个账户独立 try/catch，一个失败不影响其它。
+   *
+   * @returns 成功删除的镜像账户数
+   */
+  static async removeByAccount(context: common.Context, accId: string): Promise<number> {
+    if (accId === '' || !await SystemCalendarMirror.hasPermission()) {
+      return 0;
+    }
+    // ⭐ 账户名前缀 = 公共前缀 + accId + '-'（bookId 里的分隔符）。
+    //    带尾随 '-' 才不会把 accId「123」错配到 accId「1234」的账户上。
+    //    同时兼容**历史**账户名（旧版用 calKey 做桶 → `synccalendar.mirror.<accId>_<序号>`），
+    //    同样带尾随 '_' 分隔符，宁可多清一批脏账户，也不按显示名乱删。
+    const prefix: string = `${SystemCalendarMirror.ACCOUNT_PREFIX}${accId}-`;
+    const legacyPrefix: string = `${SystemCalendarMirror.ACCOUNT_PREFIX}${accId}_`;
+    let removed: number = 0;
+    const buckets: string[] = [];
+    try {
+      const cm: calendarManager.CalendarManager = calendarManager.getCalendarManager(context);
+      const all: calendarManager.Calendar[] = await cm.getAllCalendars();
+      for (const cal of all) {
+        const name: string = cal.getAccount().name;
+        if (!name.startsWith(prefix) && !name.startsWith(legacyPrefix)) {
+          continue; // 不属于本账号（含其它账号的同名日历本）→ 绝不动
+        }
+        const bucket: string = name.substring(SystemCalendarMirror.ACCOUNT_PREFIX.length);
+        try {
+          await cm.deleteCalendar(cal);
+          removed++;
+          buckets.push(bucket);
+          LogUtil.write(`删除账号 ${accId}：已删除镜像账户 id=${cal.id} name=${name}`);
+        } catch (err) {
+          const e1 = err as BusinessError;
+          LogUtil.write(`删除账号 ${accId}：删除镜像账户失败(重试) id=${cal.id} name=${name}: ${e1.message}`);
+          // 降级：先清空账户内全部日程，再删一次（与 purgeOrphans 同策略）
+          try {
+            const evs: calendarManager.Event[] = await cal.getEvents();
+            const ids: number[] = [];
+            for (const ev of evs) {
+              if (ev.id !== undefined) {
+                ids.push(ev.id);
+              }
+            }
+            if (ids.length > 0) {
+              await cal.deleteEvents(ids);
+            }
+          } catch (err2) {
+            LogUtil.write(`删除账号 ${accId}：清空镜像账户日程失败 id=${cal.id}: ${(err2 as BusinessError).message}`);
+          }
+          try {
+            await cm.deleteCalendar(cal);
+            removed++;
+            buckets.push(bucket);
+            LogUtil.write(`删除账号 ${accId}：已删除镜像账户(清空后重试成功) id=${cal.id} name=${name}`);
+          } catch (err3) {
+            LogUtil.write(`删除账号 ${accId}：镜像账户删除失败(最终) id=${cal.id} name=${name}: ${(err3 as BusinessError).message}`);
+          }
+        }
+      }
+    } catch (err) {
+      LogUtil.write(`删除账号 ${accId}：读取系统日历账户列表失败 ${(err as BusinessError).message}`);
+    }
+    // 清掉这些本在镜像快照里的残留（bucket = bookId）
+    for (const b of buckets) {
+      await MirrorSnapshot.removeByCalKey(context, b);
+    }
+    // 清掉"镜像选中项"里属于本账号的条目（防止残留脏 bookId 干扰下次选择/迁移）。
+    // ⚠️ 用 `${accId}-` / `${accId}_` 前缀过滤（同样带分隔符，避免误伤相似 accId）。
+    try {
+      const ids: string[] = await AppSettings.getMirrorBookIds(context);
+      const kept: string[] = ids.filter((id: string): boolean => !id.startsWith(`${accId}-`));
+      if (kept.length !== ids.length) {
+        await AppSettings.setMirrorBookIds(context, kept);
+      }
+      const legacy: string[] = await AppSettings.getMirrorKeys(context);
+      const keptLegacy: string[] = legacy.filter((k: string): boolean => !k.startsWith(`${accId}_`));
+      if (keptLegacy.length !== legacy.length) {
+        await AppSettings.setMirrorKeys(context, keptLegacy);
+      }
+    } catch (err) {
+      // 设置清理失败不影响账户删除结果，下次同步会再兜底
+    }
+    LogUtil.write(`删除账号 ${accId}：系统日历镜像清理完成，共删除 ${removed} 个镜像账户`);
+    return removed;
+  }
+
+  /**
+   * ⭐ 兜底：清理"账号已不存在"的孤儿镜像账户（同步时调用，防止删除路径万一漏掉）。
+   *
+   * ⚠️ **安全阀**：当前账号列表为空时**直接跳过** —— 无法区分"用户删光了账号"与
+   *    "账号存储临时读失败返回空"，后者若照常清理会把所有镜像账户误删。
+   *    "删光账号"这种场景已由 `removeByAccount` / 重置账号库两条显式路径覆盖。
+   * 只要还剩至少一个账号，就只清"accId 前缀不在当前账号集合里"的那些 —— 精准、不会误伤。
+   *
+   * @returns 删除的账户数
+   */
+  static async purgeOrphanAccountMirrors(context: common.Context): Promise<number> {
+    if (!await SystemCalendarMirror.hasPermission()) {
+      return 0;
+    }
+    let accounts: DavAccount[] = [];
+    try {
+      accounts = await AccountStore.loadAll(context);
+    } catch (err) {
+      return 0; // 读失败一律不动
+    }
+    if (accounts.length === 0) {
+      return 0; // 安全阀：见注释
+    }
+    const validAccIds: Set<string> = new Set<string>();
+    for (const a of accounts) {
+      validAccIds.add(a.id);
+    }
+    let removed: number = 0;
+    try {
+      const cm: calendarManager.CalendarManager = calendarManager.getCalendarManager(context);
+      const all: calendarManager.Calendar[] = await cm.getAllCalendars();
+      for (const cal of all) {
+        const name: string = cal.getAccount().name;
+        if (!name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX)) {
+          continue;
+        }
+        const bucket: string = name.substring(SystemCalendarMirror.ACCOUNT_PREFIX.length);
+        // bucket 形如 `<accId>-<hash>`；也兼容历史 `<accId>_<序号>`
+        const dash: number = bucket.indexOf('-');
+        const under: number = bucket.indexOf('_');
+        let sep: number = -1;
+        if (dash >= 0 && under >= 0) {
+          sep = Math.min(dash, under);
+        } else {
+          sep = dash >= 0 ? dash : under;
+        }
+        if (sep <= 0) {
+          continue; // 解析不出 accId → 不动（宁可留，不误删）
+        }
+        const accId: string = bucket.substring(0, sep);
+        if (validAccIds.has(accId)) {
+          continue;
+        }
+        try {
+          await cm.deleteCalendar(cal);
+          removed++;
+          LogUtil.write(`兜底清理孤儿镜像账户(账号 ${accId} 已删除) id=${cal.id} name=${name}`);
+        } catch (err) {
+          LogUtil.write(`兜底删除孤儿镜像账户失败 id=${cal.id} name=${name}: ${(err as BusinessError).message}`);
+        }
+        await MirrorSnapshot.removeByCalKey(context, bucket);
+      }
+    } catch (err) {
+      LogUtil.write(`兜底清理孤儿镜像账户：读取系统日历账户失败 ${(err as BusinessError).message}`);
+    }
+    if (removed > 0) {
+      LogUtil.write(`兜底清理孤儿镜像账户完成：删除 ${removed} 个`);
+    }
+    return removed;
   }
 
   /* ==================== 单个日历本 ==================== */
@@ -1222,6 +1399,18 @@ export class SystemCalendarMirror {
       h2 = ((h2 << 5) + h2 + c) | 0;
     }
     return `${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
+  }
+
+  /**
+   * ⭐ 由 `<accId> + href` 算出稳定标识 bookId（= `<accId>-<href哈希>`）。
+   * 与 `listBooks()` 内部算法**完全一致**，供编辑账号页在"取消勾选某个日历本"时
+   * 立即算出它的 bookId 并删掉对应镜像账户用（此时账号配置已被改写，listBooks 已查不到它）。
+   * href 为空时退回 calKey（与 listBooks 的兜底口径一致）。
+   */
+  static bookIdOf(accId: string, href: string, fallbackCalKey: string): string {
+    return href !== ''
+      ? `${accId}-${SystemCalendarMirror.stableHash(href)}`
+      : fallbackCalKey;
   }
 
   /** 用账号信息补全日历本名与颜色（需要异步加载账号） */

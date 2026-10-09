@@ -682,9 +682,20 @@ struct SettingsPage {
       return;
     }
     try {
+      // ⭐ 账号库整体重置 = 所有账号都没了 → 系统日历里的全部镜像账户也应一并清除
+      //    （否则会留下一堆无主的幽灵日历本，且再无人能对应回账号）。
+      //    未授权/无镜像时返回 0，不影响重置本身。
+      let mirrored: number = 0;
+      try {
+        mirrored = await SystemCalendarMirror.removeAll(this.context);
+      } catch (err) {
+        // 清理失败不阻断重置
+      }
       await AccountStore.resetVault(this.context);
       this.getUIContext().getPromptAction().showToast({
-        message: '账号库已重置，请重新添加账号'
+        message: mirrored > 0
+          ? `账号库已重置，并清除系统日历中 ${mirrored} 个镜像日历本`
+          : '账号库已重置，请重新添加账号'
       });
     } catch (err) {
       this.getUIContext().getPromptAction().showToast({

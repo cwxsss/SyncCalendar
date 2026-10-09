@@ -242,6 +242,21 @@ struct EditAccountPage {
         const pruned: number = await EventDb.pruneByHrefs(context, target.id, removedHrefs);
         LogUtil.write(`编辑账号保存：取消勾选/已失效 ${removedHrefs.length} 个日历本，清理本地日程 ${pruned} 行`);
       }
+      // ⭐ 被取消勾选的日历本，其系统日历镜像账户也要一并删掉（否则取消同步后系统日历仍有幽灵账户）。
+      //    此时账号配置即将被改写、listBooks 已解析不到它，故用 href 直接算稳定 bookId（与镜像侧同算法）。
+      //    ⚠️ 用稳定 bookId 删 —— 不同账号下有同名日历本时，bookId 里带 accId 前缀，绝不会删错。
+      for (let oi: number = 0; oi < oldHrefs.length; oi++) {
+        const oh: string = oldHrefs[oi];
+        if (newHrefSet.has(oh)) {
+          continue;
+        }
+        const bookId: string = SystemCalendarMirror.bookIdOf(target.id, oh, `${target.id}_${oi}`);
+        try {
+          await SystemCalendarMirror.removeById(context, bookId);
+        } catch (err) {
+          // 镜像账户删除失败不阻断保存（下次镜像前的孤儿清理还会兜底）
+        }
+      }
       const remapPairs: Array<[string, string]> = [];
       for (let oi: number = 0; oi < oldHrefs.length; oi++) {
         const oldNorm: string = DavClient.normalizeHref(oldHrefs[oi]);
