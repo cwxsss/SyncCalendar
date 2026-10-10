@@ -566,23 +566,17 @@ struct SettingsPage {
     if (this.context === undefined) {
       return;
     }
-    // 后台持续同步依赖常驻通知 → 在用户主动开启时才申请通知权限（不随启动自动弹窗）
-    if (value) {
-      await this.ensureNotifyPermission();
-    }
     try {
       await BackgroundSyncService.setBackgroundSync(
         this.context as common.UIAbilityContext, value);
       this.getUIContext().getPromptAction().showToast({
-        message: value
-          ? '后台持续同步已开启，通知栏将显示常驻通知'
-          : '后台持续同步已关闭'
+        message: value ? '后台自动同步已开启' : '后台自动同步已关闭'
       });
     } catch (err) {
       this.backgroundSync = !value; // 失败回滚 UI
       const msg: string = (err as BusinessError).message !== ''
         ? (err as BusinessError).message : '请重试';
-      this.getUIContext().getPromptAction().showToast({ message: `开启失败：${msg}` });
+      this.getUIContext().getPromptAction().showToast({ message: `设置失败：${msg}` });
     }
   }
 
@@ -1197,15 +1191,15 @@ struct SettingsPage {
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
 
-          // 后台持续同步（长时任务）
+          // 后台自动同步
           Column({ space: 8 }) {
             Row({ space: 10 }) {
               Column({ space: 2 }) {
-                Text('后台持续同步')
+                Text('后台自动同步')
                   .fontSize(15)
                   .fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.text_primary'))
-                Text('开启后申请后台长时任务，App 退到后台也按设定间隔继续同步（通知栏会显示常驻通知）')
+                Text('开启后，退到后台仍会定时同步（系统最短约 2 小时一次）；回到前台或网络恢复时会立即补同步一次')
                   .fontSize(12)
                   .fontColor($r('app.color.text_secondary'))
               }

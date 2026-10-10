@@ -1,16 +1,13 @@
 // entry/src/main/ets/syncwork/SyncWorkAbility.ets
-// 延迟任务兜底同步：App 进程被杀/设备重启后，系统在满足条件（有网络）时拉起本扩展执行同步
-// 注意：必须幂等——同步本身基于 ETag 全量比对，天然幂等；执行完必须 stopWork，否则系统按超时处理
+// 延迟任务兜底同步：App 进程被杀/设备重启后，系统在满足条件（有网络）时拉起本扩展执行同步。
+//
+// ⚠️ 约束（勿改）：
+//  - 单次回调**上限 2 分钟**，超时进程被系统终止 → 逻辑必须轻量（本类只调 Runner，不做事后处理）。
+//  - 周期由 BackgroundSyncService 设为 2 小时（系统活跃分组下限），此处不再重复设置。
+//  - 必须幂等：同步基于 etag 全量比对 + dirty 标记，天然幂等。
+//  - 必须主动 stopWork，否则系统按超时处理。
 import { WorkSchedulerExtensionAbility, workScheduler } from '@kit.BackgroundTasksKit';
-import { BusinessError } from '@kit.BasicServicesKit';
-import { DavAccount, AccountStore, TYPE_CALDAV } from '../common/AccountStore';
-import { SyncEngine } from '../common/SyncEngine';
-import { CardDataService } from '../common/CardDataService';
-import { ReminderService } from '../common/ReminderService';
-import { SystemCalendarImport } from '../common/SystemCalendarImport';
-import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
-import { MirrorInbound } from '../common/MirrorInbound';
-import { AppSettings } from '../common/AppSettings';
+import { BackgroundSyncRunner } from '../common/BackgroundSyncRunner';
 import { LogUtil } from '../common/LogUtil';
 
 export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
@@ -26,62 +23,9 @@ export default class SyncWorkAbility extends WorkSchedulerExtensionAbility {
 
   private async doSync(workInfo: workScheduler.WorkInfo): Promise<void> {
     try {
-      const context = this.context;
-      const accounts: DavAccount[] = await AccountStore.loadAll(context);
-      // 备份模式：先导入系统本地日历（幂等），再随同步推送
-      try {
-        await SystemCalendarImport.importIfNeeded(context);
-      } catch (err) {
-        // 导入失败不影响正常同步
-      }
-      // 入站对账：把用户在系统日历里的改动读回来置 dirty（必须在同步之前）
-      try {
-        await MirrorInbound.reconcile(context);
-      } catch (err) {
-        // 对账失败不影响正常同步
-      }
-      let ok: number = 0;
-      let attempted: number = 0;
-      for (const acc of accounts) {
-        if (acc.type !== TYPE_CALDAV) {
-          continue;
-        }
-        attempted++;
-        try {
-          // 超时保护由 syncAccount 内部处理（全量重拉 10 分钟 / 常规 5 分钟），不再套外层超时
-          await SyncEngine.syncAccount(context, acc);
-          ok++;
-        } catch (err) {
-          const e = err as BusinessError;
-          LogUtil.write(`延迟任务同步 id=${acc.id} 失败: ${e.message}`);
-        }
-      }
-      // 全部账号同步成功才结束"一次性全量重拉"状态
-      if (attempted > 0 && ok === attempted) {
-        await AppSettings.markFullRefetchDone(context);
-      }
-      await SyncEngine.settleLocalEvents(context);
-      await SyncEngine.pruneOrphanRows(context, accounts);
-      // ⚠️ 必须回写账号：syncAccount 会就地更新 acc（服务器日历本颜色、写权限等）。
-      // 缺了这一步，后台同步刷到的颜色只留在内存里、进程退出即丢失，
-      // 界面下次冷启动仍用旧颜色（表现为"同步之后颜色还是不对"）。
-      await AccountStore.saveAll(context, accounts);
-      // 出站镜像：把服务器最新状态写进系统日历（自动化，无需手点）
-      try {
-        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
-          const mr = await SystemCalendarMirror.syncNow(context);
-          LogUtil.write(`延迟任务自动镜像：本=${mr.books} 新增=${mr.added} 更新=${mr.updated} 删除=${mr.deleted}`);
-        }
-      } catch (err) {
-        // 镜像失败不影响同步
-      }
-      // 同步后刷新卡片 + 重建提醒，保证后台同步的成果直接可见
-      await CardDataService.pushToAllForms(context);
-      await ReminderService.refreshReminders(context);
-      LogUtil.write(`延迟任务同步完成：${ok} 个账号`);
-    } catch (err) {
-      const e = err as BusinessError;
-      LogUtil.write(`延迟任务同步失败: ${e.message}`);
+      // 完整的后台同步流程（导入/对账/逐账号同步/镜像/卡片/提醒）统一由 Runner 实现，
+      // 与"网络恢复补同步"、"回到前台补同步"共用同一套逻辑，避免三处实现漂移。
+      await BackgroundSyncRunner.runOnce(this.context, 'deferred');
     } finally {
       // 必须主动结束，否则系统按 120 秒超时处理
       workScheduler.stopWork(workInfo);

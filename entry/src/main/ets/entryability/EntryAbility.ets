@@ -2,6 +2,8 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want, Configuration,
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
+import { NetworkSyncWatcher } from '../common/NetworkSyncWatcher';
+import { BackgroundSyncRunner } from '../common/BackgroundSyncRunner';
 import { LogUtil } from '../common/LogUtil';
 
 const DOMAIN = 0x0000;
@@ -12,8 +14,11 @@ export default class EntryAbility extends UIAbility {
     // 文件日志初始化：所有页面的同步日志统一写入 filesDir/sync.log
     LogUtil.init(this.context);
     LogUtil.write('---- App 启动 ----');
-    // 后台同步：注册延迟任务兜底 + 按设置恢复长时任务
+    // 后台同步：注册延迟任务兜底（2 小时）＋ 网络恢复补同步监听
+    // ⚠️ 不再申请"长时任务"：dataTransfer 类型有 10 分钟无进度即被取消的一致性校验，
+    //    日历同步不符合该语义、必被取消（详见 BackgroundSyncService 顶部注释）。
     BackgroundSyncService.initOnLaunch(this.context);
+    NetworkSyncWatcher.start(this.context);
     // 服务卡片"添加"按钮跳转：把 widgetAction=add 透传给主页面（在 AppStorage 中暂存）
     this.handleWidgetParam(want);
     // ⚠️ 这里**不再申请任何权限**（含通知权限）。
@@ -189,9 +194,15 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
+    // ⭐ 回到前台：① 归还短时任务配额 ② 立刻补同步一次（用户真正要看时数据必须最新）
+    BackgroundSyncService.cancelTransientSync();
+    BackgroundSyncRunner.runOnce(this.context, 'foreground');
   }
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+    // ⭐ 退到后台：申请短时任务，兜住"退后台后那一次"同步能跑完
+    //    （必须在退后台 5 秒内申请；单次最长 3 分钟，单日配额 10 分钟）
+    BackgroundSyncService.requestTransientSync('正在同步日历数据');
   }
 }

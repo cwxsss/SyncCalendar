@@ -13,9 +13,6 @@
         "name": "ohos.permission.INTERNET"
       },
       {
-        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
-      },
-      {
         "name": "ohos.permission.PUBLISH_AGENT_REMINDER"
       },
       {
@@ -83,9 +80,6 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "orientation": "auto_rotation_restricted",
-        "backgroundModes": [
-          "dataTransfer"
-        ],
         "skills": [
           {
             "entities": [
