@@ -1,0 +1,90 @@
+/**
+ * build-profile.json5 模板（示例）
+ *
+ * 用法：
+ *   1. 把本文件复制为同目录下的 build-profile.json5
+ *   2. 按注释把 <尖括号> 内容替换成你自己的签名信息
+ *   3. 不要提交生成后的 build-profile.json5（它已在 .gitignore 中）
+ *
+ * 4 个签名文件（.p12 / .cer / .p7b ×2）需要放在仓库之外的任意目录，
+ * 这里用 D:/DevEcoSign/ 作为示例路径，请改成你自己的真实路径。
+ *
+ * 如何获取这些文件、在哪里填写，详见 README.md 的「📦 构建与运行 → 二、首次构建：先补上签名配置」。
+ *
+ * 最省事的替代方案：用 DevEco Studio 打开工程 →
+ *   File → Project Structure → Project → Signing Configs →
+ *   勾选 "Automatically generate signature" 并登录华为开发者账号，
+ *   IDE 会自动生成并填好本文件，无需手工编辑。
+ */
+{
+  "app": {
+    "signingConfigs": [
+      {
+        // ── 调试配置：真机安装 / 本地运行用这一项 ──
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile": "D:/DevEcoSign/<你的密钥库>.p12",
+          "storePassword": "<密钥库口令>",
+          "keyAlias": "<密钥别名>",
+          "keyPassword": "<私钥口令>",
+          "signAlg": "SHA256withECDSA",
+          "profile": "D:/DevEcoSign/<你的调试Profile>.p7b",
+          "certpath": "D:/DevEcoSign/<你的调试证书>.cer"
+        }
+      },
+      {
+        // ── 上架配置：打 .app 上架包用这一项（真机安装请勿使用）──
+        "name": "release",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile": "D:/DevEcoSign/<你的密钥库>.p12",
+          "storePassword": "<密钥库口令>",
+          "keyAlias": "<密钥别名>",
+          "keyPassword": "<私钥口令>",
+          "signAlg": "SHA256withECDSA",
+          "profile": "D:/DevEcoSign/<你的发布Profile>.p7b",
+          "certpath": "D:/DevEcoSign/<你的发布证书>.cer"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        // 用哪套签名：真机安装填 "default"；打上架包前改成 "release"
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.1.1(24)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

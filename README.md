@@ -2,7 +2,7 @@
 
 一款以**同步为核心**的鸿蒙原生日历应用，基于 HarmonyOS NEXT（ArkTS / Stage 模型）开发。对接标准 CalDAV 服务器（群晖、Nextcloud、Radicale、Baikal 等），让你的日程真正掌握在自己手里——不经过第三方云服务，数据始终同步在你自己的 NAS 上。
 
-- 应用市场送审版本：**0.0.2** ｜ 仓库当前：**0.0.3**（versionCode 300）
+- 应用市场送审版本：**0.0.6** ｜ 仓库当前：**0.0.6**（versionCode 600）
 - 官网：<https://synccalendar.yangyq.net> ｜ 问题反馈：<https://synccalendar.yangyq.net/feedback/>
 - 开源协议：Apache License 2.0
 
@@ -55,10 +55,14 @@
 
 ### 后台同步与数据备份
 
-- **自动同步间隔**：App 在前台时按设定间隔自动同步
-- **后台持续同步**：申请后台长时任务（`dataTransfer`），退到后台也按间隔继续同步，通知栏显示常驻通知
-- **系统级定时同步**：通过 WorkScheduler 扩展能力在条件满足时触发一轮同步
+- **前台自动同步**：App 在前台时按设定间隔自动同步（可设 1 / 5 / 15 / 30 分钟）
+- **后台自动同步**：开启后由系统定时唤起同步，退到后台也会继续（受系统省电策略限制，**最短约 2 小时一次**）
+- **回到前台 / 网络恢复补同步**：切回应用、或从断网恢复到有网时，**立即补同步一次**，保证你打开日历时数据总是最新的
 - **应用数据备份/恢复**：接入 Backup 扩展能力，换机时可恢复账号与本地数据
+
+> 说明：HarmonyOS 出于省电考虑，**不允许普通应用在后台常驻并高频轮询**
+> （长时任务 `dataTransfer` 超过 10 分钟无进度即被系统取消，延迟任务存在小时级下限）。
+> 本应用遵循系统机制，采用「前台按间隔同步 + 后台定时唤起 + 回前台/网络恢复即时补同步」的分层组合。
 
 ### 界面与适配
 
@@ -69,7 +73,7 @@
 
 ### 设置项一览
 
-系统日历处理方式（仅显示 / 备份到 CalDAV）· 镜像到系统日历 · 选择要镜像的日历本 · 回写开关 · 默认视图 · 日程显示方式 · 自动同步间隔 · 后台持续同步 · 通知权限 · 混合显示系统日历 · 日历本只读 / 静音 · 重建日程数据 · 重置账号库 · 软件特性 · 使用帮助 · 隐私政策与用户协议
+系统日历处理方式（仅显示 / 备份到 CalDAV）· 镜像到系统日历 · 选择要镜像的日历本 · 回写开关 · 默认视图 · 日程显示方式 · 自动同步间隔 · 后台自动同步 · 通知权限 · 混合显示系统日历 · 日历本只读 / 静音 · 重建日程数据 · 重置账号库 · 软件特性 · 使用帮助 · 隐私政策与用户协议
 
 ---
 
@@ -89,10 +93,11 @@
 
 - **架构**：`SyncEngine` 同步引擎 + `DavClient`（HTTP / WebDAV）+ `EventDb`（relationalStore 本地库）+ `CalendarDataService`（多源合并展示）
 - **镜像**：`SystemCalendarMirror`（出站写入）+ `MirrorInbound`（入站回写）+ `MirrorSnapshot`（变更快照）
+- **后台调度**：`BackgroundSyncRunner`（后台同步唯一执行体）+ `BackgroundSyncService`（延迟任务/短时任务）+ `NetworkSyncWatcher`（网络恢复补同步）
 - **卡片**：FormExtensionAbility + FormBindingData，JSON 数据驱动渲染
 - **农历**：`LunarUtil`，1901–2099 压缩表推算
 - **提醒**：`ReminderService` 基于 `reminderAgentManager` 代理提醒
-- **权限**：INTERNET / READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（仅镜像）/ PUBLISH_AGENT_REMINDER / KEEP_BACKGROUND_RUNNING / LOCATION（仅地点导航时）
+- **权限**：INTERNET / READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（仅镜像）/ PUBLISH_AGENT_REMINDER / LOCATION（仅地点导航时）
 
 ### 目录结构
 
@@ -118,7 +123,7 @@ SyncCalendar/
    │  ├─ entryability/          主能力
    │  ├─ entrybackupability/    应用数据备份恢复
    │  ├─ entryformability/      桌面卡片
-   │  └─ syncwork/              后台定时同步（WorkScheduler）
+   │  └─ syncwork/              后台定时同步（WorkScheduler 扩展能力）
    └─ resources/                base / dark 两套资源与颜色
 ```
 
@@ -126,14 +131,169 @@ SyncCalendar/
 
 ## 📦 构建与运行
 
-1. 使用 **DevEco Studio** 打开工程根目录
-2. 连接鸿蒙真机（需 HarmonyOS NEXT）或模拟器
-3. 编译安装后进入「≡ → 账号管理」，添加 CalDAV 服务器地址、用户名和密码
-4. 选择要同步的日历本，等待首次同步完成
-5. 长按桌面空白处 → 添加服务卡片，选择 SyncCalendar 的卡片规格
+### 一、准备工程
 
-> 上架包构建：`hvigorw assembleApp --mode project -p product=default -p buildMode=release`
-> （需要在 `build-profile.json5` 里配置自己的签名，该文件不入库）
+1. 安装 **DevEco Studio**（建议 5.0 及以上，需配套 HarmonyOS NEXT SDK）
+2. 用 DevEco Studio 打开工程根目录，等待自动同步（`ohpm install`）完成
+3. 连接鸿蒙真机（需 HarmonyOS NEXT）或模拟器
+
+### 二、首次构建：先补上签名配置（重要）
+
+> **为什么需要自己配？**
+> 鸿蒙应用在编译安装与上架时都必须签名。工程根目录的 **`build-profile.json5`** 里记录了
+> 签名文件的**绝对路径与加密口令**，属于机器相关且敏感的凭据，因此该文件**被 `.gitignore` 排除、不在仓库中**。
+> 你从仓库克隆下来的代码默认**不含任何签名信息**，直接编译会失败。下面是补全方法。
+
+#### 1. 需要准备哪些文件
+
+签名一共涉及 **4 个文件**，全部放在仓库**之外**的某个目录里（例如 `D:\DevEcoSign\`）：
+
+| 文件 | 格式 | 说明 |
+|---|---|---|
+| 密钥库 | `.p12` | 存放你的私钥与证书链，**最关键、绝不能泄露** |
+| 证书 | `.cer` | 与密钥库配套的应用证书 |
+| Profile | `.p7b` | 授权档案，决定该包能装到哪些设备 / 能否上架 |
+| （口令） | — | 密钥库口令、私钥口令（在生成时自己设定，请务必记牢） |
+
+#### 2. 这些文件怎么申请、怎么得到
+
+有两种途径，按你的目的选一种：
+
+**途径 A：调试用（自用真机安装）—— 全自动，推荐**
+
+DevEco Studio 可以一键生成并自动完成签名配置，无需手工操作：
+
+1. 打开 `File → Project Structure → Project → Signing Configs`
+2. 勾选 **`Automatically generate signature`**（自动生成签名）
+3. 按提示登录你的**华为开发者账号**（需先在 [AppGallery Connect](https://developer.huawei.com/consumer/cn/) 完成实名认证）
+4. 等待自动完成——DevEco 会替你：生成 `.p12` 密钥库与 `.cer` 证书 → 向华为**申请调试 Profile（`.p7b`）**
+   并自动注册当前设备 → 把 `signingConfigs` 写入 `build-profile.json5`
+5. 生成的文件默认落在 `C:\Users\<你>\.ohos\config\` 下
+
+> 这是最省事的方式，**只要一个已实名认证的华为开发者账号**即可，不需要额外审批。
+
+**途径 B：上架用（发布到应用市场）—— 需在 AGC 后台申请**
+
+若要打**上架包**（`.app`），必须使用**发布证书 + 发布 Profile**，需手动申请：
+
+1. 登录 [AppGallery Connect](https://developer.huawei.com/consumer/cn/)，进入
+   `用户与访问 → 证书管理`，创建并下载：
+   - **发布证书（`.cer`）**——需先在本机用 `keytool` 或 DevEco 生成一个 `.p12` 密钥库，
+     再上传其生成的 **CSR 文件**申请证书；
+   - **发布 Profile（`.p7b`）**——在 `证书、APP ID 和 Profile → Profile` 中新建，
+     类型选 **发布（Release）**，关联上面的证书与你的 App ID。
+2. 记住创建密钥库时设定的**密钥库口令**与**私钥口令**。
+
+> 官方文档入口：AppGallery Connect → 帮助中心 → **「配置应用签名」** / 「证书管理」。
+
+#### 3. 在哪个文件里填写
+
+在**仓库根目录**新建 `build-profile.json5`（就是被忽略的那份），填入你的签名信息。
+可直接复制仓库中的模板 **`build-profile.example.json5`** 改名为 `build-profile.json5` 后使用，格式如下：
+
+```json5
+{
+  "app": {
+    "signingConfigs": [
+      {
+        // 调试配置：真机安装用这项
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile":    "D:/DevEcoSign/your.p12",        // ← 改成你的密钥库绝对路径
+          "storePassword": "<你的密钥库口令>",              // ← 自动生成时是一段密文
+          "keyAlias":     "your_key_alias",                 // ← 密钥别名（生成时指定）
+          "keyPassword":  "<你的私钥口令>",                 // ← 同上
+          "signAlg":      "SHA256withECDSA",
+          "profile":      "D:/DevEcoSign/yourDebug.p7b",    // ← 调试 Profile
+          "certpath":     "D:/DevEcoSign/yourDebug.cer"     // ← 配套证书
+        }
+      },
+      {
+        // 上架配置：打 .app 包用这项（真机安装勿用）
+        "name": "release",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile":    "D:/DevEcoSign/your.p12",
+          "storePassword": "<你的密钥库口令>",
+          "keyAlias":     "your_key_alias",
+          "keyPassword":  "<你的私钥口令>",
+          "signAlg":      "SHA256withECDSA",
+          "profile":      "D:/DevEcoSign/yourRelease.p7b",  // ← 发布 Profile
+          "certpath":     "D:/DevEcoSign/yourRelease.cer"   // ← 发布证书
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",        // 用哪套签名：debug 用 "default"，上架改 "release"
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.1.1(24)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": { "caseSensitiveCheck": true, "useNormalizedOHMUrl": true }
+        }
+      }
+    ],
+    "buildModeSet": [ { "name": "debug" }, { "name": "release" } ]
+  },
+  "modules": [
+    { "name": "entry", "srcPath": "./entry",
+      "targets": [ { "name": "default", "applyToProducts": [ "default" ] } ] }
+  ]
+}
+```
+
+**关键位置说明：**
+
+| 位置 | 作用 |
+|---|---|
+| `signingConfigs[].material.*` | 四个签名文件的**绝对路径**与两个口令 |
+| `products[0].signingConfig` | 选哪套签名：真机安装填 `"default"`，打上架包填 `"release"` |
+
+> ⚠️ **`build-profile.json5` 已在 `.gitignore` 中，请勿提交**。
+> 若用「途径 A」自动生成，DevEco 会自动创建并填好该文件，你通常无需手写。
+> 注意：`entry/build-profile.json5` 是**模块级**普通构建配置（不含密钥），它在仓库中是**需要保留**的，两者不要混淆。
+
+#### 4. 一个更省事的替代做法
+
+如果不想手写，也可以直接在 DevEco Studio 里操作：
+`File → Project Structure → Project → Signing Configs`，勾选 `Automatically generate signature`
+并登录华为开发者账号——DevEco 会自动把 `build-profile.json5` 生成好，随后直接编译即可。
+
+### 三、编译运行
+
+1. 点击 DevEco Studio 的 **Run ▶**，或执行：
+
+   ```bash
+   hvigorw assembleHap --mode module -p product=default
+   ```
+
+2. 安装后进入「≡ → 账号管理」，添加 CalDAV 服务器地址、用户名和密码
+3. 选择要同步的日历本，等待首次同步完成
+4. 长按桌面空白处 → 添加服务卡片，选择 SyncCalendar 的卡片规格
+
+### 四、打上架包（App Pack）
+
+应用市场上架需要提交 **`.app`（App Pack）**，而不是 `.hap`（`.hap` 仅用于真机侧载）：
+
+```bash
+hvigorw assembleApp --mode project -p product=default -p buildMode=release
+```
+
+- 产物：`build/outputs/default/SyncCalendar-default-signed.app`
+- **前提**：请先把 `products[0].signingConfig` 改为 `"release"`（用发布证书 + 发布 Profile），
+  否则会因签名不匹配而无法通过审核。
+- 校验签名（可选，`-inForm zip` 不可省，否则会误报 `can not find codesign block`）：
+
+  ```bash
+  java -jar hap-sign-tool.jar verify-app -inForm zip \
+       -inFile SyncCalendar-default-signed.app \
+       -outCertChain out.cer -outProfile out.p7b
+  ```
+
+  出现 `verify-app success` 即表示签名有效。
 
 ---
 
