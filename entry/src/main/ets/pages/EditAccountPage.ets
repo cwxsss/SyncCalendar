@@ -10,6 +10,7 @@ import { common } from '@kit.AbilityKit';
 import { buffer } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore } from '../common/AccountStore';
+import { DavDiscovery, DiscoverResult } from '../common/DavDiscovery';
 import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
 import { EventDb } from '../common/EventDb';
 import { BackupTargetCheck, SystemCalendarMirror } from '../common/SystemCalendarMirror';
@@ -141,16 +142,39 @@ struct EditAccountPage {
       return;
     }
     // PROPFIND 与解析统一走 DavClient.listCalendars（与「添加账号」页共用同一实现）
+    const auth: string = 'Basic ' + token;
+    // ⭐ 0.0.7：地址自动发现/智能补全（老账号可能当初填的是 DAV 根或已失效的路径）
     try {
-      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.acc.serverUrl, 'Basic ' + token);
+      const resolved: DiscoverResult = await DavDiscovery.resolve(
+        this.acc.serverUrl,
+        this.acc.username,
+        auth,
+        async (u: string): Promise<boolean> => {
+          const d: DavCalendarDiscovery = await DavClient.listCalendars(u, auth);
+          return d.entries !== undefined && d.entries.length > 0;
+        });
+      if (resolved.ok && resolved.url !== '' && resolved.url !== this.acc.serverUrl) {
+        LogUtil.write(`编辑账号：服务地址自动修正 ${this.acc.serverUrl} → ${resolved.url}（${resolved.via}）`);
+        this.acc.serverUrl = resolved.url;
+      } else if (!resolved.ok && resolved.hint !== '') {
+        this.isLoading = false;
+        this.statusMsg = resolved.hint;
+        this.statusOk = false;
+        return;
+      }
+    } catch (err) {
+      LogUtil.write(`编辑账号：地址发现异常，回退原地址 ${(err as BusinessError).message}`);
+    }
+    try {
+      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.acc.serverUrl, auth);
       this.isLoading = false;
       if (disc.statusCode === 401) {
-        this.statusMsg = '登录已失效，请检查账号密码';
+        this.statusMsg = '服务器拒绝凭据（401）：请检查用户名与密码。若服务器开启了二次验证，请使用「应用密码」';
         this.statusOk = false;
         return;
       }
       if (disc.statusCode !== 207 && disc.statusCode !== 200) {
-        this.statusMsg = `获取日历列表失败，服务器返回：${disc.statusCode}`;
+        this.statusMsg = DavDiscovery.statusHint(disc.statusCode);
         this.statusOk = false;
         return;
       }
@@ -158,7 +182,7 @@ struct EditAccountPage {
         new EditCalendarItem(e.href, e.displayName, e.color));
       if (list.length === 0) {
         LogUtil.write('编辑账号：未发现任何日历本');
-        this.statusMsg = '该路径下未发现日历本';
+        this.statusMsg = DavDiscovery.emptyHint(this.acc.serverUrl, this.acc.username);
         this.statusOk = false;
       } else {
         // 已勾选的日历本按账号当前配置预选

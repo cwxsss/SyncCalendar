@@ -5,6 +5,7 @@ import { buffer } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_CALDAV } from '../common/AccountStore';
 import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
+import { DavDiscovery, DiscoverResult, DavCapability } from '../common/DavDiscovery';
 import { LogUtil } from '../common/LogUtil';
 
 /**
@@ -98,17 +99,44 @@ struct CalendarListPage {
       this.statusOk = false;
       return;
     }
+    const auth: string = 'Basic ' + token;
+    // ⭐ 0.0.7：先做地址自动发现/智能补全 —— 用户常只填域名或 DAV 根，
+    //    而 Nextcloud 等要求填「日历家目录」。此处自动找对端点，避免"读不出日历"。
+    try {
+      const resolved: DiscoverResult = await DavDiscovery.resolve(
+        this.serverUrl,
+        this.username,
+        auth,
+        async (u: string): Promise<boolean> => {
+          const d: DavCalendarDiscovery = await DavClient.listCalendars(u, auth);
+          return d.entries !== undefined && d.entries.length > 0;
+        });
+      if (resolved.ok && resolved.url !== '' && resolved.url !== this.serverUrl) {
+        LogUtil.write(`服务地址已自动修正：${this.serverUrl} → ${resolved.url}（来源 ${resolved.via}）`);
+        this.serverUrl = resolved.url;
+      } else if (!resolved.ok && resolved.hint !== '') {
+        // 自动发现彻底失败 → 直接把"人话原因"给用户，不再只报一个状态码
+        this.isLoading = false;
+        this.statusMsg = resolved.hint;
+        this.statusOk = false;
+        return;
+      }
+    } catch (err) {
+      // 发现阶段异常不阻塞：继续用原地址走既有流程（保持旧行为兜底）
+      LogUtil.write(`地址发现阶段异常，回退原地址：${(err as BusinessError).message}`);
+    }
     // PROPFIND 与解析统一走 DavClient.listCalendars（与「编辑账号」页共用同一实现，避免重复正则逻辑）
     try {
-      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.serverUrl, 'Basic ' + token);
+      const disc: DavCalendarDiscovery = await DavClient.listCalendars(this.serverUrl, auth);
       this.isLoading = false;
       if (disc.statusCode === 401) {
-        this.statusMsg = '登录已失效，请返回重新连接';
+        this.statusMsg = '服务器拒绝凭据（401）：请返回检查用户名与密码。若服务器开启了二次验证，请使用「应用密码」';
         this.statusOk = false;
         return;
       }
       if (disc.statusCode !== 207 && disc.statusCode !== 200) {
-        this.statusMsg = `获取日历列表失败，服务器返回：${disc.statusCode}`;
+        // ⭐ 0.0.7：把生硬的状态码换成人话 + 可操作指引
+        this.statusMsg = DavDiscovery.statusHint(disc.statusCode);
         this.statusOk = false;
         return;
       }
@@ -118,7 +146,8 @@ struct CalendarListPage {
         LogUtil.write(`发现日历本：「${item.name}」${item.href} 颜色=${item.color === '' ? '(无)' : item.color}`);
       }
       if (list.length === 0) {
-        this.statusMsg = '该路径下未发现日历本（没有包含 calendar 资源类型的集合）';
+        // ⭐ 0.0.7：区分"地址层级不对"与"确实没有日历"，并给出正确填法示例
+        this.statusMsg = DavDiscovery.emptyHint(this.serverUrl, this.username);
         this.statusOk = false;
       } else {
         this.calendarList = list;

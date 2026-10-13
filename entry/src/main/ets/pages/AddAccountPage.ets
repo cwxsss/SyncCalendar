@@ -6,6 +6,8 @@ import { buffer } from '@kit.ArkTS';
 import url from '@ohos.url';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { TYPE_CALDAV, TYPE_CARDDAV, TYPE_WEBDAV } from '../common/AccountStore';
+import { DavDiscovery, DavCapability } from '../common/DavDiscovery';
+import { LogUtil } from '../common/LogUtil';
 
 @Entry
 @Component
@@ -107,12 +109,30 @@ struct AddAccountPage {
         code = await this.sendOnce(serverUrl, http.RequestMethod.GET, authHeader);
       }
       if (code === 401) {
-        this.statusMsg = '服务器拒绝凭据(401)，请检查用户名密码';
+        this.statusMsg = '服务器拒绝凭据（401）：请检查用户名与密码。若服务器开启了二次验证，请使用「应用密码」';
         this.statusOk = false;
         return false;
       }
+      // ⭐ 0.0.7：405 是"这里不是 DAV 端点"的典型信号 —— 直接给出可操作指引，
+      //    而不是笼统地报一个状态码让用户去猜。
+      if (code === 405) {
+        const cap: DavCapability = await DavDiscovery.optionsCapability(serverUrl, authHeader);
+        if (!cap.isDav) {
+          this.statusMsg = '这个地址不是 CalDAV 端点（服务器不接受 WebDAV 方法，返回 405）。\n\n'
+            + '请填写「日历家目录」而不是 DAV 根或网页链接，例如：\n'
+            + 'https://你的域名/remote.php/dav/calendars/你的用户名/\n\n'
+            + '（也可以直接填域名，下一步会自动尝试发现）';
+          this.statusOk = false;
+          return false;
+        }
+      }
       if (code >= 200 && code < 500) {
-        this.statusMsg = '服务器连接成功';
+        // ⭐ 即使可连，也顺手提示"地址看起来不完整"，让用户提前知道下一步会自动补全
+        if (DavDiscovery.looksIncomplete(serverUrl)) {
+          this.statusMsg = '服务器连接成功（该地址看起来是服务器根路径，下一步会自动尝试定位日历家目录）';
+        } else {
+          this.statusMsg = '服务器连接成功';
+        }
         this.statusOk = true;
         return true;
       }
@@ -186,6 +206,17 @@ struct AddAccountPage {
     if (this.isLoading) {
       return;
     }
+    // ⭐ 0.0.7：先识别「网页分享链接」——这类地址对 PROPFIND 必定 405，
+    //    提前拦下并给出人话指引，避免用户白跑一趟只看到"服务器返回 405"。
+    const kind: string = DavDiscovery.classify(targetUrl);
+    const shareMsg: string = DavDiscovery.shareHint(kind);
+    if (shareMsg !== '') {
+      this.statusMsg = shareMsg;
+      this.statusOk = false;
+      LogUtil.write(`添加账号：识别为网页分享链接（${kind}），已拦截`);
+      return;
+    }
+
     this.isLoading = true;
     this.statusMsg = '正在连接服务器…';
     this.statusOk = false;
@@ -229,7 +260,7 @@ struct AddAccountPage {
       .width('100%')
 
       Column({ space: 16 }) {
-        this.formField('服务器地址', '例如：https://nas.example.com/caldav/', this.serverUrl,
+        this.formField('服务器地址', '例如：https://nas.example.com/remote.php/dav/calendars/用户名/（也可只填域名，下一步会自动识别）', this.serverUrl,
           (value: string) => {
             this.serverUrl = value;
           }, false)
