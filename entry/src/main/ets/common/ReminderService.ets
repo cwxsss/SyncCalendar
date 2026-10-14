@@ -12,7 +12,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
 import { AppSettings } from './AppSettings';
 import { AccountStore } from './AccountStore';
-import { SystemCalendarMirror, BookRef } from './SystemCalendarMirror';
+import { SystemCalendarMirror } from './SystemCalendarMirror';
 import { LogUtil } from './LogUtil';
 
 export class ReminderService {
@@ -34,32 +34,21 @@ export class ReminderService {
   /**
    * ⭐⭐ 取"已镜像到系统日历"的日历本 calKey 集合（0.0.8 修复双通道重复提醒）。
    *
-   * 背景：镜像到系统日历后，**系统日历自己会提醒**（条目的 reminderTime）。
-   *   若 App 再为同一个本排代理提醒 → 同一条日程提醒两次。
-   *   因此这里返回"该由系统日历负责提醒"的本，App 侧跳过它们。
+   * 镜像到系统日历后，**系统日历自己会提醒**（条目的 reminderTime）；
+   * 若 App 再为同一个本排代理提醒 → 同一条日程提醒两次。
+   * 因此这里返回"该由系统日历负责提醒"的本，App 侧**完全不再提醒**它们。
    *
+   * ⚠️ 判据是"**镜像账户真实存在**"（`SystemCalendarMirror.mirroredCalKeys`），
+   *    而不是"用户勾选了要镜像"—— 后者只是意图，本可能还没被真正写进系统日历；
+   *    按意图跳过会导致"两边都不提醒"（漏提醒）。
    * ⚠️ 返回空集 = 不跳过任何本（保守：宁可多提醒，不可漏提醒）。
-   *   仅在「镜像开关已开 + 有系统日历权限 + 有选中本」时才真正跳过。
    */
   private static async mirroredKeys(context: common.Context): Promise<Set<string>> {
     if (Date.now() - ReminderService.mirroredLoadedAt < 30000
       && ReminderService.mirroredCalKeys.size > 0) {
       return ReminderService.mirroredCalKeys;
     }
-    const out: Set<string> = new Set<string>();
-    try {
-      const on: boolean = await AppSettings.getMirrorEnabled(context);
-      if (on && await SystemCalendarMirror.hasPermission()) {
-        const refs: BookRef[] = await SystemCalendarMirror.selectedBookRefs(context);
-        for (const r of refs) {
-          if (r.calKey !== '') {
-            out.add(r.calKey);
-          }
-        }
-      }
-    } catch (err) {
-      // 判定失败 → 返回空集（不跳过，避免漏提醒）
-    }
+    const out: Set<string> = await SystemCalendarMirror.mirroredCalKeys(context);
     ReminderService.mirroredCalKeys = out;
     ReminderService.mirroredLoadedAt = Date.now();
     return out;

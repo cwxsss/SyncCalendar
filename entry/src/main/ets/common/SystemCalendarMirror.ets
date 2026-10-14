@@ -239,6 +239,56 @@ export class SystemCalendarMirror {
     return name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX);
   }
 
+  /**
+   * ⭐⭐ 取"**确实已经镜像到系统日历**"的日历本 calKey 集合（按镜像账户的**真实存在性**判定）。
+   *
+   * 与"用户勾选了要镜像的本"不同 —— 后者只是**意图**，本可能还没被真正写进系统日历
+   * （如刚勾选但没点「立即执行镜像」、或根本没开镜像开关）。
+   * 若按"意图"跳过 App 提醒，而系统日历里其实还没有 → **两边都不提醒 = 漏提醒**。
+   * 故这里只认**镜像账户真实存在**这一条。
+   *
+   * ⚠️ 返回**空集**＝不跳过任何本（读不到账户时保守处理，宁可多提醒）。
+   * ⚠️ 未开启镜像开关时直接返回空集（省一次系统查询）。
+   */
+  static async mirroredCalKeys(context: common.Context): Promise<Set<string>> {
+    const out: Set<string> = new Set<string>();
+    try {
+      if (!await AppSettings.getMirrorEnabled(context)) {
+        return out; // 未开启镜像 → 没有任何本由系统日历负责
+      }
+      if (!await SystemCalendarMirror.hasPermission()) {
+        return out; // 无权限 → 系统日历里不可能有我们的条目
+      }
+      const cm: calendarManager.CalendarManager = calendarManager.getCalendarManager(context);
+      const all: calendarManager.Calendar[] = [];
+      const cals: calendarManager.Calendar[] = await cm.getAllCalendars();
+      for (const c of cals) {
+        all.push(c);
+      }
+      // 存在镜像账户 → 其 bookId 对应的本由系统日历负责
+      const presentBookIds: Set<string> = new Set<string>();
+      for (const c of all) {
+        const name: string = c.getAccount().name;
+        if (name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX)) {
+          presentBookIds.add(name.substring(SystemCalendarMirror.ACCOUNT_PREFIX.length));
+        }
+      }
+      if (presentBookIds.size === 0) {
+        return out;
+      }
+      // bookId → calKey（从当前账号配置解析）
+      const refs: BookRef[] = await SystemCalendarMirror.listBooks(context);
+      for (const r of refs) {
+        if (presentBookIds.has(r.bookId) && r.calKey !== '') {
+          out.add(r.calKey);
+        }
+      }
+    } catch (err) {
+      LogUtil.write(`判定"已镜像本"失败（按未镜像处理）: ${(err as BusinessError).message}`);
+    }
+    return out;
+  }
+
   /* ==================== 账户身份判定（0.0.8） ==================== */
 
   /**
