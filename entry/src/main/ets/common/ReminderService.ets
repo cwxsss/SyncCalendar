@@ -12,6 +12,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
 import { AppSettings } from './AppSettings';
 import { AccountStore } from './AccountStore';
+import { SystemCalendarMirror, BookRef } from './SystemCalendarMirror';
 import { LogUtil } from './LogUtil';
 
 export class ReminderService {
@@ -25,6 +26,50 @@ export class ReminderService {
   /** calKey → 日历本名称缓存（通知文案用），60 秒刷新一次 */
   private static calNameCache: Map<string, string> = new Map();
   private static calNameLoadedAt: number = 0;
+
+  /** 已镜像到系统日历的 calKey 集合缓存（避免重复排提醒），30 秒刷新一次 */
+  private static mirroredCalKeys: Set<string> = new Set();
+  private static mirroredLoadedAt: number = 0;
+
+  /**
+   * ⭐⭐ 取"已镜像到系统日历"的日历本 calKey 集合（0.0.8 修复双通道重复提醒）。
+   *
+   * 背景：镜像到系统日历后，**系统日历自己会提醒**（条目的 reminderTime）。
+   *   若 App 再为同一个本排代理提醒 → 同一条日程提醒两次。
+   *   因此这里返回"该由系统日历负责提醒"的本，App 侧跳过它们。
+   *
+   * ⚠️ 返回空集 = 不跳过任何本（保守：宁可多提醒，不可漏提醒）。
+   *   仅在「镜像开关已开 + 有系统日历权限 + 有选中本」时才真正跳过。
+   */
+  private static async mirroredKeys(context: common.Context): Promise<Set<string>> {
+    if (Date.now() - ReminderService.mirroredLoadedAt < 30000
+      && ReminderService.mirroredCalKeys.size > 0) {
+      return ReminderService.mirroredCalKeys;
+    }
+    const out: Set<string> = new Set<string>();
+    try {
+      const on: boolean = await AppSettings.getMirrorEnabled(context);
+      if (on && await SystemCalendarMirror.hasPermission()) {
+        const refs: BookRef[] = await SystemCalendarMirror.selectedBookRefs(context);
+        for (const r of refs) {
+          if (r.calKey !== '') {
+            out.add(r.calKey);
+          }
+        }
+      }
+    } catch (err) {
+      // 判定失败 → 返回空集（不跳过，避免漏提醒）
+    }
+    ReminderService.mirroredCalKeys = out;
+    ReminderService.mirroredLoadedAt = Date.now();
+    return out;
+  }
+
+  /** 镜像开关变化后调用，让缓存立即失效（如用户关闭镜像 → 立刻恢复 App 提醒） */
+  static invalidateMirrorCache(): void {
+    ReminderService.mirroredLoadedAt = 0;
+    ReminderService.mirroredCalKeys = new Set();
+  }
 
   /** 日历本名称（通知文案用）：缓存 60 秒，'local' = 本机日历 */
   private static async calName(context: common.Context, calKey: string): Promise<string> {
@@ -131,9 +176,17 @@ export class ReminderService {
         await EventDb.queryRemindable(context, now, now + ReminderService.WINDOW);
       // 提醒静音的日历本（如别人分享的本）：其中所有日程都不再提醒
       const muted: string[] = await AppSettings.getMutedReminderKeys(context);
+      // ⭐⭐ 已镜像到系统日历的本：由系统日历负责提醒，App 不再重复排（消除"提醒两次"）
+      const mirrored: Set<string> = await ReminderService.mirroredKeys(context);
+      if (mirrored.size > 0) {
+        LogUtil.write(`提醒跳过 ${mirrored.size} 个已镜像到系统日历的日历本（交由系统日历提醒）`);
+      }
       for (const e of rows) {
         if (muted.includes(e.calKey)) {
           continue;
+        }
+        if (mirrored.has(e.calKey)) {
+          continue; // ⭐ 已镜像 → 系统日历会提醒，这里跳过避免重复
         }
         if (published >= ReminderService.MAX_REMINDERS) {
           break;
@@ -211,10 +264,15 @@ export class ReminderService {
       const rows: LocalEvent[] =
         await EventDb.queryRemindable(context, now, now + ReminderService.WINDOW);
       const muted: string[] = await AppSettings.getMutedReminderKeys(context);
+      // ⭐⭐ 已镜像到系统日历的本：由系统日历负责提醒，App 侧不再补发（消除"提醒两次"）
+      const mirrored: Set<string> = await ReminderService.mirroredKeys(context);
       let fired: number = 0;
       for (const e of rows) {
         if (muted.includes(e.calKey)) {
           continue;
+        }
+        if (mirrored.has(e.calKey)) {
+          continue; // ⭐ 已镜像 → 交由系统日历提醒
         }
         const rems: number[] = e.reminders.length > 0 ? e.reminders
           : (e.reminder > 0 ? [e.reminder] : []);

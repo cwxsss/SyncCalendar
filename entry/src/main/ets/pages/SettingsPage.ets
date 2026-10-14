@@ -110,6 +110,8 @@ struct SettingsPage {
           if (!ok && this.context !== undefined) {
             this.mirrorEnabled = false;
             AppSettings.setMirrorEnabled(this.context, false);
+            // 权限被回收 → 镜像失效 → 提醒应交回 App 负责
+            ReminderService.invalidateMirrorCache();
           }
         });
       }
@@ -518,13 +520,19 @@ struct SettingsPage {
     }
     this.mirrorEnabled = isOn;
     await AppSettings.setMirrorEnabled(this.context, isOn);
+    // ⭐ 镜像开关变化 → 立即失效提醒侧的"已镜像本"缓存，并重排提醒
+    //    （开启：这些本改由系统日历提醒，App 不再重复；关闭：必须立刻恢复 App 提醒，避免漏提醒）
+    ReminderService.invalidateMirrorCache();
     if (isOn) {
       this.getUIContext().getPromptAction().showToast({
         message: '已开启镜像：勾选要同步的日历本后点「立即执行镜像」'
       });
+      await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
       return;
     }
     const n: number = await SystemCalendarMirror.removeAll(this.context);
+    // 关闭镜像后，这些本的提醒要交回 App 负责
+    await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
     this.getUIContext().getPromptAction().showToast({
       message: n > 0 ? `已关闭镜像，并清除系统日历中的 ${n} 个镜像账户` : '已关闭镜像'
     });
@@ -545,6 +553,9 @@ struct SettingsPage {
       return;
     }
     await AppSettings.setMirrorBookIds(this.context, this.mirrorKeys);
+    // ⭐ 勾选本变化 → 提醒侧"已镜像本"集合变化：失效缓存并重排提醒
+    ReminderService.invalidateMirrorCache();
+    await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
   }
 
   /**

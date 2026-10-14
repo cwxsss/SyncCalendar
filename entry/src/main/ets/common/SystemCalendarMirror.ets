@@ -1268,12 +1268,60 @@ export class SystemCalendarMirror {
       ev.location = { location: e.location };
     }
     const reminders: number[] = SystemCalendarMirror.remindersOf(e);
-    if (reminders.length > 0) {
-      ev.reminderTime = reminders;
+    // ⭐⭐ 只写"提醒时刻尚未到"的提醒（0.0.8 修复"已过日程仍提醒"）。
+    //   原因：写进系统日历的 reminderTime 一旦其时刻已过，系统会在**任何一次覆写**时
+    //   立即补发一条通知 → 表现为"日程都过去了还提醒"。这类提醒已无意义，索性不写。
+    const future: number[] = SystemCalendarMirror.futureReminders(
+      reminders, startTs, e.isAllDay, Date.now());
+    if (future.length > 0) {
+      ev.reminderTime = future;
     }
     // ⚠️ 这里**故意不设 recurrenceRule**：重复日程由我们自己按窗口展开成多条实例，
     //    交给系统日历展开会因 RecurrenceRule 表达不全而出现错误的重复（09-19 事故）。
     return ev;
+  }
+
+  /**
+   * 提醒时刻的"基准时刻"（系统口径）：
+   *  - 普通日程：以**开始时刻**为基准（提前 N 分钟 = start - N）；
+   *  - 全天日程：系统文档规定以**当日 09:00**为基准（提前 N 分钟 = 当天 09:00 - N）。
+   */
+  private static reminderBaseMs(startTs: number, isAllDay: boolean): number {
+    if (isAllDay) {
+      const d: Date = new Date(startTs);
+      d.setHours(9, 0, 0, 0);
+      return d.getTime();
+    }
+    return startTs;
+  }
+
+  /** 过滤出"提醒时刻还没到"的提醒（用于避免写入已过期的提醒而触发补发） */
+  private static futureReminders(
+    reminders: number[],
+    startTs: number,
+    isAllDay: boolean,
+    now: number
+  ): number[] {
+    const base: number = SystemCalendarMirror.reminderBaseMs(startTs, isAllDay);
+    const kept: number[] = [];
+    for (const r of reminders) {
+      if (r > 0 && base - r * 60000 > now) {
+        kept.push(r);
+      }
+    }
+    return kept;
+  }
+
+  /** 提醒数组的规范化字符串（排序去重后拼接），用于比较 */
+  private static reminderKey(reminders: number[]): string {
+    const s: number[] = reminders.slice().sort((a: number, b: number): number => a - b);
+    const out: string[] = [];
+    for (const n of s) {
+      if (out.indexOf(String(n)) < 0) {
+        out.push(String(n));
+      }
+    }
+    return out.join(',');
   }
 
   /** 本地时区当天 0 点的时间戳 */
@@ -1337,6 +1385,15 @@ export class SystemCalendarMirror {
     }
     if ((cur.location?.location ?? '') !== (want.location?.location ?? '')) {
       return 'location';
+    }
+    // ⭐ 0.0.8：提醒也要比较 —— 否则用户改了提醒时间，系统日历侧**永远不会更新**
+    //   （旧版 diffOf 不比 reminderTime，改动被判定为"无差异" → 不触发 updateEvent）。
+    //   ⚠️ 写入侧已过滤掉"已过期"的提醒（见 toSystemEvent / futureReminders），
+    //      所以这里的比较也用同一口径，避免"每轮都因提醒不同而重写"。
+    const curRem: number[] = cur.reminderTime ?? [];
+    const wantRem: number[] = want.reminderTime ?? [];
+    if (SystemCalendarMirror.reminderKey(curRem) !== SystemCalendarMirror.reminderKey(wantRem)) {
+      return `reminder ${SystemCalendarMirror.reminderKey(curRem) || '(无)'} != ${SystemCalendarMirror.reminderKey(wantRem) || '(无)'}`;
     }
     return '';
   }
