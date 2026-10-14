@@ -20,6 +20,10 @@ export class AppSettings {
   private static readonly KEY_MANUAL_READONLY: string = 'manual_readonly_keys'; // 手动标记只读的 calKey
   private static readonly KEY_MUTED_REMINDER: string = 'muted_reminder_keys';  // 提醒静音的 calKey
   private static readonly KEY_REMINDER_TICK: string = 'reminder_tick';         // 应用内提醒上次检查时间戳
+  // ⭐ 卡片刷新驱动的后台同步：上次执行时间戳（用于节流）。
+  //   服务卡片每 30 分钟被系统刷新一次（form_config 的 updateDuration=1），
+  //   借这个时机顺带跑一次后台同步 —— 得到"约 30 分钟一次"的定期同步。
+  private static readonly KEY_CARD_SYNC_AT: string = 'card_sync_at';
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
   private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
@@ -320,6 +324,29 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存显示名格式失败: ${e.message}`);
+    }
+  }
+
+  /** ⭐ 卡片刷新驱动的后台同步：上次执行时间戳（0 = 从未执行） */
+  static async getCardSyncAt(context: common.Context): Promise<number> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_CARD_SYNC_AT, 0) as number;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  static async setCardSyncAt(context: common.Context, ts: number): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_CARD_SYNC_AT, ts);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存卡片同步时间失败: ${e.message}`);
     }
   }
 

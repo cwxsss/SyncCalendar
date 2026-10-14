@@ -28,6 +28,64 @@ export class BackgroundSyncResult {
 
 export class BackgroundSyncRunner {
   /**
+   * ⭐ 卡片的系统定时刷新间隔（与 form_config.json 的 updateDuration=1 保持一致，单位 30 分钟）。
+   * ⚠️ 两处必须同步修改：改这里也要改 form_config.json，否则节流窗口对不上。
+   */
+  static readonly CARD_TICK_MS: number = 30 * 60 * 1000;
+  /** 距上次同步不足该时长则跳过（略小于卡片周期，避免系统刷新漂移导致被误跳过） */
+  private static readonly CARD_MIN_GAP_MS: number = 25 * 60 * 1000;
+  /**
+   * 卡片进程的软超时：官方规定 FormExtensionAbility 生命周期回调后进程**仅存续 10 秒**，
+   * 超过就会被回收（异步任务被强制中止）。这里主动在 9 秒收手，
+   * 让"这一次同步"**干净地放弃**而不是被硬杀在半途 —— 幂等同步中断本就不损坏数据，
+   * 主动放弃还能保住"时间戳已写入、下轮再试"的一致性。
+   */
+  private static readonly CARD_SOFT_TIMEOUT_MS: number = 9 * 1000;
+
+  /**
+   * ⭐⭐ 由**服务卡片定时刷新**（`onUpdateForm`）驱动的后台同步（0.0.8）。
+   *
+   * 为什么用它：系统给普通应用的后台调度很受限 ——
+   *   `workScheduler` 的周期被"应用活跃分组"压制到 **≥2 小时**；
+   *   而服务卡片配置了 `updateDuration: 1`（**单位 30 分钟**），系统会**每 30 分钟**
+   *   触发一次 `onUpdateForm()`，且不受活跃分组压制（每天上限 50 次）。
+   *   借这个时机跑一次完整同步，即可得到"约 30 分钟一次"的定期后台同步。
+   *
+   * ⚠️ 节流：系统刷新本身可能有漂移、也可能因故重入 → 用时间戳挡一道，
+   *    保证两次真实同步之间至少间隔 `CARD_MIN_GAP_MS`。
+   * ⚠️ 本方法**永不抛错**（后台路径没有 UI 承担异常）。
+   */
+  static async runOnceThrottledByCard(context: common.Context): Promise<void> {
+    try {
+      const last: number = await AppSettings.getCardSyncAt(context);
+      const now: number = Date.now();
+      if (last > 0 && now - last < BackgroundSyncRunner.CARD_MIN_GAP_MS) {
+        const mins: number = Math.round((now - last) / 60000);
+        LogUtil.write(`卡片驱动同步：距上次仅 ${mins} 分钟，跳过（节流 ${BackgroundSyncRunner.CARD_MIN_GAP_MS / 60000} 分钟）`);
+        return;
+      }
+      // 先写时间戳：避免同步执行期间卡片再次刷新导致并发重入
+      await AppSettings.setCardSyncAt(context, now);
+      LogUtil.write('卡片驱动同步：开始（卡片 30 分钟定时刷新触发）');
+      // 软超时：9 秒内没跑完就主动放弃（进程本来也只有 10 秒窗口）
+      const worker: Promise<void> =
+        BackgroundSyncRunner.runOnce(context, 'cardTick').then((): void => {});
+      const guard: Promise<void> = new Promise<void>((_res: () => void, rej: (e: Error) => void) => {
+        setTimeout((): void => rej(new Error('卡片进程窗口不足，本次同步放弃')),
+          BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race<void>([worker, guard]);
+      } catch (err) {
+        const e = err as Error;
+        LogUtil.write(`卡片驱动同步提前收手：${e.message}（幂等，下轮会重试）`);
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`卡片驱动同步异常: ${e.message}`);
+    }
+  }
+  /**
    * 跑一次完整同步。全流程 try-catch，**永不抛错**（后台路径没有 UI 承担异常）。
    * @param context 应用上下文
    * @param tag 日志标签，用于区分触发来源（deferred/transient/netRecover/foreground）
