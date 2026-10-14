@@ -384,7 +384,9 @@ struct Widget6x4Card {
     return h < 10 ? `0${h}:00` : `${h}:00`;
   }
 
-  /** 右上角添加按钮：拉起 App 直接进入新建日程页（兄弟节点布局，不冒泡） */
+  /** 右上角添加按钮：拉起 App 直接进入新建日程页。
+   *  ⭐ 无需阻止冒泡：ArkUI 的 `onClick` 是**非冒泡**事件，父子同绑时**子组件优先**，
+   *     故点 ＋ 不会连带触发根容器的"打开首页"。 */
   @Builder
   addButton() {
     Button() {
@@ -439,6 +441,7 @@ struct Widget6x4Card {
     .borderRadius(11)
     .padding(0)
     .backgroundColor('#F2F3F5')
+    // ⭐ 无需阻止冒泡：onClick 非冒泡、子组件优先 → 点翻页不会连带打开 App
     .onClick(() => this.page(act))
   }
 
@@ -457,6 +460,7 @@ struct Widget6x4Card {
       .borderRadius(11)
       .padding(0)
       .backgroundColor('#007DFF')
+      // ⭐ 无需阻止冒泡：onClick 非冒泡、子组件优先
       .onClick(() => this.page('today'))
     }
   }
@@ -549,7 +553,6 @@ struct Widget6x4Card {
       .width('100%')
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
-      .onClick(() => this.openApp())
     } else {
       List({ space: 4 }) {
         ForEach(this.parseList(), (item: LItem6) => {
@@ -563,7 +566,6 @@ struct Widget6x4Card {
       .layoutWeight(1)
       .scrollBar(BarState.Auto)
       .cachedCount(8)
-      .onClick(() => this.openApp())
     }
   }
 
@@ -584,7 +586,6 @@ struct Widget6x4Card {
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
-        .onClick(() => this.openApp())
         Text(`${this.dayCount} 条`)
           .fontSize(10)
           .fontColor('#B0B0B0')
@@ -629,7 +630,6 @@ struct Widget6x4Card {
                   .padding({ left: 6, right: 6 })
                   .borderRadius(6)
                   .backgroundColor(a.color)
-                  .onClick(() => this.openApp())
                 }, (a: TAllDay6, idx: number) => `ad_${idx}_${a.eventKey}`)
                 if (this.w6AllDayRest() > 0) {
                   Text(`还有 ${this.w6AllDayRest()} 个全天日程`)
@@ -689,6 +689,9 @@ struct Widget6x4Card {
     .padding(12)
     .backgroundColor('#FFFFFF')
     .borderRadius(16)
+    // ⭐ 整卡可点：空白处也能进 App 并定位到当前显示日。
+    //   ⚠️ onClick 是**非冒泡**事件且**子组件优先** → 内部的 ‹ › 今 ＋ 按钮不会被这里抢走
+    .onClick(() => this.openApp())
   }
 
   /** 第 1 层：整点网格（每小时一格，格底一条灰线） */
@@ -814,7 +817,6 @@ struct Widget6x4Card {
                   .width('100%')
                   .height(this.w6BlockVp(b))
                   .constraintSize({ minHeight: 16 })
-                  .onClick(() => this.openApp())
                 }, (b: TBlock6) => `b_${r.key}_${b.eventKey}`)
               }
               .layoutWeight(1)

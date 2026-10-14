@@ -23,6 +23,8 @@ struct Widget4x2Card {
   @LocalStorageProp('lunarText') lunarText: string = '';
   @LocalStorageProp('todayCount') todayCount: number = 0;
   @LocalStorageProp('ongoingJson') ongoingJson: string = '[]';
+  /** 卡片当前显示的那一天 0 点毫秒 —— 点卡片进 App 时定位到这一天 */
+  @LocalStorageProp('selectedDate') selectedDate: number = 0;
 
   /** 右侧最多渲染 2 条（数据侧已裁剪，这里再兜底截断） */
   private parseOngoing(): CardItem2x4[] {
@@ -57,12 +59,12 @@ struct Widget4x2Card {
     })
   }
 
-  /** 卡片"打开 App"：点击左侧日期区、今日条数区、右侧日程区触发；添加按钮是 header 行兄弟节点，不冒泡 */
+  /** 打开 App 并**定位到卡片当前显示的那一天**（用户可能已翻到其他日期） */
   private openApp(): void {
     postCardAction(this, {
       action: 'router',
       abilityName: 'EntryAbility',
-      params: {}
+      params: { openDate: `${this.selectedDate}` }
     });
   }
 
@@ -118,7 +120,6 @@ struct Widget4x2Card {
     .width('100%')
     .layoutWeight(1)
     .justifyContent(FlexAlign.Center)
-    .onClick(() => this.openApp())
   }
 
   build() {
@@ -141,7 +142,6 @@ struct Widget4x2Card {
           }
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
-          .onClick(() => this.openApp())
 
           this.addButton()
         }
@@ -173,7 +173,6 @@ struct Widget4x2Card {
         .width('100%')
         .layoutWeight(1)
         .alignItems(VerticalAlign.Center)
-        .onClick(() => this.openApp())
       }
       .layoutWeight(1)
       .height('100%')
@@ -197,7 +196,6 @@ struct Widget4x2Card {
           .width('100%')
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
-          .onClick(() => this.openApp())
         }
       }
       .layoutWeight(1)
@@ -208,5 +206,7 @@ struct Widget4x2Card {
     .padding(12)
     .backgroundColor('#FFFFFF')
     .borderRadius(16)
+    // ⭐ 整卡可点：左右空白处也能进 App 并定位到当前显示日
+    .onClick(() => this.openApp())
   }
 }

@@ -11,8 +11,12 @@ struct Widget2x2Card {
   @LocalStorageProp('dateMd') dateMd: string = '';
   @LocalStorageProp('weekday') weekday: string = '';
   @LocalStorageProp('todayCount') todayCount: number = 0;
+  /** 卡片当前显示的那一天 0 点毫秒 —— 点卡片进 App 时定位到这一天 */
+  @LocalStorageProp('selectedDate') selectedDate: number = 0;
 
-  /** 右上角添加按钮：拉起 App 直接进入新建日程页（阻止冒泡，避免同时打开 App 首页） */
+  /** 右上角添加按钮：拉起 App 直接进入新建日程页。
+   *  ⭐ 无需阻止冒泡：ArkUI 的 `onClick` 是**非冒泡**事件，父子同绑时**子组件优先**，
+   *     故点 ＋ 不会连带触发根容器的"打开首页"。 */
   @Builder
   addButton() {
     Button() {
@@ -35,12 +39,12 @@ struct Widget2x2Card {
     })
   }
 
-  /** 卡片"打开 App"：点击日期区或今日日程数区域触发；添加按钮是 header 行的兄弟节点，其点击不会冒泡到这里 */
+  /** 打开 App 并**定位到卡片当前显示的那一天**（用户可能已翻到其他日期） */
   private openApp(): void {
     postCardAction(this, {
       action: 'router',
       abilityName: 'EntryAbility',
-      params: {}
+      params: { openDate: `${this.selectedDate}` }
     });
   }
 
@@ -61,7 +65,6 @@ struct Widget2x2Card {
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
-        .onClick(() => this.openApp())
 
         this.addButton()
       }
@@ -92,12 +95,13 @@ struct Widget2x2Card {
       .width('100%')
       .layoutWeight(1)
       .alignItems(VerticalAlign.Center)
-      .onClick(() => this.openApp())
     }
     .width('100%')
     .height('100%')
     .padding(14)
     .backgroundColor('#FFFFFF')
     .borderRadius(16)
+    // ⭐ 整卡可点：空白处也能进 App 并定位到当前显示日（原来只有日期区/条数区可点）
+    .onClick(() => this.openApp())
   }
 }
