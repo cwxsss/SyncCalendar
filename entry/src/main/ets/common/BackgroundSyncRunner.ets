@@ -8,6 +8,7 @@
 //
 // ⚠️ 与 SyncEngine.syncAccount 的分工：本类不关心超时与互斥锁（由 SyncEngine 内部处理）。
 import { common } from '@kit.AbilityKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_CALDAV } from './AccountStore';
 import { SyncEngine } from './SyncEngine';
@@ -35,12 +36,26 @@ export class BackgroundSyncRunner {
   /** 距上次同步不足该时长则跳过（略小于卡片周期，避免系统刷新漂移导致被误跳过） */
   private static readonly CARD_MIN_GAP_MS: number = 25 * 60 * 1000;
   /**
-   * 卡片进程的软超时：官方规定 FormExtensionAbility 生命周期回调后进程**仅存续 10 秒**，
-   * 超过就会被回收（异步任务被强制中止）。这里主动在 9 秒收手，
-   * 让"这一次同步"**干净地放弃**而不是被硬杀在半途 —— 幂等同步中断本就不损坏数据，
-   * 主动放弃还能保住"时间戳已写入、下轮再试"的一致性。
+   * 卡片进程的软超时（**未申请到短时任务时**）：官方规定 FormExtensionAbility
+   * 生命周期回调后进程**仅存续 10 秒**，超过就被回收（异步任务被强制中止）。
+   * 这里主动在 9 秒收手，让"这一次同步"**干净地放弃**而不是被硬杀在半途。
    */
   private static readonly CARD_SOFT_TIMEOUT_MS: number = 9 * 1000;
+  /**
+   * 申请到短时任务后的软超时：短时任务单次最长 3 分钟（低电量 1 分钟），
+   * 但实际时长以 `actualDelayTime` 为准 → 留 15 秒余量提前收手，保证能干净地
+   * `cancelSuspendDelay`（否则超时不取消会被系统强制终止进程、并浪费当日配额）。
+   */
+  private static readonly CARD_EXT_SOFT_RESERVE_MS: number = 15 * 1000;
+  /**
+   * 卡片驱动同步可用的**总时长上限**：即使申请到短时任务也不超过这个值。
+   * 理由：短时任务**单日总配额仅 10 分钟**，30 分钟一次的话每次平均只能分到约 20 秒，
+   * 全用光会让"退后台那一次同步"（EntryAbility.onBackground 申请）无配额可用。
+   */
+  private static readonly CARD_MAX_TOTAL_MS: number = 60 * 1000;
+
+  /** 本次卡片同步申请的短时任务 requestId（0 = 未申请到） */
+  private static cardTransientId: number = 0;
 
   /**
    * ⭐⭐ 由**服务卡片定时刷新**（`onUpdateForm`）驱动的后台同步（0.0.8）。
@@ -66,24 +81,81 @@ export class BackgroundSyncRunner {
       }
       // 先写时间戳：避免同步执行期间卡片再次刷新导致并发重入
       await AppSettings.setCardSyncAt(context, now);
-      LogUtil.write('卡片驱动同步：开始（卡片 30 分钟定时刷新触发）');
-      // 软超时：9 秒内没跑完就主动放弃（进程本来也只有 10 秒窗口）
+      // ⭐ 尝试申请**短时任务**，把 10 秒窗口延长到最多 3 分钟。
+      //    ⚠️ 官方规定 requestSuspendDelay 应在"应用处于前台"或"onBackground 回调"里调用；
+      //       卡片进程（FormExtensionAbility）是否符合**未知** → 故此处**容错尝试**：
+      //       成功则按实际时长延长，失败（抛错/时长为 0）则退回 9 秒软超时。
+      //    ⚠️ 配额：短时任务单日总配额 10 分钟、单次最长 3 分钟（低电量 1 分钟），
+      //       且**被挂起后才计时**（10 秒内跑完不消耗）→ 对我们很划算。
+      const windowMs: number = await BackgroundSyncRunner.acquireCardWindow();
+      const budget: number = Math.min(windowMs, BackgroundSyncRunner.CARD_MAX_TOTAL_MS);
+      LogUtil.write(`卡片驱动同步：开始（卡片 30 分钟定时刷新触发，可用窗口 ${Math.round(budget / 1000)} 秒）`);
+      // 软超时：预算内没跑完就主动放弃（幂等同步，中断不损坏数据，下轮会重试）
       const worker: Promise<void> =
         BackgroundSyncRunner.runOnce(context, 'cardTick').then((): void => {});
       const guard: Promise<void> = new Promise<void>((_res: () => void, rej: (e: Error) => void) => {
-        setTimeout((): void => rej(new Error('卡片进程窗口不足，本次同步放弃')),
-          BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
+        setTimeout((): void => rej(new Error('本次同步时间预算用尽，主动收手')),
+          budget);
       });
       try {
         await Promise.race<void>([worker, guard]);
       } catch (err) {
         const e = err as Error;
         LogUtil.write(`卡片驱动同步提前收手：${e.message}（幂等，下轮会重试）`);
+      } finally {
+        // 无论成败都释放短时任务：① 归还当日配额 ② 避免超时不取消被系统强杀进程
+        BackgroundSyncRunner.releaseCardWindow();
       }
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`卡片驱动同步异常: ${e.message}`);
     }
+  }
+
+  /**
+   * 为卡片同步申请短时任务，返回**实际可用窗口（毫秒）**。
+   * 申请失败/异常/时长为 0 → 返回 0，由调用方退回默认的 9 秒软超时（不阻塞流程）。
+   */
+  private static async acquireCardWindow(): Promise<number> {
+    try {
+      const info: backgroundTaskManager.DelaySuspendInfo =
+        backgroundTaskManager.requestSuspendDelay('正在同步日历数据', (): void => {
+          // 超时回调：配额即将用尽，清掉本地记录（系统会自行处理挂起）
+          LogUtil.write('卡片同步的短时任务即将超时');
+          BackgroundSyncRunner.cardTransientId = 0;
+        });
+      BackgroundSyncRunner.cardTransientId = info.requestId;
+      const actual: number = info.actualDelayTime ?? 0;
+      if (actual <= 0) {
+        // 拿到了 requestId 但没有实际时长 → 视为不可用
+        BackgroundSyncRunner.releaseCardWindow();
+        LogUtil.write('卡片同步：短时任务时长为 0，退回 9 秒软超时');
+        return BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS;
+      }
+      // 留 15 秒余量提前收手，保证能干净地取消
+      const usable: number = Math.max(actual - BackgroundSyncRunner.CARD_EXT_SOFT_RESERVE_MS,
+        BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
+      LogUtil.write(`卡片同步：短时任务已获批，实际时长 ${Math.round(actual / 1000)} 秒`);
+      return usable;
+    } catch (err) {
+      // 例如"未在前台/退后台时机申请"被拒 —— 退回 9 秒软超时，不影响流程
+      const e = err as BusinessError;
+      LogUtil.write(`卡片同步：短时任务申请失败(${e.code ?? ''} ${e.message})，退回 9 秒软超时`);
+      return BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS;
+    }
+  }
+
+  /** 释放卡片同步的短时任务（幂等） */
+  private static releaseCardWindow(): void {
+    if (BackgroundSyncRunner.cardTransientId === 0) {
+      return;
+    }
+    try {
+      backgroundTaskManager.cancelSuspendDelay(BackgroundSyncRunner.cardTransientId);
+    } catch (err) {
+      // 取消失败无需处理
+    }
+    BackgroundSyncRunner.cardTransientId = 0;
   }
   /**
    * 跑一次完整同步。全流程 try-catch，**永不抛错**（后台路径没有 UI 承担异常）。
