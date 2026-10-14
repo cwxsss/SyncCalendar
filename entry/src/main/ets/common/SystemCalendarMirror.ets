@@ -80,8 +80,14 @@ export class SystemCalendarMirror {
   ];
   /** 系统日历账户 name 前缀。name 是开发者定义且 readonly，必须稳定可复现才能找到已有账户 */
   private static readonly ACCOUNT_PREFIX: string = 'synccalendar.mirror.';
-  /** 系统日历账户 displayName 前缀，便于用户在系统日历里识别来源 */
-  private static readonly DISPLAY_PREFIX: string = '同步日历 · ';
+  /**
+   * 系统日历账户 displayName 中「同步日历」字面量 —— **仅供"兜底识别"使用**。
+   * ⚠️ 0.0.8 起 displayName 变为可切换（三种格式），本常量**不再用于生成名字**，
+   *    只用于判断"这个名字是否含我们的归属标识"（格式 1/2 含、格式 3 不含）。
+   */
+  private static readonly DISPLAY_MARK: string = '同步日历';
+  /** 旧版固定前缀（`同步日历 · `，半角点 U+00B7 带空格）——仅用于识别/迁移历史账户 */
+  private static readonly LEGACY_DISPLAY_PREFIX: string = '同步日历 · ';
   private static readonly DAY: number = 86400000;
   /** getEvents() 显式指定返回字段：identifier 只在 API20+ 的默认字段里，写死更保险 */
   private static readonly QUERY_FIELDS: (keyof calendarManager.Event)[] = [
@@ -148,6 +154,71 @@ export class SystemCalendarMirror {
     }
   }
 
+  /* ==================== 账户显示名（0.0.8 可切换） ==================== */
+
+  /**
+   * ⭐ 生成系统日历账户的 displayName。
+   *
+   * 三种格式（分隔符统一为**半角点 `·`（U+00B7）+ 无空格**，尽量短）：
+   *   1 = `同步日历·<本名>`            —— 保留应用名
+   *   2 = `同步日历·<账号>·<本名>`      —— 平板/大屏，信息最全
+   *   3 = `<账号>·<本名>`  ★默认        —— 短、能区分账号
+   *
+   * ⚠️ **不提供"仅本名"**：用户原系统日历里可能有同名日历本，裸本名无法与之区分 → 有误删风险。
+   *    每个镜像账户名**至少要带一个归属标识**（`同步日历` / `账号名` / 两者）。
+   *
+   * ⚠️ displayName 上限 64 字符（系统限制）→ 超长时截断，避免 createCalendar 失败。
+   */
+  static displayNameFor(ref: BookRef, format: number): string {
+    const sep: string = '·';
+    const book: string = ref.name !== '' ? ref.name : '日历本';
+    const acc: string = ref.accountName !== '' ? ref.accountName : '账号';
+    let out: string;
+    if (format === 1) {
+      out = `${SystemCalendarMirror.DISPLAY_MARK}${sep}${book}`;
+    } else if (format === 2) {
+      out = `${SystemCalendarMirror.DISPLAY_MARK}${sep}${acc}${sep}${book}`;
+    } else {
+      out = `${acc}${sep}${book}`;
+    }
+    // displayName 系统上限 64 字符：超长截断（保留前面的归属标识，它比本名更重要）
+    if (out.length > 64) {
+      out = out.substring(0, 64);
+    }
+    return out;
+  }
+
+  /** 某个 displayName 是否**含我们的归属标识**（用于兜底识别；格式 1/2 含、格式 3 不含） */
+  static displayNameHasMark(display: string): boolean {
+    return display.startsWith(SystemCalendarMirror.DISPLAY_MARK);
+  }
+
+  /** 某个 displayName 是否是**旧版固定格式**（`同步日历 · xxx`，用于提示用户可更换） */
+  static isLegacyDisplayName(display: string): boolean {
+    return display.startsWith(SystemCalendarMirror.LEGACY_DISPLAY_PREFIX);
+  }
+
+  /**
+   * 是否还存在"旧格式"镜像账户 —— 设置页据此给出"可更换显示名称"的弱提示（只读，不修改）。
+   * 判据：`name` 是我们的前缀 + `displayName` 是旧格式。
+   */
+  static async hasLegacyDisplayName(context: common.Context): Promise<boolean> {
+    try {
+      const cm: calendarManager.CalendarManager = calendarManager.getCalendarManager(context);
+      const all: calendarManager.Calendar[] = await cm.getAllCalendars();
+      for (const cal of all) {
+        const acc: calendarManager.CalendarAccount = cal.getAccount();
+        if (acc.name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX) &&
+          SystemCalendarMirror.isLegacyDisplayName(acc.displayName ?? '')) {
+          return true;
+        }
+      }
+      return false;
+    } catch (err) {
+      return false;
+    }
+  }
+
   /* ==================== 主入口 ==================== */
 
   /**
@@ -166,6 +237,67 @@ export class SystemCalendarMirror {
    */
   static isMirrorAccountName(name: string): boolean {
     return name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX);
+  }
+
+  /* ==================== 账户身份判定（0.0.8） ==================== */
+
+  /**
+   * 取当前 App 里真实存在的账号 id 集合（用于识别"我们的镜像账户"的身份）。
+   * ⚠️ 读取失败返回**空集**，调用方据此**跳过清理**（宁可不清，也不误删）。
+   */
+  private static async currentAccountIds(context: common.Context): Promise<Set<string>> {
+    const ids: Set<string> = new Set<string>();
+    try {
+      const accounts: DavAccount[] = await AccountStore.loadAll(context);
+      for (const a of accounts) {
+        if (a.id !== '') {
+          ids.add(a.id);
+        }
+      }
+    } catch (err) {
+      LogUtil.write(`读取账号列表失败（清理将保守跳过）: ${(err as BusinessError).message}`);
+    }
+    return ids;
+  }
+
+  /**
+   * ⭐ 某个系统日历账户是不是**本应用镜像出去的**（身份级判定）。
+   *
+   * 两道闸：
+   *   ① `name` 以 `synccalendar.mirror.` 开头 —— 挡掉所有"别人家的账户"；
+   *   ② 从 `name` 切出 `accId`（`<accId>-<href哈希>`，取**最后一个** `-` 之前的部分），
+   *      并确认它在当前账号库里 —— 精准识别"账号已删的孤儿"，**与显示名完全解耦**。
+   *
+   * ⚠️ 为什么不能只靠 displayName：显示名现在**可切换**（格式 3 不含"同步日历"），
+   *    且格式 3（`账号·本名`）可能与别的 App 的账户同名 → 只按名字判定会**误删用户数据**。
+   *
+   * @param knownIds        当前真实账号 id 集合（**空集 = 读不到账号 → 一律返回 false**，保守）
+   * @param allowDisplayMark 是否允许"仅 displayName 含归属标识"兜底（**仅格式 1/2 可用**）
+   */
+  static isOurMirrorAccount(
+    name: string,
+    display: string,
+    knownIds: Set<string>,
+    allowDisplayMark: boolean
+  ): boolean {
+    if (knownIds.size === 0) {
+      return false; // 安全阀：拿不到账号身份就不认为任何账户是我们的
+    }
+    if (name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX)) {
+      // ① name 前缀命中 → 切出 accId 做身份校验
+      const bookId: string = name.substring(SystemCalendarMirror.ACCOUNT_PREFIX.length);
+      const cut: number = bookId.lastIndexOf('-');
+      const accId: string = cut > 0 ? bookId.substring(0, cut) : bookId;
+      // ② accId 在库里 → 确认是我们的；
+      //    不在库里 → 视作"账号已删的孤儿/历史脏数据"（仍需清理）→ 也返回 true
+      if (knownIds.has(accId)) {
+        return true;
+      }
+      LogUtil.write(`镜像账户 name=${name} 的 accId=${accId} 不在账号库 → 按孤儿处理`);
+      return true;
+    }
+    // ③ name 不像我们 → 仅当 displayName 带归属标识、且允许兜底时，才认为是我们的
+    return allowDisplayMark && SystemCalendarMirror.displayNameHasMark(display);
   }
 
   /* ==================== 孤儿账户清理 ==================== */
@@ -196,9 +328,18 @@ export class SystemCalendarMirror {
       LogUtil.write(`清理镜像账户失败：读不到系统日历账户列表 ${(err as BusinessError).message}`);
       return out;
     }
+    // ⭐ 0.0.8 身份校验：拿"当前真实账号 id"当判据 —— 读不到就保守跳过，绝不误删
+    const knownIds: Set<string> = await SystemCalendarMirror.currentAccountIds(context);
+    if (knownIds.size === 0) {
+      LogUtil.write('⚠️ 清理跳过：读不到任何账号 id（安全阀，避免误删）');
+      return out;
+    }
+    // displayName 兜底**仅格式 1/2 可用**（含"同步日历"，可与他人区分）；格式 3 不参与兜底
+    const fmt: number = await AppSettings.getMirrorDisplayFormat(context);
+    const allowDisplayMark: boolean = aggressive && (fmt === 1 || fmt === 2);
     // ① 诊断：把**全部**账户列一遍（不只是我们的），才能看出残留账户到底是什么名字
     for (const cal of all) {
-      out.detail.push(SystemCalendarMirror.describeCal(cal, validNames, aggressive));
+      out.detail.push(SystemCalendarMirror.describeCal(cal, validNames, allowDisplayMark));
     }
     LogUtil.write(`系统日历账户清单（共 ${all.length}）：`);
     for (const line of out.detail) {
@@ -211,10 +352,9 @@ export class SystemCalendarMirror {
       const name: string = acc.name;
       const display: string = acc.displayName ?? '';
       const mineByName: boolean = name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX);
-      const mineByDisplay: boolean = aggressive &&
-        display.startsWith(SystemCalendarMirror.DISPLAY_PREFIX);
-      if (!mineByName && !mineByDisplay) {
-        continue;
+      // ⭐ 身份级判定：name 前缀 → 切出 accId → 必须匹配当前真实账号（详见 isOurMirrorAccount）
+      if (!SystemCalendarMirror.isOurMirrorAccount(name, display, knownIds, allowDisplayMark)) {
+        continue; // 身份不符 → 绝不碰（可能用户原有的日历本 / 别的 App 建的）
       }
       if (validNames.has(name)) {
         continue; // 本次还要用，保留
@@ -275,18 +415,78 @@ export class SystemCalendarMirror {
     return out;
   }
 
+  /**
+   * ⭐ 删除指定的若干镜像账户（按 bookId 精确定位，用于"一键重命名"前清空旧账户）。
+   *
+   * ⚠️ 调用方**必须**已先回读（`MirrorInbound.reconcile`），否则会丢掉用户手动加的日程。
+   * ⚠️ 只需 `name` 精确匹配即可 —— 不需要 displayName 判定（bookId 是身份，名字已无关）。
+   * 每个账户独立 try/catch + "清空日程后重试"降级，与 purgeOrphans 同策略。
+   */
+  static async removeAccountsByBookIds(context: common.Context, bookIds: string[]): Promise<number> {
+    if (bookIds.length === 0) {
+      return 0;
+    }
+    const cm: calendarManager.CalendarManager = calendarManager.getCalendarManager(context);
+    const targets: Set<string> = new Set<string>();
+    for (const b of bookIds) {
+      targets.add(SystemCalendarMirror.ACCOUNT_PREFIX + b);
+    }
+    let removed: number = 0;
+    let all: calendarManager.Calendar[] = [];
+    try {
+      all = await cm.getAllCalendars();
+    } catch (err) {
+      LogUtil.write(`重命名-删除旧账户失败：读不到账户列表 ${(err as BusinessError).message}`);
+      return 0;
+    }
+    for (const cal of all) {
+      const acc: calendarManager.CalendarAccount = cal.getAccount();
+      const name: string = acc.name;
+      if (!targets.has(name)) {
+        continue;
+      }
+      try {
+        await cm.deleteCalendar(cal);
+        removed++;
+        LogUtil.write(`重命名：已删除旧账户 id=${cal.id} name=${name}`);
+      } catch (err) {
+        const e1 = err as BusinessError;
+        LogUtil.write(`重命名：删除账户失败，尝试清空后重试 name=${name}: ${e1.message}`);
+        try {
+          const evs: calendarManager.Event[] = await SystemCalendarMirror.queryEvents(cal);
+          const ids: number[] = [];
+          for (const ev of evs) {
+            if (ev.id !== undefined) {
+              ids.push(ev.id);
+            }
+          }
+          if (ids.length > 0) {
+            await cal.deleteEvents(ids);
+          }
+          await cm.deleteCalendar(cal);
+          removed++;
+          LogUtil.write(`重命名：清空后删除成功 name=${name}`);
+        } catch (err2) {
+          LogUtil.write(`重命名：删除账户最终失败 name=${name}: ${(err2 as BusinessError).message}`);
+        }
+      }
+      // 快照按键是 bookId（与账户名无关），账户删了但快照应保留 → 重建后仍幂等，故不动快照
+    }
+    return removed;
+  }
+
   /** 一个账户的诊断行：`#id [KEEP/MINE/other] name=… display=… type=…` */
   private static describeCal(
     cal: calendarManager.Calendar,
     validNames: Set<string>,
-    aggressive: boolean
+    allowDisplayMark: boolean
   ): string {
     const acc: calendarManager.CalendarAccount = cal.getAccount();
     const name: string = acc.name;
     const display: string = acc.displayName ?? '';
     const mineByName: boolean = name.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX);
-    const mineByDisplay: boolean = aggressive &&
-      display.startsWith(SystemCalendarMirror.DISPLAY_PREFIX);
+    const mineByDisplay: boolean = allowDisplayMark &&
+      display.startsWith(SystemCalendarMirror.DISPLAY_MARK);
     let tag: string = 'other ';
     if (mineByName || mineByDisplay) {
       tag = validNames.has(name) ? 'KEEP  ' : 'MINE  ';
@@ -346,13 +546,15 @@ export class SystemCalendarMirror {
 
     const winStart: number = SystemCalendarMirror.windowStart();
     const winEnd: number = SystemCalendarMirror.windowEnd();
+    // ⭐ 0.0.8：读取用户所选的显示名格式（仅影响**新建**账户的名字；已有账户不在此处改名）
+    const format: number = await AppSettings.getMirrorDisplayFormat(context);
     const plans: Map<string, MirrorOcc[]> = new Map<string, MirrorOcc[]>();
     for (const ref of refs) {
       try {
         const plan: MirrorOcc[] =
           await SystemCalendarMirror.planFor(context, ref, winStart, winEnd, res);
         plans.set(ref.bookId, plan);
-        await SystemCalendarMirror.syncBook(context, cm, ref, plan, winStart, winEnd, res);
+        await SystemCalendarMirror.syncBook(context, cm, ref, plan, winStart, winEnd, res, format);
         res.books++;
       } catch (err) {
         const e = err as BusinessError;
@@ -689,11 +891,12 @@ export class SystemCalendarMirror {
     plan: MirrorOcc[],
     winStart: number,
     winEnd: number,
-    res: MirrorResult
+    res: MirrorResult,
+    format: number
   ): Promise<void> {
     // ⭐ 账户名与 identifier 一律用 **bookId**（由 href 派生、稳定），绝不用 calKey
     const cal: calendarManager.Calendar =
-      await SystemCalendarMirror.ensureCalendar(cm, ref.sysAccountName, ref);
+      await SystemCalendarMirror.ensureCalendar(cm, ref.sysAccountName, ref, format);
 
     // 现有镜像条目：identifier -> Event
     const existing: Map<string, calendarManager.Event> = new Map<string, calendarManager.Event>();
@@ -998,16 +1201,24 @@ export class SystemCalendarMirror {
     }
   }
 
-  /** 幂等地取得本应用自己的镜像账户（已存在则复用，不存在则创建并设色） */
+  /**
+   * 幂等地取得本应用自己的镜像账户（已存在则复用，不存在则创建并设色）。
+   *
+   * ⭐ 0.0.8：displayName 按用户所选格式生成。
+   *   ⚠️ **已存在的账户不会被改名**（平台无"改账户名"API；改名是破坏性操作，
+   *      必须由用户显式触发 `reapplyDisplayNames`）。此处仅保证**新建**时用对格式。
+   */
   private static async ensureCalendar(
     cm: calendarManager.CalendarManager,
     accountName: string,
-    ref: BookRef
+    ref: BookRef,
+    format: number
   ): Promise<calendarManager.Calendar> {
     const calendars: calendarManager.Calendar[] = await cm.getAllCalendars();
     for (const cal of calendars) {
       if (cal.getAccount().name === accountName) {
-        // 每次都尝试同步一次显示名与颜色（用户可能改过日历本名/色）
+        // 每次都尝试同步一次颜色（用户可能改过日历本色）
+        // ⚠️ displayName 不在此处改：改账户名需删账户重建（破坏性），由用户显式触发
         try {
           await cal.setConfig({ enableReminder: true, color: ref.color });
         } catch (err) {
@@ -1019,7 +1230,7 @@ export class SystemCalendarMirror {
     const cal: calendarManager.Calendar = await cm.createCalendar({
       name: accountName,
       type: calendarManager.CalendarType.LOCAL,
-      displayName: SystemCalendarMirror.DISPLAY_PREFIX + ref.name
+      displayName: SystemCalendarMirror.displayNameFor(ref, format)
     });
     try {
       await cal.setConfig({ enableReminder: true, color: ref.color });

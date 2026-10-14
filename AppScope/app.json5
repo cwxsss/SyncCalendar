@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "synccalendar.yangyq.net",
     "vendor": "yangyq",
-    "versionCode": 700,
-    "versionName": "0.0.7",
+    "versionCode": 800,
+    "versionName": "0.0.8",
     "buildVersion": "1",
     "icon": "$media:layered_image",
     "label": "$string:app_name"

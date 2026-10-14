@@ -27,6 +27,9 @@ export class AppSettings {
   private static readonly KEY_MIRROR_KEYS: string = 'mirror_cal_keys';     // 要镜像的 DAV 日历本 calKey 列表
   private static readonly KEY_MIRROR_BOOK_IDS: string = 'mirror_book_ids'; // ⭐ 要镜像的日历本**稳定标识** bookId（由服务器 href 派生，不随序号变）
   private static readonly KEY_MIRROR_INBOUND: string = 'mirror_inbound';   // 是否把系统日历的改动回写 CalDAV（默认关）
+  // ⭐ 系统日历账户的**显示名格式**（1/2/3，默认 3=`<账号>·<本名>`）。
+  //    因平台无"改账户名"API，切换格式需删账户重建（用户显式点「应用」才执行）。
+  private static readonly KEY_MIRROR_DISPLAY_FORMAT: string = 'mirror_display_format';
   private static readonly KEY_POLICY_AGREED: string = 'policy_agreed';    // 是否已同意隐私政策与用户协议
   // 首启功能引导"用户已看过并关闭"的标记。键名带版本号：改动引导内容后把 vN 加 1，用户即可再看一次。
   // 注意：只在用户主动关闭（"开始使用" / ✕ / 点遮罩）时才置 true，**不再"显示前就置 true"**——
@@ -290,6 +293,33 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存回写开关失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * ⭐ 系统日历账户显示名格式：1=`同步日历·本名`，2=`同步日历·账号·本名`，3=`账号·本名`（默认）。
+   * 只接受 1/2/3，其它值一律回落到默认 3（防止脏数据导致拼出意外名字）。
+   */
+  static async getMirrorDisplayFormat(context: common.Context): Promise<number> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const v = await store.get(AppSettings.KEY_MIRROR_DISPLAY_FORMAT, 3) as number;
+      return (v === 1 || v === 2 || v === 3) ? v : 3;
+    } catch (err) {
+      return 3;
+    }
+  }
+
+  static async setMirrorDisplayFormat(context: common.Context, value: number): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_MIRROR_DISPLAY_FORMAT, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存显示名格式失败: ${e.message}`);
     }
   }
 

@@ -11,6 +11,7 @@ import { AccountStore, DavAccount } from '../common/AccountStore';
 import { ReminderService } from '../common/ReminderService';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BackupTargetCheck, BookRef, MirrorResult, PurgeResult, SystemCalendarMirror } from '../common/SystemCalendarMirror';
+import { MirrorRenamer, RenameResult } from '../common/MirrorRenamer';
 import { DocViewer } from '../common/DocViewer';
 
 const INTERVAL_OPTIONS: number[] = [1, 5, 15, 30, 60];
@@ -51,6 +52,12 @@ struct SettingsPage {
   @State mirrorCandidates: BackupTarget[] = []; // 可镜像的本（已排除"系统日历备份目标本"，防回灌）
   @State mirrorInbound: boolean = false;         // 是否把系统日历的改动回写 CalDAV（默认关）
   @State accountDump: string = '';               // 系统日历账户清单（诊断用，清理后填充）
+  // ⭐ 系统日历账户显示名格式：1=`同步日历·本名` 2=`同步日历·账号·本名` 3=`账号·本名`（默认）
+  @State displayFormat: number = 3;
+  @State displayFormatApplied: number = 3;       // 已生效的格式（用于判断"应用"按钮是否可点）
+  @State formatRunning: boolean = false;         // 正在按新格式重建镜像
+  @State hasLegacyNames: boolean = false;        // 是否还有旧格式账户（给出"可更换"弱提示）
+  @State formatPreview: string = '';             // 实时预览示例
   private context?: common.Context;
 
   aboutToAppear(): void {
@@ -118,6 +125,71 @@ struct SettingsPage {
     AppSettings.getMirrorInbound(ctx).then((v: boolean): void => {
       this.mirrorInbound = v;
     });
+    // ⭐ 显示名格式：加载当前值 + 实时预览 + 检查是否还有旧格式账户
+    AppSettings.getMirrorDisplayFormat(ctx).then((v: number): void => {
+      this.displayFormat = v;
+      this.displayFormatApplied = v;
+      this.refreshFormatPreview();
+    });
+    MirrorRenamer.hasLegacyNamedAccounts(ctx).then((v: boolean): void => {
+      this.hasLegacyNames = v;
+    });
+  }
+
+  /** 用用户**实际的第一个账号名 + 第一个本名**拼出示例，让他所见即所得 */
+  private refreshFormatPreview(): void {
+    const ctx = this.context;
+    if (ctx === undefined) {
+      return;
+    }
+    const f: number = this.displayFormat;
+    SystemCalendarMirror.selectedBookRefs(ctx).then((refs: BookRef[]): void => {
+      if (refs.length > 0) {
+        this.formatPreview = SystemCalendarMirror.displayNameFor(refs[0], f);
+      } else {
+        // 没有可用本时用占位示例
+        const dummy = new BookRef();
+        dummy.name = '个人日程';
+        dummy.accountName = '工作';
+        this.formatPreview = SystemCalendarMirror.displayNameFor(dummy, f);
+      }
+    });
+  }
+
+  /** ⭐ 按新格式重建镜像（回读→删→重建），期间日程短暂消失几秒 */
+  private async applyDisplayFormat(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === undefined || this.formatRunning) {
+      return;
+    }
+    if (this.displayFormat === this.displayFormatApplied) {
+      return; // 未变化，不需要重建
+    }
+    this.formatRunning = true;
+    try {
+      // 先落盘（reapplyDisplayNames 会按现有配置重建）
+      await AppSettings.setMirrorDisplayFormat(ctx, this.displayFormat);
+      const res: RenameResult = await MirrorRenamer.reapplyDisplayNames(
+        ctx as common.UIAbilityContext);
+      if (res.ok) {
+        this.displayFormatApplied = this.displayFormat;
+        this.hasLegacyNames = false;
+        this.getUIContext().getPromptAction().showToast({
+          message: `已更新系统日历中的名称（${res.mirrored} 个日历本）`
+        });
+      } else {
+        // 失败 → 回滚选项与配置，避免"设置显示已改、实际没改"的错觉
+        this.displayFormat = this.displayFormatApplied;
+        await AppSettings.setMirrorDisplayFormat(ctx, this.displayFormatApplied);
+        this.getUIContext().getPromptAction().showToast({ message: res.message });
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      this.displayFormat = this.displayFormatApplied;
+      this.getUIContext().getPromptAction().showToast({ message: `更新失败：${e.message}` });
+    }
+    this.formatRunning = false;
+    this.refreshFormatPreview();
   }
 
   /** 重新检测通知权限状态 */
@@ -935,6 +1007,67 @@ struct SettingsPage {
                 }
                 .width('100%')
                 .padding({ top: 4 })
+
+                // ⭐ 系统日历中的显示名称（0.0.8）：三种格式，切换需重建镜像
+                Column({ space: 6 }) {
+                  Text('系统日历中的显示名称')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor($r('app.color.text_primary'))
+                    .width('100%')
+                  if (this.hasLegacyNames) {
+                    Text('当前名称是旧格式，你可以在下方更换显示方式')
+                      .fontSize(12)
+                      .fontColor($r('app.color.brand_text'))
+                      .width('100%')
+                  }
+                  Flex({ wrap: FlexWrap.Wrap }) {
+                    ForEach([
+                      { v: 1, label: '同步日历·本名' },
+                      { v: 2, label: '同步日历·账号·本名' },
+                      { v: 3, label: '账号·本名' }
+                    ], (opt: Record<string, string | number>): void => {
+                      Text(opt.label as string)
+                        .fontSize(12)
+                        .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                        .margin({ right: 8, bottom: 6 })
+                        .borderRadius(14)
+                        .backgroundColor(this.displayFormat === (opt.v as number)
+                          ? $r('app.color.brand') : $r('app.color.card_bg'))
+                        .fontColor(this.displayFormat === (opt.v as number)
+                          ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                        .border({
+                          width: 1,
+                          color: this.displayFormat === (opt.v as number)
+                            ? $r('app.color.brand') : $r('app.color.shadow_color')
+                        })
+                        .onClick(() => {
+                          this.displayFormat = opt.v as number;
+                          this.refreshFormatPreview();
+                        })
+                    }, (opt: Record<string, string | number>): string => `fmt_${opt.v}`)
+                  }
+                  .width('100%')
+                  Text(`示例：${this.formatPreview}`)
+                    .fontSize(12)
+                    .fontColor($r('app.color.text_secondary'))
+                    .width('100%')
+                  Text('修改后需重新写入系统日历，期间日程会短暂消失几秒')
+                    .fontSize(11)
+                    .fontColor($r('app.color.text_hint'))
+                    .width('100%')
+                  Button(this.formatRunning ? '正在应用…'
+                    : (this.displayFormat === this.displayFormatApplied ? '已应用' : '应用'))
+                    .fontSize(13)
+                    .width('100%')
+                    .enabled(!this.formatRunning && this.displayFormat !== this.displayFormatApplied)
+                    .onClick(() => {
+                      this.applyDisplayFormat();
+                    })
+                }
+                .alignItems(HorizontalAlign.Start)
+                .width('100%')
+                .padding({ top: 8 })
 
                 Button(this.mirrorRunning ? '正在执行…' : '立即执行镜像')
                   .fontSize(14)
