@@ -10,6 +10,7 @@
 import { common } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import process from '@ohos.process';
 import { DavAccount, AccountStore, TYPE_CALDAV } from './AccountStore';
 import { SyncEngine } from './SyncEngine';
 import { CardDataService } from './CardDataService';
@@ -57,6 +58,15 @@ export class BackgroundSyncRunner {
   /** 本次卡片同步申请的短时任务 requestId（0 = 未申请到） */
   private static cardTransientId: number = 0;
 
+  /** 当前进程 pid（取不到返回 -1）。用来判断卡片回调是否与主 App 同进程。 */
+  private static pidOf(): number {
+    try {
+      return process.pid;
+    } catch (err) {
+      return -1;
+    }
+  }
+
   /**
    * ⭐⭐ 由**服务卡片定时刷新**（`onUpdateForm`）驱动的后台同步（0.0.8）。
    *
@@ -88,8 +98,16 @@ export class BackgroundSyncRunner {
       //    ⚠️ 配额：短时任务单日总配额 10 分钟、单次最长 3 分钟（低电量 1 分钟），
       //       且**被挂起后才计时**（10 秒内跑完不消耗）→ 对我们很划算。
       const windowMs: number = await BackgroundSyncRunner.acquireCardWindow();
-      const budget: number = Math.min(windowMs, BackgroundSyncRunner.CARD_MAX_TOTAL_MS);
-      LogUtil.write(`卡片驱动同步：开始（卡片 30 分钟定时刷新触发，可用窗口 ${Math.round(budget / 1000)} 秒）`);
+      let budget: number = Math.min(windowMs, BackgroundSyncRunner.CARD_MAX_TOTAL_MS);
+      // ⭐ 诊断开关（preferences：card_budget_ms）：>0 时**覆盖**上面算出的可用窗口。
+      //    用途：在真机上回答"卡片进程究竟能活多久""一次完整同步要多久"，
+      //    从而决定卡片这条路该做多少事 —— 不必为此重新编译。
+      const overrideMs: number = await AppSettings.getCardBudgetMs(context);
+      if (overrideMs > 0) {
+        budget = overrideMs;
+        LogUtil.write(`卡片驱动同步：预算被诊断开关覆盖为 ${Math.round(budget / 1000)} 秒`);
+      }
+      LogUtil.write(`卡片驱动同步：开始（卡片 30 分钟定时刷新触发，pid=${BackgroundSyncRunner.pidOf()}，可用窗口 ${Math.round(budget / 1000)} 秒）`);
       // 软超时：预算内没跑完就主动放弃（幂等同步，中断不损坏数据，下轮会重试）
       const worker: Promise<void> =
         BackgroundSyncRunner.runOnce(context, 'cardTick').then((): void => {});
@@ -164,8 +182,12 @@ export class BackgroundSyncRunner {
    */
   static async runOnce(context: common.Context, tag: string): Promise<BackgroundSyncResult> {
     const r = new BackgroundSyncResult();
+    // ⭐ 阶段计时：后台同步被时间预算切断时，这些 `+Xms` 就是"钱花在哪了"的直接证据。
+    const t0: number = Date.now();
+    const el = (): number => Date.now() - t0;
     try {
       const accounts: DavAccount[] = await AccountStore.loadAll(context);
+      LogUtil.write(`后台同步[${tag}] 阶段：载入账号 ${accounts.length} 个 +${el()}ms`);
       if (accounts.length === 0) {
         LogUtil.write(`后台同步[${tag}]：无账号，跳过`);
         return r;
@@ -176,12 +198,14 @@ export class BackgroundSyncRunner {
       } catch (err) {
         // 导入失败不影响正常同步
       }
+      LogUtil.write(`后台同步[${tag}] 阶段：系统日历导入 +${el()}ms`);
       // 入站对账：把用户在系统日历里的改动读回来置 dirty（必须在同步之前）
       try {
         await MirrorInbound.reconcile(context);
       } catch (err) {
         // 对账失败不影响正常同步
       }
+      LogUtil.write(`后台同步[${tag}] 阶段：入站对账 +${el()}ms`);
       for (const acc of accounts) {
         if (acc.type !== TYPE_CALDAV) {
           continue;
@@ -196,13 +220,16 @@ export class BackgroundSyncRunner {
           r.failed++;
           LogUtil.write(`后台同步[${tag}] id=${acc.id} 失败: ${e.message}`);
         }
+        LogUtil.write(`后台同步[${tag}] 阶段：账号 ${acc.id} 同步 +${el()}ms（ok=${r.ok} failed=${r.failed}）`);
       }
       // 全部账号同步成功才结束"一次性全量重拉"状态
       if (r.attempted > 0 && r.ok === r.attempted) {
         await AppSettings.markFullRefetchDone(context);
       }
       await SyncEngine.settleLocalEvents(context);
+      LogUtil.write(`后台同步[${tag}] 阶段：本地收尾 +${el()}ms`);
       await SyncEngine.pruneOrphanRows(context, accounts);
+      LogUtil.write(`后台同步[${tag}] 阶段：孤儿行清理 +${el()}ms`);
       // ⚠️ 必须回写账号：syncAccount 会就地更新 acc（服务器日历本颜色、写权限等）。
       // 缺了这一步，后台同步刷到的颜色只留在内存里、进程退出即丢失。
       await AccountStore.saveAll(context, accounts);
@@ -215,6 +242,7 @@ export class BackgroundSyncRunner {
       } catch (err) {
         // 镜像失败不影响同步
       }
+      LogUtil.write(`后台同步[${tag}] 阶段：出站镜像 +${el()}ms`);
       // 同步后刷新卡片 + 重建提醒，保证后台同步的成果直接可见
       try {
         await CardDataService.pushToAllForms(context);
@@ -222,10 +250,10 @@ export class BackgroundSyncRunner {
       } catch (err) {
         // 卡片/提醒刷新失败不影响同步结果
       }
-      LogUtil.write(`后台同步[${tag}] 完成：${r.ok}/${r.attempted} 个账号`);
+      LogUtil.write(`后台同步[${tag}] 完成：${r.ok}/${r.attempted} 个账号，总耗时 ${Math.round(el() / 1000)} 秒`);
     } catch (err) {
       const e = err as BusinessError;
-      LogUtil.write(`后台同步[${tag}] 流程异常: ${e.message}`);
+      LogUtil.write(`后台同步[${tag}] 流程异常: ${e.message}（已耗时 ${Math.round(el() / 1000)} 秒）`);
     }
     return r;
   }

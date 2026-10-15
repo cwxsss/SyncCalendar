@@ -24,6 +24,9 @@ export class AppSettings {
   //   服务卡片每 30 分钟被系统刷新一次（form_config 的 updateDuration=1），
   //   借这个时机顺带跑一次后台同步 —— 得到"约 30 分钟一次"的定期同步。
   private static readonly KEY_CARD_SYNC_AT: string = 'card_sync_at';
+  /** ⭐ 诊断开关：卡片驱动同步的时间预算（毫秒）。0/未设置 = 用内置默认（见 BackgroundSyncRunner）。
+   *  留给真机排查用 —— 不用重编译就能做"9 秒 vs 长窗口"对照实验。 */
+  private static readonly KEY_CARD_BUDGET_MS: string = 'card_budget_ms';
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
   private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
@@ -347,6 +350,17 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存卡片同步时间失败: ${e.message}`);
+    }
+  }
+
+  /** ⭐ 诊断用：卡片驱动同步的时间预算（毫秒）。0 = 未设置（用内置默认值）。 */
+  static async getCardBudgetMs(context: common.Context): Promise<number> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_CARD_BUDGET_MS, 0) as number;
+    } catch (err) {
+      return 0;
     }
   }
 

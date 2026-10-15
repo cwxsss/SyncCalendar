@@ -82,6 +82,25 @@ export class MirrorInbound {
 
   /* ==================== 单个日历本 ==================== */
 
+  /**
+   * 取回该账户下已有日程。
+   *
+   * 🔴 2026-10-15 实测（DEL-AL20 / 7.0.0.109）：`getEvents(undefined, 字段数组)` 在这个
+   *    系统版本上**必抛** `401 type error!`。而本文件原先正是这么调的 ⇒ "入站对账"对
+   *    **每一个**日历本都失败（真机日志 12/12 全是 `401 type error!`），
+   *    整个"把系统日历里的改动回写 CalDAV"等于死的（还白费 12 次调用）。
+   *    出站镜像（SystemCalendarMirror.queryEvents）早就踩过同一个坑，改成"先无参、失败再带字段"。
+   *    这里沿用同一策略：无参调用返回的 Event 里 identifier 同样有值。
+   */
+  private static async queryEvents(cal: calendarManager.Calendar): Promise<calendarManager.Event[]> {
+    try {
+      return await cal.getEvents();
+    } catch (err) {
+      LogUtil.write(`入站对账 getEvents() 失败，退回带字段：${(err as BusinessError).message}`);
+      return await cal.getEvents(undefined, MirrorInbound.QUERY_FIELDS);
+    }
+  }
+
   private static async reconcileBook(
     context: common.Context,
     cm: calendarManager.CalendarManager,
@@ -109,8 +128,7 @@ export class MirrorInbound {
     }
 
     const snaps: Map<string, MirrorSnapshotRow> = await MirrorSnapshot.loadMap(context, bucket);
-    const events: calendarManager.Event[] = await cal.getEvents(
-      undefined, MirrorInbound.QUERY_FIELDS);
+    const events: calendarManager.Event[] = await MirrorInbound.queryEvents(cal);
 
     // 分成两类：带我们 identifier 的（可判定改/删） vs 不是我们的（用户新建）
     const mine: Map<string, calendarManager.Event> = new Map<string, calendarManager.Event>();

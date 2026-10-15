@@ -3,11 +3,21 @@
 import { FormExtensionAbility, formBindingData, formProvider } from '@kit.FormKit';
 import { Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import process from '@ohos.process';
 import { CardDataService, CardData } from '../common/CardDataService';
 import { BackgroundSyncRunner } from '../common/BackgroundSyncRunner';
 import { LogUtil } from '../common/LogUtil';
 
 export default class EntryFormAbility extends FormExtensionAbility {
+  /** 当前进程 pid（取不到返回 -1）：用于判断卡片回调是否与主 App 同进程 */
+  private static pidOf(): number {
+    try {
+      return process.pid;
+    } catch (err) {
+      return -1;
+    }
+  }
+
   /** 组装更新数据并推送到指定卡片 */
   private pushData(formId: string, dayOffset: number = 0): void {
     CardDataService.buildCardData(this.context, dayOffset).then((data: CardData): void => {
@@ -41,7 +51,7 @@ export default class EntryFormAbility extends FormExtensionAbility {
 
   onUpdateForm(formId: string): void {
     LogUtil.init(this.context);
-    LogUtil.write(`系统触发卡片更新: formId=${formId}`);
+    LogUtil.write(`系统触发卡片更新: formId=${formId}（进程 pid=${EntryFormAbility.pidOf()}）`);
     CardDataService.registerForm(this.context, formId);
     // ⭐ ① 先用**本地缓存**立刻刷新卡片（几毫秒，不依赖网络）
     //    保留用户翻到的日期（系统定时刷新不应把用户翻走的日期拽回今天）

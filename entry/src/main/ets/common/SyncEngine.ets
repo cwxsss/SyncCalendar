@@ -160,12 +160,12 @@ export class SyncEngine {
       // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
       const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
       const byUid: Map<string, LocalEvent[]> = new Map();
+      // ⭐ 再按 **etag** 分组，给下面"要不要 GET 这个资源"做兜底（见 §复用判定 注释）
+      const byEtag: Map<string, LocalEvent[]> = new Map();
       for (const row of existingRows) {
-        const arr: LocalEvent[] | undefined = byUid.get(row.uid);
-        if (arr === undefined) {
-          byUid.set(row.uid, [row]);
-        } else {
-          arr.push(row);
+        SyncEngine.groupPush(byUid, row.uid, row);
+        if (row.etag !== '') {
+          SyncEngine.groupPush(byEtag, row.etag, row);
         }
       }
       const originMatch = /https?:\/\/[^/]+/i.exec(href);
@@ -174,9 +174,27 @@ export class SyncEngine {
       let fetched: number = 0;
       let parseFail: number = 0;
       const needFetch: RemoteItem[] = [];
+      let hitUid: number = 0;    // 按"资源名 = uid"命中
+      let hitEtag: number = 0;   // 按 etag 内容哈希兜底命中
       for (const it of items) {
         const resUid: string = SyncEngine.resUidFromHref(it.href);
-        const group: LocalEvent[] | undefined = byUid.get(resUid);
+        let group: LocalEvent[] | undefined = byUid.get(resUid);
+        if (group !== undefined) {
+          hitUid++;
+        } else if (it.etag !== '') {
+          // ⭐ 复用判定（2026-10-15 修复）：**服务器不保证"资源文件名 = ICS 里的 UID"**。
+          //   家书 CalDav.php:253 用 preg_replace('/[^A-Za-z0-9._-]/', '_', $uid) 生成文件名：
+          //   UID `movie-188@familybook` 的资源叫 `movie-188_familybook.ics`。
+          //   旧版只按资源名去 `byUid` 查 → 永远查不到 → 该资源**每轮都被判成"变了"**，
+          //   于是每次都全量 GET（实测 2184 个资源 → 单次同步 200~300 秒：卡片后台同步
+          //   那 9 秒窗口连一个日历本都跑不完）。
+          //   etag 是**内容哈希**（服务端由正文 md5 得出）：相等即内容一致，
+          //   与"资源叫什么名字"无关 —— 用它兜底既安全又与服务器实现解耦。
+          group = byEtag.get(it.etag);
+          if (group !== undefined) {
+            hitEtag++;
+          }
+        }
         if (!fullRefetch && group !== undefined && group.length > 0 && !group[0].dirty
           && group[0].etag === it.etag) {
           // etag 未变：直接用本地行还原远端数据（含 reminder 等完整字段）
@@ -187,6 +205,7 @@ export class SyncEngine {
         }
         needFetch.push(it);
       }
+      LogUtil.write(`日历本[${i}]「${calName}」复用判定：uid 命中 ${hitUid}、etag 兜底命中 ${hitEtag}、需补拉 ${needFetch.length}（共 ${items.length}）`);
       // 并发 GET 补拉（每批 5 个），避免全量重拉时串行请求超时
       const batchSize: number = 5;
       for (let b: number = 0; b < needFetch.length; b += batchSize) {
@@ -390,6 +409,16 @@ export class SyncEngine {
     }
   }
 
+  /** Map<key, 行数组> 追加一行（没有该 key 就建数组） */
+  private static groupPush(m: Map<string, LocalEvent[]>, key: string, row: LocalEvent): void {
+    const arr: LocalEvent[] | undefined = m.get(key);
+    if (arr === undefined) {
+      m.set(key, [row]);
+    } else {
+      arr.push(row);
+    }
+  }
+
   /** 从资源 URL 提取 UID（解析失败时的兜底） */
   private static uidFromHref(href: string): string {
     const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
@@ -401,8 +430,7 @@ export class SyncEngine {
   }
 
   /** 从资源 URL 提取 UID（URL 解码后，用于与 DB 中 parse 出的真实 uid 匹配） */
-  private static resUidFromHref(href: string): string {
-    const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
+  private static resUidFromHref(href: string): string {    const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
     if (segs.length === 0) {
       return String(Date.now());
     }

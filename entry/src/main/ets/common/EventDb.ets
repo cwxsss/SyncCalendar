@@ -425,7 +425,22 @@ export class EventDb {
       rs.close();
     }
 
-    const remoteKeys: string[] = [];
+    // ⭐ 2226（2026-10-15 提速）：下方逐条要判"这条远端事件本地有没有对应行"。
+    //    原先对每条都 `existing.find(...)` ⇒ O(n·m)（工作本 735 行 → 54 万次比较，
+    //    每次还要现拼 `uid_startTime_recId` 字符串），2184 行全库累计近 100 万次。
+    //    卡片后台同步的时间预算只有 9 秒，这笔开销吃不起 → 预先建 Map，改成 O(1) 查。
+    //    语义与 `existing.find(x => !x.dirty && x.uid===r.uid && x.startTime===r.startTime
+    //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
+    const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    for (const e of existing) {
+      if (e.dirty) {
+        continue;
+      }
+      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
+      if (!keyed.has(k)) {
+        keyed.set(k, e);
+      }
+    }
     // ⭐ 同一次解析里可能出现同一资源的多条相同 VEVENT（同 uid + 同 DTSTART）。
     //    旧版用循环前的 existing 快照判重，插入后不回写 → 第二条仍判为"新增"又插一行，
     //    在本地库留下 href/etag/remote_path 完全相同的冗余行（2026-09-19 实测 10 组）。
@@ -438,10 +453,7 @@ export class EventDb {
         continue; // 同一资源内的重复条目 → 只保留一条
       }
       seenKeys.add(key);
-      remoteKeys.push(key);
-      const found = existing.find((x: LocalEvent): boolean =>
-        !x.dirty && x.uid === r.uid && x.startTime === r.startTime
-        && x.recurrenceId === r.recurrenceId);
+      const found: LocalEvent | undefined = keyed.get(key);
       if (found === undefined) {
         // 新增
         const e = new LocalEvent();
@@ -517,7 +529,8 @@ export class EventDb {
         continue;
       }
       const localKey: string = `${local.uid}_${local.startTime}_${local.recurrenceId}`;
-      if (!remoteKeys.includes(localKey)) {
+      // ⭐ 同样从 O(m) 的数组 includes 换成 Set 查询（见上方 keyed 的说明）
+      if (!seenKeys.has(localKey)) {
         const del = new relationalStore.RdbPredicates('events');
         del.equalTo('id', local.id);
         await store.delete(del);
