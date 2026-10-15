@@ -229,7 +229,10 @@ export class IcsUtil {
   }
 
   /**
-   * 由本地事件构建 VCALENDAR 文本（时间统一转 UTC，保证服务器端时区正确）。
+   * 由本地事件构建 VCALENDAR 文本。
+   *
+   * ⚠️ 事件时间写的是**浮动本地时间**（不是 UTC），原因见 `vevent()` 里的详细说明
+   *    （服务器会删掉 `Z`/`TZID` 且不做时移）。`DTSTAMP` 仍按 RFC 规定写 UTC+`Z`。
    *
    * 已知取舍：摘要 / 地点 / 备注等文本字段**未做 ICS 转义**（`,` `;` `\` 与换行）。
    * 含这些字符的标题在服务器端可能被截断或串行；
@@ -273,10 +276,25 @@ export class IcsUtil {
   /** 单个 VEVENT 块（主事件带 RRULE/EXDATE，覆盖行带 RECURRENCE-ID） */
   private static vevent(e: LocalEvent, now: string): string {
     const pad = (n: number): string => n < 10 ? '0' + n : String(n);
-    const fmtUtc = (ms: number): string => {
+    /**
+     * ⭐⭐ 事件时间一律写**浮动本地时间**（`YYYYMMDDTHHMMSS`，**不带 `Z`、不带 `TZID`**）。
+     *
+     * 为什么不写 RFC 最正统的 UTC+`Z` —— 因为服务器会把它弄坏：
+     *   本项目的服务器（家书日历 / family.yangyq.net）会**直接删掉** `DTSTART`/`DTEND`
+     *   上的 `Z` 与 `TZID` 参数，**且不对数值做任何时移**
+     *   （2026-10-15 实测：PUT `DTSTART:20261020T060000Z` → 存回 `DTSTART:20261020T060000`；
+     *     PUT `DTSTART;TZID=Asia/Shanghai:20261020T140000` → 存回 `20261020T140000`）。
+     *   于是"UTC 00:00"被当成"**本地** 00:00"。而本地 08:00 的正确 UTC 恰好就是 00:00，
+     *   所以症状正好是**阅读端少了 8 小时**（用户实测："8:00 的日程同步后变成 0:00"）。
+     *
+     * 该服务器上全部计时事件（1163 条）的 `DTSTART` **无一例外都是浮动本地时间**
+     * （带 `Z` 的数量为 **0**、带 `TZID` 为 **0**）→ 这就是它的事实约定，我们随它。
+     * 浮动时间在任何阅读端都按"当地墙钟"解析，本机 CST 往返完全一致。
+     */
+    const fmtLocal = (ms: number): string => {
       const d = new Date(ms);
-      return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-        `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+      return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
+        `T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     };
     const fmtDate = (ms: number): string => {
       const d = new Date(ms);
@@ -289,8 +307,8 @@ export class IcsUtil {
       // 存储的 endTime 为排他日前一毫秒，+1s 得到排他日期
       dtend = 'DTEND;VALUE=DATE:' + fmtDate(e.endTime + 1000);
     } else {
-      dtstart = 'DTSTART:' + fmtUtc(e.startTime);
-      dtend = 'DTEND:' + fmtUtc(e.endTime);
+      dtstart = 'DTSTART:' + fmtLocal(e.startTime);
+      dtend = 'DTEND:' + fmtLocal(e.endTime);
     }
     // ⭐ 覆盖实例（RECURRENCE-ID 行）：必须写出 RECURRENCE-ID，否则服务器无法把它
     //    关联到主事件的哪一次发生 → 要么整系列被破坏，要么原时间残留成"幽灵日程"。
@@ -298,7 +316,7 @@ export class IcsUtil {
     if (e.rrule === '' && e.recurrenceId > 0) {
       recId = e.isAllDay
         ? `RECURRENCE-ID;VALUE=DATE:${fmtDate(e.recurrenceId)}\r\n`
-        : `RECURRENCE-ID:${fmtUtc(e.recurrenceId)}\r\n`;
+        : `RECURRENCE-ID:${fmtLocal(e.recurrenceId)}\r\n`;
     }
     // ⭐ EXDATE：主事件排除掉的若干次发生（"仅删除这一次"就是往这里加）
     let exdate: string = '';
@@ -307,7 +325,7 @@ export class IcsUtil {
       for (const raw of e.exdate.split(';')) {
         const t = IcsUtil.parseTime(raw, !raw.includes('T'));
         if (t !== null) {
-          vals.push(t.allDay ? fmtDate(t.time) : fmtUtc(t.time));
+          vals.push(t.allDay ? fmtDate(t.time) : fmtLocal(t.time));
         }
       }
       if (vals.length > 0) {
@@ -341,8 +359,9 @@ export class IcsUtil {
   }
 
   /**
-   * 毫秒时间戳 → 用于 EXDATE / RECURRENCE-ID 的 ICS 时间串。
-   * @param dateOnly 全天日程用 `YYYYMMDD`，否则用 UTC 的 `YYYYMMDDTHHMMSSZ`
+   * 毫秒时间戳 → 用于 EXDATE / RECURRENCE-ID / UNTIL 的 ICS 时间串。
+   * @param dateOnly 全天日程用 `YYYYMMDD`，否则用**浮动本地时间** `YYYYMMDDTHHMMSS`
+   *                 （不带 `Z`：必须与 `DTSTART` 的形态一致，见 `vevent()` 里的说明）
    */
   static fmtIcsTime(ms: number, dateOnly: boolean): string {
     const pad = (n: number): string => n < 10 ? '0' + n : String(n);
@@ -350,20 +369,19 @@ export class IcsUtil {
     if (dateOnly) {
       return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
     }
-    return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-      `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
+      `T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   }
 
   /**
    * ⭐ 给 RRULE 加上/替换 UNTIL（"此次及以后"改期/删除时，把原系列截断到指定时刻之前）。
    * - 会**移除 COUNT**（RFC 5545：UNTIL 与 COUNT 不可同时出现）
-   * - UNTIL 用 UTC 形式；`untilMs` 一般是"该次发生的开始时刻 − 1 秒"
+   * - UNTIL 用**浮动本地时间**（RFC 5545：`DTSTART` 是本地时间时，`UNTIL` **必须**也是本地时间；
+   *   而我们把所有事件时间都写成浮动本地 —— 二者必须一致，否则不同阅读端的展开会错位）
+   * - `untilMs` 一般是"该次发生的开始时刻 − 1 秒"
    */
   static rruleWithUntil(rrule: string, untilMs: number): string {
-    const pad = (n: number): string => n < 10 ? '0' + n : String(n);
-    const d = new Date(untilMs);
-    const until: string = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-      `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+    const until: string = IcsUtil.fmtIcsTime(untilMs, false);
     const kept: string[] = [];
     for (const part of rrule.split(';')) {
       const k: string = part.split('=')[0].trim().toUpperCase();
