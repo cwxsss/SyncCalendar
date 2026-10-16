@@ -399,7 +399,8 @@ struct Index {
   /** 自动同步：每 15 秒检查一次，到达设置的间隔（AppStorage.syncIntervalMinutes）才真正同步 */
   private startAutoSync(): void {
     if (this.autoSyncTimer === -1) {
-      AppStorage.setOrCreate('syncIntervalMinutes', 1);
+      // ⭐ 0.0.8：默认间隔 1 分钟 → 15 分钟（见 AppSettings.getSyncIntervalMinutes 注释）
+      AppStorage.setOrCreate('syncIntervalMinutes', 15);
       const ctx = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
         AppSettings.getSyncIntervalMinutes(ctx).then((v: number): void => {
@@ -412,7 +413,7 @@ struct Index {
         if (tickCtx !== undefined && !this.syncing) {
           ReminderService.tickReminders(tickCtx as common.UIAbilityContext);
         }
-        const minutes: number = AppStorage.get<number>('syncIntervalMinutes') ?? 1;
+        const minutes: number = AppStorage.get<number>('syncIntervalMinutes') ?? 15;
         if (Date.now() - this.lastSyncTime < minutes * 60000) {
           return; // 未到设置的同步间隔
         }

@@ -37,7 +37,6 @@
 import { common, abilityAccessCtrl, bundleManager, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { calendarManager } from '@kit.CalendarKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
 import { AccountStore, BookPalette, DavAccount } from './AccountStore';
 import { EventDb, LocalEvent } from './EventDb';
 import { IcsTime, IcsUtil } from './IcsUtil';
@@ -594,16 +593,31 @@ export class SystemCalendarMirror {
     LogUtil.write(
       `镜像前清理：删除 ${purge.removed} 个孤儿镜像账户，失败 ${purge.failed} 个，清理后仍剩余 ${purge.remaining} 个`);
 
+    // ⭐ 0.0.8 防护：设备「重启后尚未解锁」时（direct boot），日历数据在加密存储里读不到，
+    //    getAllCalendars() 会返回空列表，此时 createCalendar 必然失败——真机实测表现为
+    //    12 个镜像账户连续 `201 CreateCalendar failed!`（2026-10-16 07:55），还可能留下半创建账户。
+    //    正常设备至少有一个本机日历，所以「清单为 0」只可能是日历服务未就绪 ⇒ 本轮直接跳过创建，
+    //    等下一次同步（解锁后）自然恢复。
+    let calCount: number = 0;
+    try {
+      calCount = (await cm.getAllCalendars()).length;
+    } catch (err) {
+      LogUtil.write(`镜像跳过：读不到系统日历账户列表 ${(err as BusinessError).message}`);
+      return res;
+    }
+    if (calCount === 0) {
+      LogUtil.write('镜像跳过：系统日历账户清单为 0（日历服务未就绪，如设备重启后尚未解锁），本轮不创建镜像账户');
+      return res;
+    }
+
     const winStart: number = SystemCalendarMirror.windowStart();
     const winEnd: number = SystemCalendarMirror.windowEnd();
     // ⭐ 0.0.8：读取用户所选的显示名格式（仅影响**新建**账户的名字；已有账户不在此处改名）
     const format: number = await AppSettings.getMirrorDisplayFormat(context);
-    const plans: Map<string, MirrorOcc[]> = new Map<string, MirrorOcc[]>();
     for (const ref of refs) {
       try {
         const plan: MirrorOcc[] =
           await SystemCalendarMirror.planFor(context, ref, winStart, winEnd, res);
-        plans.set(ref.bookId, plan);
         await SystemCalendarMirror.syncBook(context, cm, ref, plan, winStart, winEnd, res, format);
         res.books++;
       } catch (err) {
@@ -612,8 +626,7 @@ export class SystemCalendarMirror {
         LogUtil.write(`镜像失败 bookId=${ref.bookId}: ${e.code ?? ''} ${e.message}`);
       }
     }
-    // ⭐ 每次镜像后自动导出一份对照诊断，便于"系统日历里有、App 里没有"这类问题逐条比对
-    await SystemCalendarMirror.dumpDiagnosis(context, cm, refs, plans, winStart, winEnd);
+    // ⭐ 0.0.8：不再导出 mirror_diag.txt（诊断落盘功能已随「同步记录」一并移除）
     LogUtil.write(
       `镜像完成：本=${res.books} 新增=${res.added} 更新=${res.updated} 删除=${res.deleted} 失败=${res.failed} ` +
       `跳过=${res.skipped}（窗口外单点=${res.winOut} 已删除=${res.markDel} 系统备份=${res.syscal}）` +
@@ -854,7 +867,7 @@ export class SystemCalendarMirror {
 
   /**
    * ⭐ 算出"某个日历本在窗口内应该有哪些发生" —— **唯一的口径来源**。
-   * 实际写入（syncBook）与诊断导出（dumpDiagnosis）都用它，保证诊断看到的就是真正写进去的。
+   * 实际写入（syncBook）以它为准，保证"计划"与"写入"完全一致。
    */
   private static async planFor(
     context: common.Context,
@@ -1013,145 +1026,6 @@ export class SystemCalendarMirror {
       `镜像[${ref.name}] bookId=${ref.bookId} 计划=${plan.length} 系统已有=${sysEvents.length} ` +
       `新增=${toAdd.length} 快照=${snapN} ` +
       `窗口=${SystemCalendarMirror.fmt(winStart)}~${SystemCalendarMirror.fmt(winEnd)}`);
-  }
-
-  /**
-   * ⭐ 诊断导出：把"App 侧计划写入"与"系统日历里实际存在"的完整对照写到
-   * `${filesDir}/mirror_diag.txt`（可用 hdc 直接取出分析）。
-   *
-   * 为什么需要它：用户反馈"系统日历里有、App 里没有"这种问题靠描述很难定位，
-   * 必须把两侧的清单原样摆在一起逐条比。每次镜像后自动重写一份。
-   */
-  private static async dumpDiagnosis(
-    context: common.Context,
-    cm: calendarManager.CalendarManager,
-    refs: BookRef[],
-    plans: Map<string, MirrorOcc[]>,
-    winStart: number,
-    winEnd: number
-  ): Promise<void> {
-    try {
-      const lines: string[] = [];
-      lines.push(`镜像诊断 ${new Date().toLocaleString()}`);
-      lines.push(`窗口 ${SystemCalendarMirror.fmt(winStart)} ~ ${SystemCalendarMirror.fmt(winEnd)} ` +
-        `(${winStart} ~ ${winEnd})`);
-      const cals: calendarManager.Calendar[] = await cm.getAllCalendars();
-      // ⭐ 全设备日历账户清单：一眼看出有没有"本应用建的、但不属于当前选中本"的残留账户
-      //    （历史 calKey 命名的账户、重复账户）。每次镜像都导出一份，省得再靠按钮抓。
-      const keepNames: Set<string> = new Set<string>();
-      for (const r of refs) {
-        keepNames.add(r.sysAccountName);
-      }
-      let mineN: number = 0;
-      let keepN: number = 0;
-      lines.push('');
-      lines.push(`[全设备日历账户] 共 ${cals.length} 个日历本：`);
-      for (const c of cals) {
-        let accName: string = '';
-        let disp: string = '';
-        let n: number = -1;
-        try {
-          accName = c.getAccount().name;
-          disp = c.getAccount().displayName ?? '';
-        } catch (err) {
-          // 忽略
-        }
-        try {
-          n = (await SystemCalendarMirror.queryEvents(c)).length;
-        } catch (err) {
-          // 忽略
-        }
-        let tag: string = 'other';
-        if (accName.startsWith(SystemCalendarMirror.ACCOUNT_PREFIX)) {
-          if (keepNames.has(accName)) {
-            tag = 'KEEP';
-            keepN++;
-          } else {
-            tag = 'MINE(残留)';
-            mineN++;
-          }
-        }
-        lines.push(`  [${tag}] #${c.id} acc=${accName} display=${disp} 条目=${n}`);
-      }
-      lines.push(`  小结：本应用账户 ${keepN + mineN} 个（本次保留 ${keepN}，残留 ${mineN}）`);
-      for (const ref of refs) {
-        const plan: MirrorOcc[] | undefined = plans.get(ref.bookId);
-        const list: MirrorOcc[] = plan !== undefined ? plan : [];
-        let cal: calendarManager.Calendar | undefined = undefined;
-        for (const c of cals) {
-          if (c.getAccount().name === ref.sysAccountName) {
-            cal = c;
-            break;
-          }
-        }
-        lines.push('');
-        lines.push(`[本] ${ref.name} | bookId=${ref.bookId} | calKey=${ref.calKey} | 账户=${ref.sysAccountName} | 账户存在=${cal !== undefined}`);
-        if (cal === undefined) {
-          continue;
-        }
-        const sysEvents: calendarManager.Event[] = await SystemCalendarMirror.queryEvents(cal);
-        const sysMap: Map<string, calendarManager.Event> = new Map<string, calendarManager.Event>();
-        for (const ev of sysEvents) {
-          const id: string = ev.identifier ?? '';
-          if (id !== '') {
-            sysMap.set(id, ev);
-          }
-        }
-        lines.push(`  计划写入=${list.length}  系统日历实际=${sysEvents.length}（其中带 identifier=${sysMap.size}）`);
-
-        // ① 系统日历里有、计划里没有 → 多出来的（正常会被删掉；删不掉就是残留）
-        const planIds: Set<string> = new Set<string>();
-        for (const o of list) {
-          planIds.add(o.identifier);
-        }
-        const extra: string[] = [];
-        for (const id of sysMap.keys()) {
-          if (planIds.has(id)) {
-            continue;
-          }
-          const ev: calendarManager.Event | undefined = sysMap.get(id);
-          if (ev === undefined) {
-            continue;
-          }
-          extra.push(`    ${SystemCalendarMirror.stamp(ev.startTime)} ${ev.title ?? ''} [${id}]`);
-        }
-        lines.push(`  ① 系统多出（${extra.length}）：`);
-        for (let i: number = 0; i < extra.length && i < 120; i++) {
-          lines.push(extra[i]);
-        }
-
-        // ② 计划里有、系统日历没有 → 漏写
-        const miss: string[] = [];
-        for (const o of list) {
-          if (!sysMap.has(o.identifier)) {
-            miss.push(`    ${SystemCalendarMirror.stamp(o.start)} ${o.title} [${o.identifier}]`);
-          }
-        }
-        lines.push(`  ② 漏写（${miss.length}）：`);
-        for (let i: number = 0; i < miss.length && i < 60; i++) {
-          lines.push(miss[i]);
-        }
-
-        // ③ 系统日历里该账户的**全部**条目（供逐条核对，最多 400 行）
-        lines.push(`  ③ 系统日历条目（${sysEvents.length}，最多列 400）：`);
-        const sorted: calendarManager.Event[] = sysEvents.slice().sort(
-          (a: calendarManager.Event, b: calendarManager.Event): number => a.startTime - b.startTime);
-        for (let i: number = 0; i < sorted.length && i < 400; i++) {
-          const ev: calendarManager.Event = sorted[i];
-          lines.push(`    ${SystemCalendarMirror.stamp(ev.startTime)}~${SystemCalendarMirror.stamp(ev.endTime)} ` +
-            `${ev.isAllDay === true ? '[全天]' : ''}${ev.title ?? ''} [${ev.identifier ?? ''}]`);
-        }
-      }
-      const path: string = `${context.filesDir}/mirror_diag.txt`;
-      const text: string = lines.join('\n') + '\n';
-      const file: fs.File = fs.openSync(path,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      fs.writeSync(file.fd, text);
-      fs.closeSync(file.fd);
-      LogUtil.write(`镜像诊断已导出：${path}（${lines.length} 行）`);
-    } catch (err) {
-      LogUtil.write(`导出镜像诊断失败: ${(err as BusinessError).message}`);
-    }
   }
 
   /** 时间戳 → `MM-DD HH:mm` */

@@ -11,7 +11,7 @@ const DOMAIN = 0x0000;
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
-    // 文件日志初始化：所有页面的同步日志统一写入 filesDir/sync.log
+    // 日志初始化：发行版只输出 console（不再落盘 sync.log），同时清理历史遗留调试文件
     LogUtil.init(this.context);
     LogUtil.write('---- App 启动 ----');
     // 后台同步：注册延迟任务兜底（2 小时）＋ 网络恢复补同步监听

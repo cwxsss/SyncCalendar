@@ -28,7 +28,7 @@ class BackupTarget {
 @Component
 struct SettingsPage {
   @State showSystem: boolean = true;
-  @State intervalMinutes: number = 1;
+  @State intervalMinutes: number = 15; // ⭐ 0.0.8：默认 15 分钟（原 1 分钟会烧光短时任务配额）
   @State backgroundSync: boolean = false;
   @State sysMode: string = 'display'; // display | backup
   @State backupKey: string = '';       // ⭐ 备份目标本的**稳定标识** bookId（不再用会漂移的 calKey）
@@ -604,7 +604,7 @@ struct SettingsPage {
 
   /**
    * 「清理残留镜像账户（诊断）」按钮：
-   * ① 把系统日历里**全部**账户（含 id / name / displayName / type）写进同步日志；
+   * ① 读系统日历里**全部**账户（含 id / name / displayName / type）并显示在下方清单里；
    * ② 把"我们建的、但不属于当前选中本"的账户全部删掉（逐个独立 try，失败也继续）；
    * ③ Toast 汇总成功/失败/残留数量，残留账户名直接显示出来。
    */
@@ -623,7 +623,8 @@ struct SettingsPage {
       if (r.remaining > 0) {
         msg += `；仍残留 ${r.remaining} 个：${r.remainingNames.join(' , ')}`;
       }
-      msg += '（完整账户清单见同步日志）';
+      // ⭐ 0.0.8：不再写同步日志 → 提示语改为指向页面下方那份清单（accountDump）
+      msg += '（完整账户清单见下方）';
       this.getUIContext().getPromptAction().showToast({ message: msg, duration: 6000 });
     } catch (err) {
       const e = err as BusinessError;

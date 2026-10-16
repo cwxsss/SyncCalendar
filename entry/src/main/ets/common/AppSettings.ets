@@ -648,15 +648,23 @@ export class AppSettings {
     }
   }
 
-  /** 自动同步间隔（分钟），默认 1 分钟 */
+  /**
+   * 自动同步间隔（分钟），默认 15 分钟。
+   *
+   * ⭐ 0.0.8：默认值由 1 分钟改为 15 分钟。原因（真机日志 2026-10-16 17:16–17:20 实测）：
+   * 1 分钟间隔会让「App 打开期间」几乎不间断地跑"12 个日历本全量比对 + 出站镜像 + 提醒刷新"，
+   * 5 分钟内连跑 5 轮后触发系统提示「短时任务超时（配额用尽），后台同步将被挂起」——
+   * 反而把真正的后台同步通道一起拖垮。改为 15 分钟后，前台同步仍足够及时，且不再烧配额。
+   * 用户仍可在设置页自行改成 1 / 5 / 15 / 30 分钟 或 1 小时。
+   */
   static async getSyncIntervalMinutes(context: common.Context): Promise<number> {
     try {
       const store: preferences.Preferences =
         await preferences.getPreferences(context, AppSettings.STORE);
-      const v: number = await store.get(AppSettings.KEY_SYNC_INTERVAL, 1) as number;
-      return v > 0 ? v : 1;
+      const v: number = await store.get(AppSettings.KEY_SYNC_INTERVAL, 15) as number;
+      return v > 0 ? v : 15;
     } catch (err) {
-      return 1;
+      return 15;
     }
   }
 
