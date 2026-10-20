@@ -293,6 +293,51 @@ struct SettingsPage {
     return this.allBooks.length - this.mirrorCandidates.length;
   }
 
+  /** 已勾选的可镜像本数量（mirrorKeys 里可能残留已不在候选里的 bookId，按候选口径统计） */
+  private mirrorSelectedCount(): number {
+    return this.mirrorCandidates.filter((b: BackupTarget): boolean =>
+      this.mirrorKeys.indexOf(b.bookId) >= 0).length;
+  }
+
+  /**
+   * 「全选 / 全不选」要镜像的日历本。
+   * ⭐ 批量落盘只写一次 preferences、缓存只失效一次（与逐个 toggle 的关键区别）；
+   *    全不选时逐本删除对应系统日历账户（与取消单个勾选同一语义）。
+   * 半选状态下点按 = 全选。
+   */
+  private async toggleMirrorAll(): Promise<void> {
+    if (this.context === undefined || this.mirrorCandidates.length === 0) {
+      return;
+    }
+    const selectAll: boolean = this.mirrorSelectedCount() < this.mirrorCandidates.length;
+    if (selectAll) {
+      const ids: string[] = this.mirrorCandidates.map((b: BackupTarget): string => b.bookId);
+      this.mirrorKeys = ids;
+      await AppSettings.setMirrorBookIds(this.context, ids);
+      this.getUIContext().getPromptAction().showToast({
+        message: `已全选 ${ids.length} 个日历本，点「立即执行镜像」写入系统日历`
+      });
+    } else {
+      // 逐本删除系统日历账户；逐个独立 try，失败不影响其余
+      for (const k of this.mirrorKeys) {
+        try {
+          await SystemCalendarMirror.removeById(this.context, k);
+        } catch (err) {
+          const e = err as BusinessError;
+          console.error(`全不选：删除镜像账户失败 bookId=${k}: ${e.message}`);
+        }
+      }
+      this.mirrorKeys = [];
+      await AppSettings.setMirrorBookIds(this.context, []);
+      this.getUIContext().getPromptAction().showToast({
+        message: '已取消全部勾选，并清除对应的系统日历账户'
+      });
+    }
+    // ⭐ 勾选本集合变化 → 提醒侧"已镜像本"缓存失效并重排提醒
+    ReminderService.invalidateMirrorCache();
+    await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
+  }
+
   /** 该日历本是否只读：服务器无写权限（探测结果）或用户手动标记只读 —— 与首页色块/只读标记同一口径 */
   private isBookReadonly(b: BackupTarget): boolean {
     return !b.serverWritable || this.manualKeys.includes(b.calKey);
@@ -978,6 +1023,35 @@ struct SettingsPage {
                     .fontColor($r('app.color.text_hint'))
                     .width('100%')
                 }
+                // ⭐ 全选 / 全不选：半选状态下点按 = 全选
+                Row({ space: 6 }) {
+                  Text(`全选（已选 ${this.mirrorSelectedCount()}/${this.mirrorCandidates.length}）`)
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor($r('app.color.text_primary'))
+                    .layoutWeight(1)
+                    .maxLines(1)
+                  Toggle({
+                    type: ToggleType.Checkbox,
+                    isOn: this.mirrorCandidates.length > 0
+                      && this.mirrorSelectedCount() === this.mirrorCandidates.length
+                  })
+                    .selectedColor($r('app.color.brand'))
+                    .onChange((on: boolean): void => {
+                      // 半选时勾选框显示为关，onChange(on=true) 走全选；全选时取消走全不选
+                      if (on === (this.mirrorSelectedCount() === this.mirrorCandidates.length)) {
+                        return; // 状态未变化（个别系统会重复回调），忽略
+                      }
+                      this.toggleMirrorAll();
+                    })
+                }
+                .width('100%')
+                .padding({ top: 2, bottom: 2 })
+                .onClick(() => {
+                  // 整行可点：直接按"是否已全选"翻转，比依赖 Checkbox 的 onChange 更可靠
+                  this.toggleMirrorAll();
+                })
+
                 Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
                   ForEach(this.mirrorCandidates, (b: BackupTarget): void => {
                     Row({ space: 6 }) {
