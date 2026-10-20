@@ -1146,7 +1146,9 @@ export class SystemCalendarMirror {
         try {
           await cal.setConfig({ enableReminder: true, color: ref.color });
         } catch (err) {
-          // 设色失败不影响镜像本身
+          // 设色失败不影响镜像本身，但要留痕（否则"颜色不变"无从排查）
+          const e = err as BusinessError;
+          LogUtil.write(`镜像账户设色失败 ${accountName}: ${e.message}`);
         }
         return cal;
       }
@@ -1159,7 +1161,8 @@ export class SystemCalendarMirror {
     try {
       await cal.setConfig({ enableReminder: true, color: ref.color });
     } catch (err) {
-      // 同上
+      const e = err as BusinessError;
+      LogUtil.write(`镜像账户设色失败(新建) ${accountName}: ${e.message}`);
     }
     return cal;
   }

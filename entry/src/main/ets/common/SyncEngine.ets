@@ -122,7 +122,23 @@ export class SyncEngine {
   private static async syncAccountInner(context: common.Context, acc: DavAccount): Promise<number> {
     const auth: string = DavClient.authHeader(acc.username, acc.password);
     // 0) 刷新服务器端日历本颜色（每次同步都校正）
-    await SyncEngine.refreshCalendarColors(acc, auth);
+    //    ⭐ 有变化就立刻落盘：镜像 listBooks 从磁盘重新 loadAll，
+    //      不落盘的话镜像 setConfig 的永远是旧颜色（系统日历颜色不跟服务器变）。
+    const colorChanged: boolean = await SyncEngine.refreshCalendarColors(acc, auth);
+    if (colorChanged) {
+      try {
+        const all: DavAccount[] = await AccountStore.loadAll(context);
+        const idx: number = all.findIndex((a: DavAccount): boolean => a.id === acc.id);
+        if (idx >= 0) {
+          all[idx] = acc;
+          await AccountStore.saveAll(context, all);
+          LogUtil.write('日历本颜色/权限有变化，已落盘（镜像将使用新颜色）');
+        }
+      } catch (err) {
+        const e = err as BusinessError;
+        LogUtil.write(`颜色/权限落盘失败(不影响同步): ${e.message}`);
+      }
+    }
     // 1) 推送该账号日历本下的本地修改
     await SyncEngine.pushDirtyForAccount(context, acc, auth);
     // 2) 拉取远端变更：REPORT 仅取 etag；新增/变化的资源用 GET 补拉完整 ICS。
@@ -363,8 +379,13 @@ export class SyncEngine {
   /**
    * 刷新服务器端日历本颜色：PROPFIND getcolor → 按集合路径匹配更新 acc.calendarColors
    * 失败静默（颜色不影响数据正确性）
+   * ⭐ 返回**是否有实际变化**（颜色或写权限）——调用方据此落盘。
+   *   （0.0.9 修复：此前变化只留在内存、从不 saveAll ⇒ 镜像 listBooks 从磁盘读到的
+   *    永远是旧颜色 ⇒ setConfig 旧色 ⇒ 系统日历颜色永远不跟服务器变；
+   *    而账号设置页是当场 PROPFIND 的，所以"页面上是新色、系统日历是旧色"。）
    */
-  static async refreshCalendarColors(acc: DavAccount, auth: string): Promise<void> {
+  static async refreshCalendarColors(acc: DavAccount, auth: string): Promise<boolean> {
+    let changed: boolean = false;
     let entries: DavColorEntry[] = [];
     try {
       entries = await DavClient.propfindColors(acc.serverUrl, auth);
@@ -382,9 +403,11 @@ export class SyncEngine {
       if (found !== undefined && found.color !== '') {
         while (acc.calendarColors.length <= i) {
           acc.calendarColors.push('');
+          changed = true; // 长度补齐也视作变化（旧账号可能还没这一位）
         }
         if (acc.calendarColors[i] !== found.color) {
           LogUtil.write(`日历本[${i}] 颜色更新：${acc.calendarColors[i] === '' ? '(空)' : acc.calendarColors[i]} → ${found.color}`);
+          changed = true;
         }
         acc.calendarColors[i] = found.color;
       } else if (found === undefined) {
@@ -396,17 +419,23 @@ export class SyncEngine {
         acc.calendarWritable.push('1');
       }
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
+      let writable: string;
       if (found !== undefined && found.privilegeKnown) {
         // 服务器声明了权限：直接采用
-        acc.calendarWritable[i] = found.writable ? '1' : '0';
+        writable = found.writable ? '1' : '0';
         LogUtil.write(`日历本[${i}]「${calName}」写权限(privilege)：${found.writable ? '可写' : '只读'}`);
       } else {
         // 服务器未声明权限（如部分 Synology 配置）或 PROPFIND 未匹配到该本：真实写探测
         const w: boolean = await DavClient.probeWritable(target, auth);
-        acc.calendarWritable[i] = w ? '1' : '0';
+        writable = w ? '1' : '0';
         LogUtil.write(`日历本[${i}]「${calName}」写权限(探测)：${w ? '可写' : '只读'}`);
       }
+      if (acc.calendarWritable[i] !== writable) {
+        changed = true;
+      }
+      acc.calendarWritable[i] = writable;
     }
+    return changed;
   }
 
   /** Map<key, 行数组> 追加一行（没有该 key 就建数组） */
