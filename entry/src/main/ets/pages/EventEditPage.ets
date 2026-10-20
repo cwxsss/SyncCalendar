@@ -13,6 +13,7 @@ import { ReminderService } from '../common/ReminderService';
 import { LogUtil } from '../common/LogUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
+import { PlaceSuggest, PlaceItem } from '../common/PlaceSuggest';
 
 /** 重复系列某次发生的前后边界（用于 EXDATE / UNTIL / 拆分） */
 class SeriesBounds {
@@ -34,6 +35,22 @@ class BookChoice {
 struct EventEditPage {
   @State title: string = '';
   @State location: string = '';
+  /**
+   * ⭐ 地点补全（鸿蒙 Map Kit / Site Kit）：
+   *   placeItems   —— 输入框下方的候选列表（内联展开，**不新增 bindSheet**：
+   *                   本页只能挂一个弹层，见文件末尾注释）
+   *   placeLoading —— 是否正在请求，用于显示"搜索中"
+   *   placeOpen    —— 候选列表是否展开
+   *   placeHint    —— 地图能力不可用时的提示（不阻塞用户手输地点）
+   */
+  @State placeItems: PlaceItem[] = [];
+  @State placeLoading: boolean = false;
+  @State placeOpen: boolean = false;
+  @State placeHint: string = '';
+  /** 用户是否已从候选里选中（选中后不再自动弹候选，避免"选完又弹出"） */
+  private placePicked: boolean = false;
+  /** 输入防抖定时器 */
+  private placeTimer: number = -1;
   @State description: string = '';
   @State allDay: boolean = false;
   @State startMs: number = 0;
@@ -88,6 +105,11 @@ struct EventEditPage {
 
   aboutToAppear(): Promise<void> {
     return this.initPage();
+  }
+
+  /** 页面销毁：清掉地点补全的防抖定时器，避免回调打到已销毁的组件上 */
+  aboutToDisappear(): void {
+    this.cancelSuggestTimer();
   }
 
   private async initPage(): Promise<void> {
@@ -212,6 +234,106 @@ struct EventEditPage {
     if (choices.length > 0) {
       this.chosenKey = choices[0].calKey;
     }
+  }
+
+  // ==================== 地点补全（鸿蒙 Map Kit / Site Kit） ====================
+
+  /**
+   * 输入防抖：停止输入 350ms 后才真正发请求。
+   * 好处：① 不把服务端配额/网络浪费在"每敲一个字"上；② 避免结果闪烁。
+   * ⚠️ 这里只用「关键词补全」这一种能力（不需要定位权限），
+   *    所以**不需要**申请 LOCATION 权限，符合"权限只在用户主动点该功能时申请"的约束。
+   */
+  private scheduleSuggest(v: string): void {
+    this.cancelSuggestTimer();
+    const q: string = v.trim();
+    if (q.length < 1) {
+      this.placeItems = [];
+      this.placeOpen = false;
+      this.placeHint = '';
+      return;
+    }
+    this.placeTimer = setTimeout(() => {
+      this.placeTimer = -1;
+      this.runSuggest(q, false);
+    }, 350);
+  }
+
+  private cancelSuggestTimer(): void {
+    if (this.placeTimer !== -1) {
+      clearTimeout(this.placeTimer);
+      this.placeTimer = -1;
+    }
+  }
+
+  private async runSuggest(q: string, forceOpen: boolean): Promise<void> {
+    if (this.placePicked && !forceOpen) {
+      return;
+    }
+    if (PlaceSuggest.isUnavailable()) {
+      // 地图服务没开通：给一次明确提示，然后永久静默（不阻塞手输）
+      this.placeHint = '地图服务不可用，可直接手动输入地点';
+      this.placeOpen = false;
+      return;
+    }
+    // 用户输入时若带空格，PlaceSuggest 内部会 trim
+    this.placeLoading = true;
+    this.placeHint = '';
+    try {
+      const c = this.getUIContext().getHostContext();
+      const ctx: common.Context | undefined = c;
+      // 先补全；补全空则内部会自动退到关键字搜索
+      let items: PlaceItem[] = await PlaceSuggest.query(q, ctx);
+      if (items.length === 0 && !PlaceSuggest.isUnavailable()) {
+        items = await PlaceSuggest.search(q, ctx);
+      }
+      // ⭐ 丢弃过期结果：用户又改了输入框，就别再覆盖成旧候选
+      if (q !== this.location.trim()) {
+        return;
+      }
+      this.placeItems = items.slice(0, 8);
+      this.placeOpen = this.placeItems.length > 0;
+      if (this.placeItems.length === 0) {
+        this.placeHint = PlaceSuggest.isUnavailable()
+          ? '地图服务不可用，可直接手动输入地点'
+          : '没有找到匹配地点，可直接手动输入';
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`地点补全异常: ${e.message}`);
+      this.placeHint = '地点搜索失败，可直接手动输入';
+      this.placeOpen = false;
+    } finally {
+      this.placeLoading = false;
+    }
+  }
+
+  /** 选中一条候选：写进地点输入框并收起列表 */
+  private applyPlace(it: PlaceItem): void {
+    // 写入完整地址（formatAddress），这样同步到服务器/其他客户端时地址是完整的
+    this.location = it.locationText;
+    this.placePicked = true;
+    this.placeItems = [];
+    this.placeOpen = false;
+    this.placeHint = '';
+    this.cancelSuggestTimer();
+  }
+
+  /** 打开系统地图选点页（可搜索、可周边、可拖图钉） */
+  private async pickOnMap(): Promise<void> {
+    const c = this.getUIContext().getHostContext();
+    if (c === undefined) {
+      return;
+    }
+    const it: PlaceItem | null = await PlaceSuggest.pickOnMap(c as common.UIAbilityContext);
+    if (it === null) {
+      // 用户取消，或地图服务不可用
+      if (PlaceSuggest.isUnavailable()) {
+        this.placeHint = '地图服务不可用，可直接手动输入地点';
+      }
+      return;
+    }
+    this.applyPlace(it);
   }
 
   private chosenBook(): BookChoice | null {
@@ -1185,18 +1307,96 @@ struct EventEditPage {
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
-          // 地点
-          TextInput({ text: this.location, placeholder: '地点（可选）' })
-            .height(44)
-            .fontSize(14)
-            .backgroundColor($r('app.color.card_bg'))
+          // 地点（输入几个字 → 系统地图服务补全候选）
+          Row({ space: 8 }) {
+            TextInput({ text: this.location, placeholder: '地点（可选，输入几个字可搜索）' })
+              .height(44)
+              .layoutWeight(1)
+              .fontSize(14)
+              .backgroundColor($r('app.color.card_bg'))
+              .borderRadius(12)
+              .fontColor($r('app.color.text_primary'))
+              .placeholderColor($r('app.color.text_hint'))
+              .caretColor($r('app.color.brand'))
+              .onChange((v: string) => {
+                this.location = v;
+                // 用户重新输入时解除"已选中"状态，恢复自动补全
+                this.placePicked = false;
+                this.scheduleSuggest(v);
+              })
+              .onSubmit(() => {
+                // 回车：立刻搜一次（不等防抖）
+                this.cancelSuggestTimer();
+                this.runSuggest(this.location, true);
+              })
+            // 在地图上选点（系统地图界面，可选可搜可周边）
+            Text('地图')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .padding({ left: 12, right: 12 })
+              .height(44)
+              .textAlign(TextAlign.Center)
+              .borderRadius(12)
+              .backgroundColor($r('app.color.card_bg'))
+              .onClick(() => {
+                this.pickOnMap();
+              })
+          }
+          .width('100%')
+
+          // 候选列表（内联展开；本页只能有一个 bindSheet，故不另开弹层）
+          if (this.placeLoading) {
+            Row({ space: 6 }) {
+              LoadingProgress().width(16).height(16).color($r('app.color.text_hint'))
+              Text('搜索中…')
+                .fontSize(12)
+                .fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+            .padding({ left: 14, top: 6, bottom: 2 })
+          } else if (this.placeOpen && this.placeItems.length > 0) {
+            Column() {
+              ForEach(this.placeItems, (it: PlaceItem, idx: number) => {
+                Column({ space: 2 }) {
+                  Text(it.title)
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_primary'))
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .width('100%')
+                    .textAlign(TextAlign.Start)
+                  if (it.subtitle !== '') {
+                    Text(it.subtitle)
+                      .fontSize(12)
+                      .fontColor($r('app.color.text_secondary'))
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                      .textAlign(TextAlign.Start)
+                  }
+                }
+                .alignItems(HorizontalAlign.Start)
+                .width('100%')
+                .padding({ left: 14, right: 14, top: 9, bottom: 9 })
+                .onClick(() => {
+                  this.applyPlace(it);
+                })
+                if (idx < this.placeItems.length - 1) {
+                  Divider().color($r('app.color.shadow_color'))
+                }
+              }, (it: PlaceItem, idx: number) => `${it.siteId}_${idx}`)
+            }
+            .width('100%')
             .borderRadius(12)
-            .fontColor($r('app.color.text_primary'))
-            .placeholderColor($r('app.color.text_hint'))
-            .caretColor($r('app.color.brand'))
-            .onChange((v: string) => {
-              this.location = v;
-            })
+            .backgroundColor($r('app.color.card_bg'))
+            .padding({ top: 4, bottom: 4 })
+          } else if (this.placeHint !== '') {
+            Text(this.placeHint)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+              .padding({ left: 14, top: 6 })
+          }
 
           // 描述
           TextArea({ text: this.description, placeholder: '备注（可选）' })
