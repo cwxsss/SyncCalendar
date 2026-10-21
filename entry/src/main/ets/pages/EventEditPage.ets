@@ -70,7 +70,20 @@ struct EventEditPage {
   @State books: BookChoice[] = [];
   @State chosenKey: string = '';
   @State isSaving: boolean = false;
+  /**
+   * 表单状态行文字。
+   * ⚠️ 它渲染在表单**最底部**（"删除日程"按钮上方），用户在顶部点"保存"时根本看不见。
+   *    所以它只能作为"事后可复查的记录"，**不能**作为唯一的错误反馈手段 ——
+   *    真正的提醒必须走 showFormError()：Toast（必可见）+ 字段标红 + 滚到出错字段。
+   */
   @State statusMsg: string = '';
+  /**
+   * ⭐ 哪个字段校验没过（'' = 没有）。
+   * 用途：把对应输入框描红并显示一条紧贴字段的红字说明，
+   * 让用户一眼看到"哪儿错了"，而不是在一屏之外找一行小字。
+   * 取值：'title' | 'time' | ''
+   */
+  @State errorField: string = '';
   @State isExisting: boolean = false;
   @State repeatMode: string = 'none'; // none|daily|workday|weekly|monthly|yearly|custom
   /**
@@ -678,15 +691,68 @@ struct EventEditPage {
     }
   }
 
+  /**
+   * ⭐ 统一的表单错误提示（**唯一的错误出口**）。
+   *
+   * 为什么需要专门做这件事：
+   *   校验提示原本只写进 `statusMsg`，而它渲染在表单最底部（"删除日程"按钮上方）。
+   *   用户在顶部点"保存"时，那行红字远在屏幕之外 —— 看起来就是"点了没反应"。
+   *
+   * 三件事一起做，保证用户一定看得见、也知道该改哪儿：
+   *   ① **Toast**：系统级浮在屏幕中上部，不受滚动位置影响，必定可见；
+   *   ② **字段标红**：给对应输入框加红框 + 紧贴字段的红字说明；
+   *   ③ **滚回出错字段并聚焦**：把视野直接带到问题所在（标题 → 打光标；时间 → 滚到时间卡片）。
+   *
+   * @param msg   给用户看的话术（要具体，说清"该做什么"，不要只说"错误"）
+   * @param field 'title' | 'time' | ''（'' 表示没有具体字段，只弹 Toast）
+   */
+  private showFormError(msg: string, field: string): void {
+    this.statusMsg = msg;
+    this.errorField = field;
+    // ① Toast：不走布局，无论滚到哪儿都能看到
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: msg,
+        duration: 2500,
+        bottom: '70%'   // 抬到屏幕偏上方，避免被键盘/底部按钮遮挡
+      });
+    } catch (err) {
+      // Toast 失败也不影响其它两种提示
+    }
+    // ③ 滚回出错位置：延时一帧，等状态刷新（标红后高度可能变化）后再滚
+    setTimeout(() => {
+      try {
+        if (field === 'title') {
+          this.formScroller.scrollEdge(Edge.Top);
+          try {
+            this.getUIContext().getFocusController().requestFocus('titleInput');
+          } catch (e2) {
+            // 聚焦失败（例如输入法正在切换）不阻塞流程
+          }
+        } else if (field === 'time') {
+          // 时间卡片在表单上部，滚到顶基本就能看到；再留一点余量
+          this.formScroller.scrollEdge(Edge.Top);
+        } else {
+          this.formScroller.scrollEdge(Edge.Top);
+        }
+      } catch (err2) {
+        const e = err2 as BusinessError;
+        LogUtil.write(`错误提示定位失败: ${e.message}`);
+      }
+    }, 60);
+  }
+
   private validate(): boolean {
     if (this.title.trim() === '') {
-      this.statusMsg = '请输入日程标题';
+      this.showFormError('请先填写日程标题', 'title');
       return false;
     }
     if (this.endMs < this.startMs) {
-      this.statusMsg = '结束时间不能早于开始时间';
+      this.showFormError('结束时间不能早于开始时间', 'time');
       return false;
     }
+    // 通过校验：清掉上一轮的错误标记
+    this.errorField = '';
     return true;
   }
 
@@ -952,9 +1018,10 @@ struct EventEditPage {
     // 日程必须落在某个 CalDAV 日历本上（"本机"不再是可选目标）——没选到就直接拦下
     const book = this.chosenBook();
     if (book === null) {
-      this.statusMsg = this.books.length === 0
+      // 这也是"必填项缺失"，同样要弹 Toast + 滚到对应字段，不能只写底部状态行
+      this.showFormError(this.books.length === 0
         ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
-        : '请选择要同步到的 CalDAV 日历本';
+        : '请选择要同步到的 CalDAV 日历本', 'book');
       LogUtil.write(`保存判定：日历本解析失败（选本=${this.books.length} chosenKey=${this.chosenKey}）`);
       return;
     }
@@ -967,19 +1034,20 @@ struct EventEditPage {
       return;
     }
     // ⭐ 范围确认后回到这里再校验一次：范围弹层打开时并未跳过校验，
-    //    只是把它推迟到"选完范围"之后（失败时弹层已关闭，错误显示在表单状态行）。
+    //    只是把它推迟到"选完范围"之后（失败时弹层已关闭，错误用 showFormError 强提示）。
     if (!this.validate()) {
       return;
     }
     const book = this.chosenBook();
     if (book === null) {
-      this.statusMsg = this.books.length === 0
+      this.showFormError(this.books.length === 0
         ? '还没有可写入的 CalDAV 日历本，请先到「更多 → 账号管理」添加账号'
-        : '请选择要同步到的 CalDAV 日历本';
+        : '请选择要同步到的 CalDAV 日历本', 'book');
       return;
     }
     this.isSaving = true;
     this.statusMsg = '';
+    this.errorField = '';
     try {
       const context = this.getUIContext().getHostContext();
       if (context === undefined) {
@@ -1039,6 +1107,16 @@ struct EventEditPage {
       const ex = err as BusinessError;
       LogUtil.write(`保存日程流程失败（数据已存本地待重试）：${ex.message}`);
       this.statusMsg = `保存失败：${ex.message}（已保存到本地，稍后同步会重试）`;
+      // ⭐ 这里紧接着会 router.back()，底部状态行根本来不及被看到 → 必须用 Toast
+      try {
+        this.getUIContext().getPromptAction().showToast({
+          message: '已保存到本地，同步到服务器失败，稍后会自动重试',
+          duration: 3000,
+          bottom: '70%'
+        });
+      } catch (e2) {
+        // Toast 失败不影响返回
+      }
       // 数据仍在本地且带 dirty 标记，不会丢
       router.back();
     }
@@ -1211,8 +1289,10 @@ struct EventEditPage {
 
       Scroll(this.formScroller) {
         Column({ space: 14 }) {
-          // 标题
-          TextInput({ text: this.title, placeholder: '标题' })
+          // 标题（必填）
+          // ⭐ 校验失败时：输入框描红 + 紧贴下方一条红字说明。
+          //    只在 errorField === 'title' 时出现，用户开始输入即自动清除。
+          TextInput({ text: this.title, placeholder: '标题（必填）' })
             .height(46)
             .fontSize(16)
             .backgroundColor($r('app.color.card_bg'))
@@ -1222,9 +1302,28 @@ struct EventEditPage {
             .fontColor($r('app.color.text_primary'))
             .placeholderColor($r('app.color.text_hint'))
             .caretColor($r('app.color.brand'))
+            // 标红：用边框而不是背景，深色/浅色主题下都醒目且不难看
+            .border({
+              width: this.errorField === 'title' ? 1.5 : 0,
+              color: $r('app.color.error')
+            })
             .onChange((v: string) => {
               this.title = v;
+              // 用户开始填写就把红框撤掉，避免"改了还一直红着"
+              if (v.trim() !== '' && this.errorField === 'title') {
+                this.errorField = '';
+                this.statusMsg = '';
+              }
             })
+            .id('titleInput')
+
+          if (this.errorField === 'title') {
+            Text('请填写标题后再保存')
+              .fontSize(12)
+              .fontColor($r('app.color.error'))
+              .width('100%')
+              .padding({ left: 4 })
+          }
 
           // 全天
           Row() {
@@ -1253,6 +1352,19 @@ struct EventEditPage {
           .padding(6)
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
+          // 时间顺序错误时整卡描红，用户一眼能看到问题在这个卡片里
+          .border({
+            width: this.errorField === 'time' ? 1.5 : 0,
+            color: $r('app.color.error')
+          })
+
+          if (this.errorField === 'time') {
+            Text('结束时间不能早于开始时间')
+              .fontSize(12)
+              .fontColor($r('app.color.error'))
+              .width('100%')
+              .padding({ left: 4 })
+          }
 
           // 重复
           Column({ space: 8 }) {
@@ -1414,6 +1526,11 @@ struct EventEditPage {
                   .backgroundColor(this.chosenKey === b.calKey ? b.color : $r('app.color.chip_off_bg'))
                   .onClick(() => {
                     this.chosenKey = b.calKey;
+                    // 选了日历本就把红框撤掉
+                    if (this.errorField === 'book') {
+                      this.errorField = '';
+                      this.statusMsg = '';
+                    }
                   })
                 }, (b: BookChoice) => b.calKey)
               }
@@ -1424,6 +1541,11 @@ struct EventEditPage {
           .width('100%')
           .padding(14)
           .borderRadius(12)
+          // 日历本未选且用户点了保存 → 描红，提示"必填"
+          .border({
+            width: this.errorField === 'book' ? 1.5 : 0,
+            color: $r('app.color.error')
+          })
           .backgroundColor($r('app.color.card_bg'))
 
           // 地点（输入几个字 → 系统地图服务补全候选）
@@ -1517,7 +1639,10 @@ struct EventEditPage {
               this.description = v;
             })
 
-          if (this.statusMsg !== '') {
+          // 状态行：只用于"保存失败/账号未配置"这类**系统级**信息，且必须有 Toast 同时提示。
+          // ⚠️ 校验类错误不走这里 —— 它们已经在对应字段旁就地显示，
+          //    再在这里重复一遍只会让用户以为有两处不同的问题。
+          if (this.statusMsg !== '' && this.errorField === '') {
             Text(this.statusMsg)
               .fontSize(13)
               .fontColor($r('app.color.error'))
