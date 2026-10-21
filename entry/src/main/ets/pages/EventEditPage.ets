@@ -1,6 +1,6 @@
 // entry/src/main/ets/pages/EventEditPage.ets
 // 日程编辑页：新建 / 修改 / 删除日程（一律属于某个 CalDAV 日历本，不再支持"本机"日程）
-import { curves, router } from '@kit.ArkUI';
+import { curves, router, KeyboardAvoidMode, ComponentUtils, window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
@@ -51,6 +51,20 @@ struct EventEditPage {
   private placePicked: boolean = false;
   /** 输入防抖定时器 */
   private placeTimer: number = -1;
+  /**
+   * ⭐ 表单滚动控制器。
+   * 地点是表单第 7 个字段（标题/全天/时间/重复/提醒/日历本之后），
+   * 键盘弹起后输入框本身已经在屏幕下半部，候选列表更是被键盘压住。
+   * ArkUI 默认 OFFSET 模式只保证"光标可见"，不会为候选列表留空间，
+   * 所以必须在候选展开后**主动滚动**，把「输入框 + 候选列表」整体推进可视区。
+   */
+  private formScroller: Scroller = new Scroller();
+  /** 键盘高度（px），0 = 键盘未弹起。由 window 的 TYPE_KEYBOARD 避让区取得 */
+  private keyboardHeight: number = 0;
+  /** 键盘避让区变化监听器（页面销毁时注销） */
+  private keyboardWatcher: ((opt: window.AvoidAreaOptions) => void) | undefined = undefined;
+  /** 本页所属窗口（异步取得，拿到后才能挂监听） */
+  private hostWindow: window.Window | undefined = undefined;
   @State description: string = '';
   @State allDay: boolean = false;
   @State startMs: number = 0;
@@ -104,12 +118,68 @@ struct EventEditPage {
   private event: LocalEvent | null = null;
 
   aboutToAppear(): Promise<void> {
+    // 键盘避让不阻塞页面加载：拿窗口是异步的，失败也只是少一层滚动校正
+    this.setupKeyboardAvoid();
     return this.initPage();
   }
 
-  /** 页面销毁：清掉地点补全的防抖定时器，避免回调打到已销毁的组件上 */
+  /** 页面销毁：清掉地点补全的防抖定时器，并注销键盘监听 */
   aboutToDisappear(): void {
     this.cancelSuggestTimer();
+    this.releaseKeyboardWatch();
+  }
+
+  /**
+   * ⭐ 键盘避让：改成 RESIZE 模式。
+   * 默认 OFFSET 是「整页上移」，页面上移后表单底部（地点/备注/按钮）会被顶出屏幕，
+   * 且候选列表展开时不会重新计算可见区 → 列表被键盘压住。
+   * RESIZE 是「把页面高度压缩到键盘上沿」，滚动区域随之变矮，
+   * 配合下面的主动滚动，候选列表就能稳定落在可视区内。
+   */
+  private async setupKeyboardAvoid(): Promise<void> {
+    try {
+      this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`设置键盘避让模式失败: ${e.message}`);
+    }
+    // 记录键盘高度：候选列表展开后据此计算需要滚动多少
+    try {
+      const c = this.getUIContext().getHostContext();
+      if (c === undefined) {
+        return;
+      }
+      // ⚠️ UIAbilityContext 上没有 window 属性，必须用 window.getLastWindow 取
+      const win: window.Window = await window.getLastWindow(c);
+      this.hostWindow = win;
+      this.keyboardWatcher = (opt: window.AvoidAreaOptions): void => {
+        if (opt.type !== window.AvoidAreaType.TYPE_KEYBOARD) {
+          return;
+        }
+        this.keyboardHeight = opt.area.visible ? opt.area.bottomRect.height : 0;
+        // 键盘弹起时若候选已展开，重新贴到可视区内
+        if (this.keyboardHeight > 0 && this.placeOpen) {
+          this.ensurePlaceVisible();
+        }
+      };
+      win.on('avoidAreaChange', this.keyboardWatcher);
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`监听键盘高度失败: ${e.message}`);
+    }
+  }
+
+  private releaseKeyboardWatch(): void {
+    if (this.keyboardWatcher === undefined || this.hostWindow === undefined) {
+      return;
+    }
+    try {
+      this.hostWindow.off('avoidAreaChange', this.keyboardWatcher);
+    } catch (err) {
+      // 页面已在销毁，注销失败无所谓
+    }
+    this.keyboardWatcher = undefined;
+    this.hostWindow = undefined;
   }
 
   private async initPage(): Promise<void> {
@@ -291,8 +361,12 @@ struct EventEditPage {
       if (q !== this.location.trim()) {
         return;
       }
-      this.placeItems = items.slice(0, 8);
+      this.placeItems = items.slice(0, 6);
       this.placeOpen = this.placeItems.length > 0;
+      // ⭐ 候选展开后立刻把它推进键盘上方的可视区（否则列表被键盘压住）
+      if (this.placeOpen) {
+        this.ensurePlaceVisible();
+      }
       if (this.placeItems.length === 0) {
         this.placeHint = PlaceSuggest.isUnavailable()
           ? '地图服务不可用，可直接手动输入地点'
@@ -306,6 +380,74 @@ struct EventEditPage {
     } finally {
       this.placeLoading = false;
     }
+  }
+
+  /**
+   * ⭐ 保证「地点输入框 + 候选列表」整块都在键盘上方的可视区内。
+   *
+   * 为什么不直接 scrollEdge(Bottom)：那会把整页滚到底，地点字段反而可能被顶出屏幕顶部。
+   * 这里用**实测坐标**算：候选列表底边距可视区底边还差多少，就滚多少。
+   * 必须等布局完成后测量（候选刚 insert 进 ForEach 时还没布局），故用两帧延时。
+   */
+  private ensurePlaceVisible(): void {
+    // 第一帧：等候选列表插入完成；第二帧：等它完成布局，才能测到真实高度
+    setTimeout(() => {
+      setTimeout(() => {
+        try {
+          const ui = this.getUIContext();
+          // ⚠️ getRectangleById 在 ComponentUtils 上，不在 UIContext 上
+          const cu: ComponentUtils = ui.getComponentUtils();
+          // anchor 是「输入框所在的一整行」（Row），拿它的位置与高度
+          let rowTop: number = 0;
+          let rowH: number = 44;
+          try {
+            const anchor = cu.getRectangleById('placeAnchor');
+            rowTop = anchor.windowOffset.y;
+            rowH = anchor.size.height;
+          } catch (e) {
+            // 组件还没上树（极少数时序），放弃本次校正
+            return;
+          }
+          // 候选列表实测高度优先；测不到时按每行约 54vp 估算
+          let listH: number = 0;
+          try {
+            listH = cu.getRectangleById('placeList').size.height;
+          } catch (e) {
+            listH = 0;
+          }
+          if (listH <= 0) {
+            // 测不到时按每行约 54vp 估算，且不超过 List 的 maxHeight(216)
+            listH = Math.min(this.placeItems.length * 54, 216);
+          }
+
+          // 可视区底边 = 窗口高度 - 键盘高度（两者都是 px，统一用 vp 计算）
+          const vp2px: number = ui.vp2px(1);
+          let winVp: number = 800;
+          if (this.hostWindow !== undefined) {
+            winVp = this.hostWindow.getWindowProperties().windowRect.height / vp2px;
+          }
+          // ⚠️ 兜底：avoidAreaChange 可能还没回调（先弹键盘、后展开候选），
+          //    此时 keyboardHeight 仍是 0。按屏幕 42% 保守估算，
+          //    "多滚一点"只是页面上移、无害；"完全不算"就会被键盘挡住，那才是问题。
+          const kbdVp: number = this.keyboardHeight > 0
+            ? this.keyboardHeight / vp2px
+            : winVp * 0.42;
+          // 底部留白，避免候选紧贴键盘顶边
+          const visibleBottom: number = winVp - kbdVp - 12;
+
+          // 整块底边 = 行顶边 + 行高 + 间距(14) + 列表高
+          const blockBottom: number = rowTop + rowH + 14 + listH;
+          if (blockBottom > visibleBottom) {
+            const delta: number = blockBottom - visibleBottom;
+            this.formScroller.scrollBy(0, delta);
+            LogUtil.write(`地点候选上滚 ${Math.round(delta)}vp（底边 ${Math.round(blockBottom)} > 可视 ${Math.round(visibleBottom)}）`);
+          }
+        } catch (err) {
+          const e = err as BusinessError;
+          LogUtil.write(`地点候选定位失败: ${e.message}`);
+        }
+      }, 60);
+    }, 60);
   }
 
   /** 选中一条候选：写进地点输入框并收起列表 */
@@ -1090,7 +1232,7 @@ struct EventEditPage {
       .width('100%')
       .padding({ left: 16, right: 16 })
 
-      Scroll() {
+      Scroll(this.formScroller) {
         Column({ space: 14 }) {
           // 标题
           TextInput({ text: this.title, placeholder: '标题' })
@@ -1329,6 +1471,7 @@ struct EventEditPage {
                 this.cancelSuggestTimer();
                 this.runSuggest(this.location, true);
               })
+              .id('placeAnchor')
             // 在地图上选点（系统地图界面，可选可搜可周边）
             Text('地图')
               .fontSize(13)
@@ -1355,41 +1498,46 @@ struct EventEditPage {
             .width('100%')
             .padding({ left: 14, top: 6, bottom: 2 })
           } else if (this.placeOpen && this.placeItems.length > 0) {
-            Column() {
+            // ⭐ 用 List 而不是 Column：候选可能 6 条，全展开会占掉大半个屏幕。
+            //    限高 216vp（约 4 条）后内部可滚，既看得全又不会把表单挤没。
+            List() {
               ForEach(this.placeItems, (it: PlaceItem, idx: number) => {
-                Column({ space: 2 }) {
-                  Text(it.title)
-                    .fontSize(14)
-                    .fontColor($r('app.color.text_primary'))
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .width('100%')
-                    .textAlign(TextAlign.Start)
-                  if (it.subtitle !== '') {
-                    Text(it.subtitle)
-                      .fontSize(12)
-                      .fontColor($r('app.color.text_secondary'))
+                ListItem() {
+                  Column({ space: 2 }) {
+                    Text(it.title)
+                      .fontSize(14)
+                      .fontColor($r('app.color.text_primary'))
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                       .width('100%')
                       .textAlign(TextAlign.Start)
+                    if (it.subtitle !== '') {
+                      Text(it.subtitle)
+                        .fontSize(12)
+                        .fontColor($r('app.color.text_secondary'))
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .width('100%')
+                        .textAlign(TextAlign.Start)
+                    }
                   }
+                  .alignItems(HorizontalAlign.Start)
+                  .width('100%')
+                  .padding({ left: 14, right: 14, top: 9, bottom: 9 })
                 }
-                .alignItems(HorizontalAlign.Start)
-                .width('100%')
-                .padding({ left: 14, right: 14, top: 9, bottom: 9 })
                 .onClick(() => {
                   this.applyPlace(it);
                 })
-                if (idx < this.placeItems.length - 1) {
-                  Divider().color($r('app.color.shadow_color'))
-                }
               }, (it: PlaceItem, idx: number) => `${it.siteId}_${idx}`)
             }
             .width('100%')
+            .constraintSize({ maxHeight: 216 })
             .borderRadius(12)
             .backgroundColor($r('app.color.card_bg'))
             .padding({ top: 4, bottom: 4 })
+            .scrollBar(BarState.Auto)
+            .divider({ strokeWidth: 0.5, color: $r('app.color.shadow_color') })
+            .id('placeList')
           } else if (this.placeHint !== '') {
             Text(this.placeHint)
               .fontSize(12)
