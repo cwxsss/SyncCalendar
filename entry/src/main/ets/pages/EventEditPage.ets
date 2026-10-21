@@ -49,6 +49,12 @@ struct EventEditPage {
   @State placeHint: string = '';
   /** 用户是否已从候选里选中（选中后不再自动弹候选，避免"选完又弹出"） */
   private placePicked: boolean = false;
+  /**
+   * 地点输入框当前是否聚焦。
+   * 用途：候选条数变化会改变输入框上方的内容高度 → 输入框在屏幕上会挪位。
+   * 只要还在聚焦状态（用户正在打字），就每次重新钉一次，保证它始终贴住键盘上沿。
+   */
+  private placeFocused: boolean = false;
   /** 输入防抖定时器 */
   private placeTimer: number = -1;
   /**
@@ -56,7 +62,7 @@ struct EventEditPage {
    * 地点是表单第 7 个字段（标题/全天/时间/重复/提醒/日历本之后），
    * 键盘弹起后输入框本身已经在屏幕下半部，候选列表更是被键盘压住。
    * ArkUI 默认 OFFSET 模式只保证"光标可见"，不会为候选列表留空间，
-   * 所以必须在候选展开后**主动滚动**，把「输入框 + 候选列表」整体推进可视区。
+   * 所以聚焦后要**主动滚动**，把输入框钉到可视区底边（= 键盘上沿）。
    */
   private formScroller: Scroller = new Scroller();
   /** 键盘高度（px），0 = 键盘未弹起。由 window 的 TYPE_KEYBOARD 避让区取得 */
@@ -134,7 +140,7 @@ struct EventEditPage {
    * 默认 OFFSET 是「整页上移」，页面上移后表单底部（地点/备注/按钮）会被顶出屏幕，
    * 且候选列表展开时不会重新计算可见区 → 列表被键盘压住。
    * RESIZE 是「把页面高度压缩到键盘上沿」，滚动区域随之变矮，
-   * 配合下面的主动滚动，候选列表就能稳定落在可视区内。
+   * 此时 Scroll 的矩形底边就是真正的键盘上沿，据此把输入框钉住即可。
    */
   private async setupKeyboardAvoid(): Promise<void> {
     try {
@@ -143,7 +149,7 @@ struct EventEditPage {
       const e = err as BusinessError;
       LogUtil.write(`设置键盘避让模式失败: ${e.message}`);
     }
-    // 记录键盘高度：候选列表展开后据此计算需要滚动多少
+    // 记录键盘高度：Scroll 矩形取不到时用它兜底算可视底边
     try {
       const c = this.getUIContext().getHostContext();
       if (c === undefined) {
@@ -157,8 +163,8 @@ struct EventEditPage {
           return;
         }
         this.keyboardHeight = opt.area.visible ? opt.area.bottomRect.height : 0;
-        // 键盘弹起时若候选已展开，重新贴到可视区内
-        if (this.keyboardHeight > 0 && this.placeOpen) {
+        // 键盘弹起/收起后重新对齐一次（收起时不滚，保持用户当前浏览位置）
+        if (this.keyboardHeight > 0) {
           this.ensurePlaceVisible();
         }
       };
@@ -320,7 +326,12 @@ struct EventEditPage {
     if (q.length < 1) {
       this.placeItems = [];
       this.placeOpen = false;
+      this.placeLoading = false;
       this.placeHint = '';
+      // 候选清空后上方内容变矮，输入框会往下掉 —— 重新钉一次
+      if (this.placeFocused) {
+        this.ensurePlaceVisible();
+      }
       return;
     }
     this.placeTimer = setTimeout(() => {
@@ -347,8 +358,14 @@ struct EventEditPage {
       return;
     }
     // 用户输入时若带空格，PlaceSuggest 内部会 trim
+    // ⭐ 先把旧候选收起再显示"搜索中"：候选区高度变化会让输入框上下跳，
+    //    收起后由 ensurePlaceVisible() 统一重新钉住。
+    this.placeOpen = false;
     this.placeLoading = true;
     this.placeHint = '';
+    if (this.placeFocused) {
+      this.ensurePlaceVisible();
+    }
     try {
       const c = this.getUIContext().getHostContext();
       const ctx: common.Context | undefined = c;
@@ -363,8 +380,8 @@ struct EventEditPage {
       }
       this.placeItems = items.slice(0, 6);
       this.placeOpen = this.placeItems.length > 0;
-      // ⭐ 候选展开后立刻把它推进键盘上方的可视区（否则列表被键盘压住）
-      if (this.placeOpen) {
+      // ⭐ 候选条数变化改变了输入框上方的高度 → 重新钉住输入框
+      if (this.placeFocused || this.placeOpen) {
         this.ensurePlaceVisible();
       }
       if (this.placeItems.length === 0) {
@@ -383,68 +400,59 @@ struct EventEditPage {
   }
 
   /**
-   * ⭐ 保证「地点输入框 + 候选列表」整块都在键盘上方的可视区内。
+   * ⭐ 把「地点输入框」钉在键盘正上方：滚到「输入框底边 = 可视区底边 − 10vp」，
+   * 候选列表在它**上方**向上生长，所以输入框不会被候选顶走，用户可以边看边继续打字。
    *
-   * 为什么不直接 scrollEdge(Bottom)：那会把整页滚到底，地点字段反而可能被顶出屏幕顶部。
-   * 这里用**实测坐标**算：候选列表底边距可视区底边还差多少，就滚多少。
-   * 必须等布局完成后测量（候选刚 insert 进 ForEach 时还没布局），故用两帧延时。
+   * 两个曾经踩过的坑，这里都规避掉：
+   *   ① **不要重复扣键盘高度**。本页已设 KeyboardAvoidMode.RESIZE —— 窗口本身
+   *      已经压缩到键盘上沿之外，`Scroll` 的矩形底边就是真正可视底边。
+   *      再减一次 keyboardHeight 会滚过头（输入框被推飞出屏幕）。
+   *   ② **单位必须换算**。`getRectangleById()` 返回 **px**，而 `Scroller.scrollBy()`
+   *      收 **vp**。直接把 px 当 vp 传，在高密度屏上等于多滚了 3 倍 ——
+   *      这就是上一版"输入框突然跑到上面去、看不见了"的真正原因。
    */
   private ensurePlaceVisible(): void {
-    // 第一帧：等候选列表插入完成；第二帧：等它完成布局，才能测到真实高度
+    // 双延时：等键盘收缩动画 + 候选列表重新布局都稳定后再量尺寸
     setTimeout(() => {
       setTimeout(() => {
         try {
           const ui = this.getUIContext();
           // ⚠️ getRectangleById 在 ComponentUtils 上，不在 UIContext 上
           const cu: ComponentUtils = ui.getComponentUtils();
-          // anchor 是「输入框所在的一整行」（Row），拿它的位置与高度
-          let rowTop: number = 0;
-          let rowH: number = 44;
+          const vp2px: number = ui.vp2px(1);
+          let rowBottomPx: number = 0;
+          let visibleBottomPx: number = 0;
           try {
-            const anchor = cu.getRectangleById('placeAnchor');
-            rowTop = anchor.windowOffset.y;
-            rowH = anchor.size.height;
+            const row = cu.getRectangleById('placeRow');
+            rowBottomPx = row.windowOffset.y + row.size.height;
           } catch (e) {
-            // 组件还没上树（极少数时序），放弃本次校正
+            return; // 组件还没上树，放弃本次校正
+          }
+          // 首选：Scroll 的真实矩形（RESIZE 模式下它已经被裁到键盘上沿）
+          try {
+            const sc = cu.getRectangleById('formScroll');
+            visibleBottomPx = sc.windowOffset.y + sc.size.height;
+          } catch (e2) {
+            visibleBottomPx = 0;
+          }
+          // 兜底：拿不到 Scroll 矩形时用「窗口高 − 键盘高」
+          if (visibleBottomPx <= 0 && this.keyboardHeight > 0 && this.hostWindow !== undefined) {
+            visibleBottomPx = this.hostWindow.getWindowProperties().windowRect.height - this.keyboardHeight;
+          }
+          if (visibleBottomPx <= 0) {
             return;
           }
-          // 候选列表实测高度优先；测不到时按每行约 54vp 估算
-          let listH: number = 0;
-          try {
-            listH = cu.getRectangleById('placeList').size.height;
-          } catch (e) {
-            listH = 0;
-          }
-          if (listH <= 0) {
-            // 测不到时按每行约 54vp 估算，且不超过 List 的 maxHeight(216)
-            listH = Math.min(this.placeItems.length * 54, 216);
-          }
-
-          // 可视区底边 = 窗口高度 - 键盘高度（两者都是 px，统一用 vp 计算）
-          const vp2px: number = ui.vp2px(1);
-          let winVp: number = 800;
-          if (this.hostWindow !== undefined) {
-            winVp = this.hostWindow.getWindowProperties().windowRect.height / vp2px;
-          }
-          // ⚠️ 兜底：avoidAreaChange 可能还没回调（先弹键盘、后展开候选），
-          //    此时 keyboardHeight 仍是 0。按屏幕 42% 保守估算，
-          //    "多滚一点"只是页面上移、无害；"完全不算"就会被键盘挡住，那才是问题。
-          const kbdVp: number = this.keyboardHeight > 0
-            ? this.keyboardHeight / vp2px
-            : winVp * 0.42;
-          // 底部留白，避免候选紧贴键盘顶边
-          const visibleBottom: number = winVp - kbdVp - 12;
-
-          // 整块底边 = 行顶边 + 行高 + 间距(14) + 列表高
-          const blockBottom: number = rowTop + rowH + 14 + listH;
-          if (blockBottom > visibleBottom) {
-            const delta: number = blockBottom - visibleBottom;
-            this.formScroller.scrollBy(0, delta);
-            LogUtil.write(`地点候选上滚 ${Math.round(delta)}vp（底边 ${Math.round(blockBottom)} > 可视 ${Math.round(visibleBottom)}）`);
+          const gapPx: number = vp2px * 10;
+          const deltaPx: number = rowBottomPx - (visibleBottomPx - gapPx);
+          // ±6vp 内视为已对齐，避免每次按键都抖一下
+          if (Math.abs(deltaPx) > vp2px * 6) {
+            // ⚠️ px → vp 换算，见上面坑②
+            this.formScroller.scrollBy(0, deltaPx / vp2px);
+            LogUtil.write(`地点对齐：滚 ${Math.round(deltaPx / vp2px)}vp（行底 ${Math.round(rowBottomPx / vp2px)}vp / 可视底 ${Math.round(visibleBottomPx / vp2px)}vp）`);
           }
         } catch (err) {
           const e = err as BusinessError;
-          LogUtil.write(`地点候选定位失败: ${e.message}`);
+          LogUtil.write(`地点对齐失败: ${e.message}`);
         }
       }, 60);
     }, 60);
@@ -1449,45 +1457,8 @@ struct EventEditPage {
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
-          // 地点（输入几个字 → 系统地图服务补全候选）
-          Row({ space: 8 }) {
-            TextInput({ text: this.location, placeholder: '地点（可选，输入几个字可搜索）' })
-              .height(44)
-              .layoutWeight(1)
-              .fontSize(14)
-              .backgroundColor($r('app.color.card_bg'))
-              .borderRadius(12)
-              .fontColor($r('app.color.text_primary'))
-              .placeholderColor($r('app.color.text_hint'))
-              .caretColor($r('app.color.brand'))
-              .onChange((v: string) => {
-                this.location = v;
-                // 用户重新输入时解除"已选中"状态，恢复自动补全
-                this.placePicked = false;
-                this.scheduleSuggest(v);
-              })
-              .onSubmit(() => {
-                // 回车：立刻搜一次（不等防抖）
-                this.cancelSuggestTimer();
-                this.runSuggest(this.location, true);
-              })
-              .id('placeAnchor')
-            // 在地图上选点（系统地图界面，可选可搜可周边）
-            Text('地图')
-              .fontSize(13)
-              .fontColor($r('app.color.brand_text'))
-              .padding({ left: 12, right: 12 })
-              .height(44)
-              .textAlign(TextAlign.Center)
-              .borderRadius(12)
-              .backgroundColor($r('app.color.card_bg'))
-              .onClick(() => {
-                this.pickOnMap();
-              })
-          }
-          .width('100%')
-
-          // 候选列表（内联展开；本页只能有一个 bindSheet，故不另开弹层）
+          // ⭐ 候选列表放在输入框**上方**：这样候选展开时只需把"输入框"贴到键盘上沿，
+          //    候选自然向上占据剩余空间，输入框不会被顶走，用户能一边看候选一边继续打字。
           if (this.placeLoading) {
             Row({ space: 6 }) {
               LoadingProgress().width(16).height(16).color($r('app.color.text_hint'))
@@ -1496,10 +1467,10 @@ struct EventEditPage {
                 .fontColor($r('app.color.text_hint'))
             }
             .width('100%')
-            .padding({ left: 14, top: 6, bottom: 2 })
+            .padding({ left: 14, top: 2, bottom: 6 })
           } else if (this.placeOpen && this.placeItems.length > 0) {
             // ⭐ 用 List 而不是 Column：候选可能 6 条，全展开会占掉大半个屏幕。
-            //    限高 216vp（约 4 条）后内部可滚，既看得全又不会把表单挤没。
+            //    限高 216vp（约 4 条）后内部可滚，既看得全又不会把输入框挤出屏幕。
             List() {
               ForEach(this.placeItems, (it: PlaceItem, idx: number) => {
                 ListItem() {
@@ -1537,14 +1508,68 @@ struct EventEditPage {
             .padding({ top: 4, bottom: 4 })
             .scrollBar(BarState.Auto)
             .divider({ strokeWidth: 0.5, color: $r('app.color.shadow_color') })
+            .margin({ bottom: 8 })
             .id('placeList')
           } else if (this.placeHint !== '') {
             Text(this.placeHint)
               .fontSize(12)
               .fontColor($r('app.color.text_hint'))
               .width('100%')
-              .padding({ left: 14, top: 6 })
+              .padding({ left: 14, bottom: 6 })
           }
+
+          // 地点（输入几个字 → 系统地图服务补全候选）
+          Row({ space: 8 }) {
+            TextInput({ text: this.location, placeholder: '地点（可选，输入几个字可搜索）' })
+              .height(44)
+              .layoutWeight(1)
+              .fontSize(14)
+              .backgroundColor($r('app.color.card_bg'))
+              .borderRadius(12)
+              .fontColor($r('app.color.text_primary'))
+              .placeholderColor($r('app.color.text_hint'))
+              .caretColor($r('app.color.brand'))
+              .onChange((v: string) => {
+                this.location = v;
+                // 用户重新输入时解除"已选中"状态，恢复自动补全
+                this.placePicked = false;
+                this.scheduleSuggest(v);
+              })
+              .onSubmit(() => {
+                // 回车：立刻搜一次（不等防抖）
+                this.cancelSuggestTimer();
+                this.runSuggest(this.location, true);
+              })
+              // ⭐ 一聚焦就把输入框钉到键盘上方：键盘弹起是异步的，延时对齐两次
+              //    （320ms 时键盘基本已展开；ensurePlaceVisible 内部还会再等 120ms 稳定布局）
+              .onFocus(() => {
+                this.placeFocused = true;
+                setTimeout(() => {
+                  this.ensurePlaceVisible();
+                }, 320);
+              })
+              .onBlur(() => {
+                // 失焦（点"地图"按钮、点别处、收起键盘）→ 收起候选，避免列表残留在屏幕上
+                this.placeFocused = false;
+                this.placeOpen = false;
+                this.placeLoading = false;
+              })
+              .id('placeAnchor')
+            // 在地图上选点（系统地图界面，可选可搜可周边）
+            Text('地图')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .padding({ left: 12, right: 12 })
+              .height(44)
+              .textAlign(TextAlign.Center)
+              .borderRadius(12)
+              .backgroundColor($r('app.color.card_bg'))
+              .onClick(() => {
+                this.pickOnMap();
+              })
+          }
+          .width('100%')
+          .id('placeRow')
 
           // 描述
           TextArea({ text: this.description, placeholder: '备注（可选）' })
@@ -1589,6 +1614,7 @@ struct EventEditPage {
       .layoutWeight(1)
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
+      .id('formScroll')
       .align(Alignment.Top)
     }
     .width('100%')
