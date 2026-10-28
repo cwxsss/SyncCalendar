@@ -45,8 +45,13 @@ export class AppSettings {
 
   // 在线文档网址（自托管，AGC 上架的"隐私政策网址"填 PRIVACY_URL）。
   // ⚠️ 隐私政策与用户协议必须与安装包实际申请的 user_grant 权限保持一致：
-  //    应用仅申请 READ_CALENDAR / READ_WHOLE_CALENDAR / LOCATION / APPROXIMATELY_LOCATION（均前台），
-  //    文档中不得出现"在后台获取位置"（LOCATION_IN_BACKGROUND）与"添加/修改/删除日历活动"（WRITE_CALENDAR）。
+  //    应用仅申请 READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（均前台）。
+  //    文档中不得出现"在后台获取位置"（LOCATION_IN_BACKGROUND）。
+  // ⚠️ 0.1.0 起已**移除 LOCATION / APPROXIMATELY_LOCATION**：实测本 SDK（API 26）的
+  //     `geoLocationManager.getAddressesFromLocationName`（地址→坐标）无 @permission 标注，
+  //     地理编码不需要定位权限；且应用从不调用 getCurrentLocation，本就不读实时位置。
+  //     ⇒ 隐私政策/隐私标签里都**不得**再声称"读取设备精确位置或大致位置"。
+  //     ⇒ 若将来真要用实时定位，必须同时改 module.json5、本注释、upa.html 与 AGC 隐私标签。
   // 四份文档均在设置页通过内置浏览器（DocViewer）打开，内容在线更新、无需重新发版。
   /** 隐私政策网址 */
   static readonly PRIVACY_URL: string = 'https://synccalendar.yangyq.net/upa.html';

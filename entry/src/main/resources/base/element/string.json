@@ -25,14 +25,6 @@
       "value": "读取所有日历账户的日程，用于在日历中统一展示"
     },
     {
-      "name": "perm_location",
-      "value": "将日程中的地址转换为坐标，用于发起高德地图导航"
-    },
-    {
-      "name": "perm_location_approx",
-      "value": "将日程中的地址转换为坐标，用于发起高德地图导航"
-    },
-    {
       "name": "card_ability_desc",
       "value": "同步日历服务卡片"
     },

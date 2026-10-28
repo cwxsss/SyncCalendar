@@ -2,7 +2,7 @@
 // 同步日历主界面：月视图（左右滑动翻月）/ 周视图 / 日视图 / 日程列表
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
 import { curves, display, router, window } from '@kit.ArkUI';
-import { common, abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
@@ -756,11 +756,10 @@ struct Index {
     }
     const ctx = context as common.UIAbilityContext;
     const enc: string = encodeURIComponent(address);
-    // 高德鸿蒙深链 dlat/dlon 为必填（dname 仅作名称显示），先地理编码拿坐标
-    let coords: number[] | null = null;
-    if (await this.ensureLocationPermission()) {
-      coords = await this.geocodeAddress(address);
-    }
+    // 高德鸿蒙深链 dlat/dlon 为必填（dname 仅作名称显示），先地理编码拿坐标。
+    // 地理编码（getAddressesFromLocationName）在本 SDK 上不要求定位权限，
+    // 因此这里既不申请、也不使用定位权限 —— 应用自始至终不读取设备实时位置。
+    const coords: number[] | null = await this.geocodeAddress(address);
     const base: string = 'amapuri://route/plan/?sourceApplication=SyncCalendar';
     let link: string;
     if (coords !== null) {
@@ -782,33 +781,7 @@ struct Index {
     this.getUIContext().getPromptAction().showToast({ message: '未安装高德地图或无法打开' });
   }
 
-  /** 确认定位权限（地理编码依赖），未授权时向用户申请一次 */
-  private async ensureLocationPermission(): Promise<boolean> {
-    try {
-      const atManager = abilityAccessCtrl.createAtManager();
-      const bundleInfo = bundleManager.getBundleInfoForSelfSync(
-        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
-      const tokenId = bundleInfo.appInfo.accessTokenId;
-      const status = await atManager.checkAccessToken(tokenId, 'ohos.permission.LOCATION');
-      if (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
-        return true;
-      }
-    } catch (err) {
-      // 未授权会走申请流程
-    }
-    try {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const atManager = abilityAccessCtrl.createAtManager();
-      // LOCATION 与 APPROXIMATELY_LOCATION 必须一起申请
-      const result = await atManager.requestPermissionsFromUser(context,
-        ['ohos.permission.LOCATION', 'ohos.permission.APPROXIMATELY_LOCATION']);
-      return result.authResults.every((r: number): boolean => r === 0);
-    } catch (err) {
-      return false;
-    }
-  }
-
-  /** 正向地理编码：地址 → 坐标（系统服务，无需高德 key） */
+  /** 正向地理编码：地址 → 坐标（系统服务，无需高德 key、无需定位权限） */
   private async geocodeAddress(address: string): Promise<number[] | null> {
     try {
       if (!geoLocationManager.isGeocoderAvailable()) {
