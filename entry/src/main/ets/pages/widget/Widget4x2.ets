@@ -13,6 +13,7 @@ class CardItem2x4 {
   color: string = '#007DFF';
   isNow: boolean = false;
   dateTag: string = ''; // '今天' | '明天' | '后天' | '10/31'
+  startMs: number = 0;
 }
 
 @Entry(storage2x4)
@@ -126,6 +127,13 @@ struct Widget4x2Card {
     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .borderRadius(8)
     .backgroundColor('#F5F7FA')
+    .onClick(() => {
+      postCardAction(this, {
+        action: 'router',
+        abilityName: 'EntryAbility',
+        params: { openDate: `${item.startMs > 0 ? item.startMs : this.selectedDate}` }
+      });
+    })
   }
 
   /** 右侧空态：日程为空或已结束 */

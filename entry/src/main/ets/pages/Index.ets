@@ -68,6 +68,8 @@ struct Index {
   private winSizeCallback: ((size: window.Size) => void) | null = null;
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
+  private eventsByDay: Map<number, DisplayEvent[]> = new Map<number, DisplayEvent[]>();
+  private isLoadingAll: boolean = false;
   private swiperController: SwiperController = new SwiperController();
   private expandedSwiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
@@ -118,6 +120,9 @@ struct Index {
       AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
       // 合法性校验（防 int32 溢出等脏值把日历定位到 1970）
       if (openFromCard >= 946684800000 && openFromCard <= 4102444800000) {
+        const cd = new Date(openFromCard);
+        this.displayYear = cd.getFullYear();
+        this.displayMonth = cd.getMonth();
         this.selectedDate = this.startOfDay(openFromCard);
         LogUtil.write(`从卡片进入：定位到显示日 ${this.selectedDate}`);
       }
@@ -237,9 +242,36 @@ struct Index {
       AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
       // 合法性校验（防 int32 溢出等脏值）
       if (d >= 946684800000 && d <= 4102444800000) {
-        this.selectedDate = this.startOfDay(d);
+        this.jumpToDate(d);
         LogUtil.write(`卡片切入（运行中）：定位到显示日 ${this.selectedDate}`);
       }
+    }
+  }
+
+  /**
+   * 定位到指定日期时间（毫秒时间戳）：
+   * 同步更新 selectedDate，并检查是否需要切换 displayYear / displayMonth；
+   * 若月份改变，则重新加载事件并重建日历三页，同时将 Swiper 索引归正到 1。
+   */
+  private jumpToDate(ms: number): void {
+    if (ms < 946684800000 || ms > 4102444800000) {
+      return;
+    }
+    const d = new Date(ms);
+    const targetDay = this.startOfDay(ms);
+    const targetY = d.getFullYear();
+    const targetM = d.getMonth();
+    this.selectedDate = targetDay;
+    if (targetY !== this.displayYear || targetM !== this.displayMonth) {
+      this.displayYear = targetY;
+      this.displayMonth = targetM;
+      this.rebuildPages();
+      this.reloadEvents();
+      this.swiperGuard = true;
+      this.swiperController.changeIndex(1, false);
+      this.expandedSwiperController.changeIndex(1, false);
+    } else {
+      this.rebuildDayTimeline();
     }
   }
 
@@ -387,16 +419,24 @@ struct Index {
 
   // ---------- 数据 ----------
   private async reloadAll(): Promise<void> {
-    const context = this.getUIContext().getHostContext();
-    if (context === undefined) {
+    if (this.isLoadingAll) {
       return;
     }
-    this.accounts = await AccountStore.loadAll(context);
-    this.sources = await CalendarDataService.loadSources(context);
-    // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
-    this.displayStyle = await AppSettings.getDisplayStyle(context);
-    await this.reloadEvents();
-    this.startAutoSync();
+    this.isLoadingAll = true;
+    try {
+      const context = this.getUIContext().getHostContext();
+      if (context === undefined) {
+        return;
+      }
+      this.accounts = await AccountStore.loadAll(context);
+      this.sources = await CalendarDataService.loadSources(context);
+      // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
+      this.displayStyle = await AppSettings.getDisplayStyle(context);
+      await this.reloadEvents();
+      this.startAutoSync();
+    } finally {
+      this.isLoadingAll = false;
+    }
   }
 
   /** 自动同步：每 15 秒检查一次，到达设置的间隔（AppStorage.syncIntervalMinutes）才真正同步 */
@@ -436,11 +476,18 @@ struct Index {
     }
     this.loading = true;
     this.agendaStale = true; // 数据可能变化，列表视图需要重新加载
-    const monthStart: number = new Date(this.displayYear, this.displayMonth, 1).getTime();
-    // 覆盖：上月尾 7 天 + 本月 + 下月，并确保选中日始终在区间内（跨月点选不漏数据）
-    const rangeStart: number = Math.min(monthStart - 7 * 86400000, this.selectedDate - 7 * 86400000);
-    const rangeEnd: number = Math.max(monthStart + 62 * 86400000, this.selectedDate + 8 * 86400000);
+
+    // 计算覆盖 [上月前14天, 下月后14天] 的完整时间区间，确保三页 Swiper 的所有 42 格数据完整
+    const prevMonth = this.addMonths(this.displayYear, this.displayMonth, -1);
+    const prevStart: number = new Date(prevMonth[0], prevMonth[1], 1).getTime();
+    const nextMonth = this.addMonths(this.displayYear, this.displayMonth, 1);
+    const nextEnd: number = new Date(nextMonth[0], nextMonth[1] + 1, 0, 23, 59, 59).getTime();
+
+    const rangeStart: number = Math.min(prevStart - 14 * 86400000, this.selectedDate - 14 * 86400000);
+    const rangeEnd: number = Math.max(nextEnd + 14 * 86400000, this.selectedDate + 14 * 86400000);
+
     this.events = await CalendarDataService.loadEvents(context, rangeStart, rangeEnd, this.sources);
+    this.buildEventsByDay();
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
     this.rebuildPages();
@@ -449,6 +496,24 @@ struct Index {
       await this.ensureAgendaData();
     }
     this.loading = false;
+  }
+
+  /** 将事件按天构建哈希索引，供 buildMonthCells $O(1)$ 快速提取 */
+  private buildEventsByDay(): void {
+    const map = new Map<number, DisplayEvent[]>();
+    for (const e of this.events) {
+      const startDay = this.startOfDay(e.startTime);
+      const endDay = this.startOfDay(e.endTime);
+      for (let t = startDay; t <= endDay; t += 86400000) {
+        const arr = map.get(t);
+        if (arr === undefined) {
+          map.set(t, [e]);
+        } else {
+          arr.push(e);
+        }
+      }
+    }
+    this.eventsByDay = map;
   }
 
   /** 构建某年某月的 42 格 */
@@ -518,8 +583,7 @@ struct Index {
   }
 
   private eventsOfDate(dateMs: number): DisplayEvent[] {
-    return this.events.filter((e: DisplayEvent): boolean =>
-      this.startOfDay(e.startTime) <= dateMs && e.endTime >= dateMs);
+    return this.eventsByDay.get(dateMs) ?? [];
   }
 
   /** 红线日程唯一 key（与时间轴色块 key 保持一致） */
@@ -559,10 +623,27 @@ struct Index {
     const nm = this.addMonths(this.displayYear, this.displayMonth, delta);
     this.displayYear = nm[0];
     this.displayMonth = nm[1];
-    this.reloadEvents();
+
+    // 翻月联动更新选中日：如果当前真实今天在目标月内则选中今天，否则保持选中相同日号（防超出月天数）
+    const now = new Date();
+    if (now.getFullYear() === nm[0] && now.getMonth() === nm[1]) {
+      this.selectedDate = this.startOfDay(now.getTime());
+    } else {
+      const oldD = new Date(this.selectedDate);
+      const targetDay = oldD.getDate();
+      const maxDays = new Date(nm[0], nm[1] + 1, 0).getDate();
+      const clampedDay = Math.min(targetDay, maxDays);
+      this.selectedDate = new Date(nm[0], nm[1], clampedDay).getTime();
+    }
+
+    // 先用现有内存数据同步构建新三页（此时新的 monthPages[1] 与刚刚滑到的目标页视觉完全一致）
+    this.rebuildPages();
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
     this.expandedSwiperController.changeIndex(1, false);
+
+    // 异步拉取新边缘月份数据以刷新缓存
+    this.reloadEvents();
   }
 
   // ---------- 同步 ----------
@@ -1638,7 +1719,7 @@ struct Index {
         .onClick(() => {
           this.selectedDate = cell.dateMs;
         })
-      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -1768,13 +1849,13 @@ struct Index {
 
       // 全月日历大网格 Swiper
       Swiper(this.expandedSwiperController) {
-        ForEach(this.monthPages, (cells: MonthCell[]) => {
+        ForEach(this.monthPages, (cells: MonthCell[], pIdx: number) => {
           Column() {
             ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
               Row() {
                 ForEach(week, (cell: MonthCell) => {
                   this.dayCellExpanded(cell)
-                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.events.length}`)
+                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
               }
               .width('100%')
               .layoutWeight(1)
@@ -1782,14 +1863,14 @@ struct Index {
           }
           .width('100%')
           .height('100%')
-        }, (cells: MonthCell[]) => String(cells[0].dateMs))
+        }, (cells: MonthCell[], pIdx: number) => `ep_${pIdx}_${cells[0]?.dateMs ?? 0}`)
       }
       .index(1)
       .loop(false)
       .indicator(false)
       .width('100%')
       .layoutWeight(1)
-      .onChange((index: number) => {
+      .onAnimationEnd((index: number) => {
         this.handleSwiperChange(index);
       })
 
@@ -1821,13 +1902,13 @@ struct Index {
   @Builder
   monthSwiper() {
     Swiper(this.swiperController) {
-      ForEach(this.monthPages, (cells: MonthCell[]) => {
+      ForEach(this.monthPages, (cells: MonthCell[], pIdx: number) => {
         Column({ space: 2 }) {
           ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
             Row({ space: 2 }) {
               ForEach(week, (cell: MonthCell) => {
                 this.dayCell(cell)
-              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
             }
             .width('100%')
             .layoutWeight(this.wideLayout ? 1 : 0)
@@ -1836,14 +1917,14 @@ struct Index {
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
         // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
-      }, (cells: MonthCell[]) => String(cells[0].dateMs))
+      }, (cells: MonthCell[], pIdx: number) => `p_${pIdx}_${cells[0]?.dateMs ?? 0}`)
     }
     .index(1)
     .loop(false)
     .indicator(false)
     .width('100%')
     .layoutWeight(this.wideLayout ? 1 : 0)
-    .onChange((index: number) => {
+    .onAnimationEnd((index: number) => {
       this.handleSwiperChange(index);
     })
     // 上划月份网格 → 切到周视图（带动画）；水平滑动仍由 Swiper 负责翻月
@@ -2183,7 +2264,7 @@ struct Index {
           .onClick(() => {
             this.selectedDate = cell.dateMs;
           })
-        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
       }
       .width('100%')
       .padding({ left: 8, right: 8, top: 2, bottom: 8 })
@@ -2734,6 +2815,7 @@ struct Index {
         this.swiperGuard = true;
         this.swiperController.changeIndex(1, false);
         this.expandedSwiperController.changeIndex(1, false);
+        this.reloadEvents();
       }
     })
   }
@@ -2833,6 +2915,7 @@ struct Index {
         this.swiperGuard = true;
         this.swiperController.changeIndex(1, false);
         this.expandedSwiperController.changeIndex(1, false);
+        this.reloadEvents();
       }
     })
   }

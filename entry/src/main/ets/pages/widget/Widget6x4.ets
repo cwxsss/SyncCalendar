@@ -53,6 +53,7 @@ class LItem6 {
   color: string = '#007DFF';
   calName: string = '';
   isNow: boolean = false;
+  startMs: number = 0;
 }
 
 /** 冲突组：组内**贪心分列**，lanes[i] = 第 i 列（同列互不重叠） */
@@ -492,7 +493,7 @@ struct Widget6x4Card {
 
   /** 列表模式单条行：左侧日历色条（进行中变红）+ 时间 + 标题 + 所属日历本；不画红线 */
   @Builder
-  listRow(item: LItem6) {
+  listRow(item: LItem6, fallbackDateMs: number = 0) {
     Row({ space: 8 }) {
       Column()
         .width(4)
@@ -553,6 +554,14 @@ struct Widget6x4Card {
     .padding({ left: 8, right: 8, top: 6, bottom: 6 })
     .borderRadius(8)
     .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
+    .onClick(() => {
+      const targetDate = item.startMs > 0 ? item.startMs : (fallbackDateMs > 0 ? fallbackDateMs : this.selectedDate);
+      postCardAction(this, {
+        action: 'router',
+        abilityName: 'EntryAbility',
+        params: { openDate: `${targetDate}` }
+      });
+    })
   }
 
   /** 列表模式主体：空态 / 可滚动的"行"列表（无时间轴、无红线） */
@@ -674,7 +683,7 @@ struct Widget6x4Card {
               } else {
                 Column({ space: 4 }) {
                   ForEach(group.items, (item: LItem6) => {
-                    this.listRow(item)
+                    this.listRow(item, group.dateKey)
                   }, (item: LItem6, idx: number) => `m_${group.dateKey}_${idx}_${item.time}_${item.title}`)
                 }
                 .width('100%')

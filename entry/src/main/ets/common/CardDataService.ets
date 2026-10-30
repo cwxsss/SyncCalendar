@@ -489,6 +489,8 @@ export class CardDataService {
         li.endTime = isDayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
         li.color = e.color;
         li.calName = e.calName;
+        li.startMs = e.startTime;
+        li.endMs = e.endTime;
         li.isNow = data.isToday && !isDayLong && e.startTime <= nowMs && nowMs < e.endTime;
         dayList.push(li);
       }
