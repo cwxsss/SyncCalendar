@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小褚日历 - 隐私政策</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+            line-height: 1.7;
+            color: #333;
+            max-width: 820px;
+            margin: 0 auto;
+            padding: 30px 20px 80px 20px;
+            background-color: #fafbfc;
+        }
+        .container {
+            background: #fff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+            border: 1px solid #e1e4e8;
+        }
+        h1 {
+            font-size: 26px;
+            color: #111;
+            border-bottom: 2px solid #eaecef;
+            padding-bottom: 12px;
+            margin-top: 0;
+        }
+        h2, h3 {
+            color: #222;
+            margin-top: 28px;
+            margin-bottom: 12px;
+        }
+        p, li {
+            font-size: 15px;
+            color: #444;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #dfe2e5;
+            padding: 10px 14px;
+            font-size: 14px;
+            text-align: left;
+        }
+        th {
+            background-color: #f6f8fa;
+            font-weight: 600;
+        }
+        .meta-info {
+            background-color: #f1f5f9;
+            padding: 12px 18px;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 14px;
+            color: #475569;
+        }
+        .highlight-box {
+            background-color: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 12px 16px;
+            margin: 18px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 14px;
+            color: #1e40af;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>小褚日历 隐私政策</h1>
+    <div class="meta-info">
+        <strong>生效日期：</strong>2026年10月30日 &nbsp;|&nbsp; 
+        <strong>更新日期：</strong>2026年10月30日 &nbsp;|&nbsp; 
+        <strong>应用包名：</strong>xiao.chu.Calendar
+    </div>
+
+    <p>欢迎使用「小褚日历」（以下简称“本应用”）。本应用深知个人隐私对您的重要性，我们始终秉持“数据最小化”、“本地存储可控”、“纯净无追踪”的原则保护您的个人信息与数据安全。请在安装并使用本应用前，仔细阅读并充分理解本《隐私政策》。</p>
+
+    <h2>一、我们如何收集与使用您的信息</h2>
+    <div class="highlight-box">
+        <strong>特别提示：</strong>本应用作为轻量、纯净的个人日程管理与同步工具，<strong>不会在后台搭建任何用于收集、存储或分析您个人隐私及日程数据的第三方商业服务器</strong>。
+    </div>
+    <ol>
+        <li><strong>账户配置信息：</strong>当您使用 WebDAV / CalDAV 同步功能时，您需自行填写服务器地址、端口、账户名与密码。该信息仅作为客户端连接凭据保存在您本机的安全沙箱存储中，绝不向任何第三方服务器上传。</li>
+        <li><strong>日程与待办数据：</strong>您所创建或同步的日程主题、时间、地点、提醒设置与待办事项，均直接与您自行指定的私有云服务（如群晖 Synology Calendar、Nextcloud、OwnCloud、iCloud 等）或系统本地日历交互。本应用开发者无法获取、读取或截获您的任何日程内容。</li>
+        <li><strong>设备与日志信息：</strong>本应用仅在发生异常崩溃或用户主动开启调试日志时，在本地记录必要的运行错误堆栈，用于帮助用户排查同步连接问题。相关日志完全保存在设备本地，不会向外发送。</li>
+    </ol>
+
+    <h2>二、系统权限调用说明</h2>
+    <p>为实现日历同步、日程提醒及桌面卡片服务，本应用可能会在必要时向系统申请以下权限：</p>
+    <table>
+        <thead>
+            <tr>
+                <th>权限名称</th>
+                <th>权限用途说明</th>
+                <th>触发场景</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>ohos.permission.INTERNET</strong></td>
+                <td>访问互联网</td>
+                <td>仅用于根据用户填写的 CalDAV/WebDAV 地址，与用户指定的服务器通信同步日程。</td>
+            </tr>
+            <tr>
+                <td><strong>ohos.permission.READ_CALENDAR</strong></td>
+                <td>读取日历数据</td>
+                <td>用于在主界面与桌面卡片中读取由本应用创建或协同的日历日程。</td>
+            </tr>
+            <tr>
+                <td><strong>ohos.permission.WRITE_CALENDAR</strong></td>
+                <td>写入日历数据</td>
+                <td>用于将外部同步的日程或用户新建的事项写入系统本地日历。</td>
+            </tr>
+            <tr>
+                <td><strong>ohos.permission.PUBLISH_AGENT_REMINDER</strong></td>
+                <td>发布后台提醒</td>
+                <td>用于在日程设定的提醒时间到达时，向系统注册通知提醒，防止漏掉重要事项。</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>三、第三方 SDK 与数据共享说明</h2>
+    <ul>
+        <li><strong>无广告 SDK：</strong>本应用不包含任何第三方商业广告投放 SDK，不投放任何开屏或插屏广告。</li>
+        <li><strong>无跨平台追踪：</strong>本应用未集成任何第三方跨应用设备指纹追踪、画像构建或大数据分析组件。</li>
+        <li><strong>不共享数据：</strong>除法律法规要求外，我们绝不会将您的个人数据共享、转让或披露给任何第三方机构。</li>
+    </ul>
+
+    <h2>四、您的权利与数据管理</h2>
+    <ol>
+        <li><strong>查阅与修改：</strong>您可以在本应用内自由查看、修改或删除您配置的日程账户和本地数据。</li>
+        <li><strong>账户与数据清除：</strong>在设置页中删除日历账户时，应用将立即同步销毁该账户保存在本机的登录凭证与本地缓存索引。</li>
+        <li><strong>注销与卸载：</strong>当您从设备上卸载本应用时，存储在沙箱中的全部配置数据将由操作系统彻底清除。</li>
+    </ol>
+
+    <h2>五、联系我们</h2>
+    <p>如对本隐私政策或个人信息保护有任何疑问、意见或建议，您可以通过以下方式与我们联系：</p>
+    <p><strong>GitHub 仓库反馈：</strong><a href="https://github.com/cwxsss/SyncCalendar/issues" target="_blank">https://github.com/cwxsss/SyncCalendar/issues</a></p>
+</div>
+</body>
+</html>
