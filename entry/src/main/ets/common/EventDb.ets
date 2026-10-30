@@ -36,6 +36,7 @@ export class LocalEvent {
 /** 远端事件条目（REPORT 解析结果） */
 export class RemoteEvent {
   uid: string = '';
+  remotePath: string = '';
   etag: string = '';
   title: string = '';
   description: string = '';
@@ -475,7 +476,7 @@ export class EventDb {
         e.uid = r.uid;
         e.calKey = calKey;
         e.href = href;
-        e.remotePath = encodeURIComponent(r.uid) + '.ics';
+        e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
         e.title = r.title;
         e.description = r.description;
         e.location = r.location;
@@ -504,6 +505,9 @@ export class EventDb {
         // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
         // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
         found.href = href;
+        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+          found.remotePath = r.remotePath;
+        }
         found.title = r.title;
         found.description = r.description;
         found.location = r.location;

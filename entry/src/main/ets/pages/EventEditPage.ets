@@ -10,6 +10,8 @@ import { AppSettings } from '../common/AppSettings';
 import { DavClient } from '../common/DavClient';
 import { SyncEngine } from '../common/SyncEngine';
 import { ReminderService } from '../common/ReminderService';
+import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
+import { CardDataService } from '../common/CardDataService';
 import { LogUtil } from '../common/LogUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
@@ -1256,6 +1258,22 @@ struct EventEditPage {
         await ReminderService.refreshReminders(context as common.UIAbilityContext);
       } catch (err) {
         // 刷新失败不影响删除
+      }
+      // 联动清理系统日历中的镜像事件
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`编辑页删除后同步清理系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {
+        // 忽略
+      }
+      // 联动刷新桌面服务卡片
+      try {
+        CardDataService.pushToAllForms(context);
+      } catch (err) {
+        // 忽略
       }
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
       router.back();

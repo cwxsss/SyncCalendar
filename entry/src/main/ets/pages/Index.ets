@@ -1255,6 +1255,22 @@ struct Index {
       } catch (e) {
         // 忽略
       }
+      // 联动清理系统日历中的镜像事件
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`详情弹窗删除后同步清理系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {
+        // 忽略
+      }
+      // 联动刷新桌面服务卡片
+      try {
+        CardDataService.pushToAllForms(context);
+      } catch (err) {
+        // 忽略
+      }
     } catch (err) {
       const ex = err as BusinessError;
       this.getUIContext().getPromptAction().showToast({ message: `删除失败: ${ex.message}` });

@@ -234,6 +234,7 @@ export class SyncEngine {
               return [];
             }
             const resUid: string = SyncEngine.resUidFromHref(it.href);
+            const fileName: string = it.href.substring(it.href.lastIndexOf('/') + 1);
             const parsed: RemoteEvent[] = IcsUtil.parse(raw);
             const out: RemoteEvent[] = [];
             for (const r of parsed) {
@@ -243,6 +244,7 @@ export class SyncEngine {
               if (r.uid === '') {
                 r.uid = resUid;
               }
+              r.remotePath = fileName;
               r.etag = it.etag;
               out.push(r);
             }
@@ -479,6 +481,7 @@ export class SyncEngine {
   private static rowToRemote(e: LocalEvent, etag: string): RemoteEvent {
     const r = new RemoteEvent();
     r.uid = e.uid;
+    r.remotePath = e.remotePath;
     r.etag = etag;
     r.title = e.title;
     r.description = e.description;
