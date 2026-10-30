@@ -23,7 +23,6 @@ class TBlock6 {
   widthRatio: number = 1;
   groupIndex: number = 0;
   isNow: boolean = false;
-  location: string = '';
 }
 
 /** 全天日程（eventKey 由 CardDataService 写入，用于 ForEach 唯一标识） */
@@ -54,7 +53,6 @@ class LItem6 {
   color: string = '#007DFF';
   calName: string = '';
   isNow: boolean = false;
-  location: string = '';
 }
 
 /** 冲突组：组内**贪心分列**，lanes[i] = 第 i 列（同列互不重叠） */
@@ -831,12 +829,12 @@ struct Widget6x4Card {
           .width('100%')
           .height(W6_HOUR)
           .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
-          .hitTestBehavior(HitTestMode.None) // 装饰层子节点同样不参与命中测试
+           // 装饰层子节点同样不参与命中测试
       }, (h: number) => `gd_${h}`)
     }
     .width('100%')
     .height('100%')
-    .hitTestBehavior(HitTestMode.None) // 装饰层：不参与命中测试，触碰事件穿透到下层色块
+     // 装饰层：不参与命中测试，触碰事件穿透到下层色块
   }
 
   /** 第 2 层：日程色块（冲突组分行 + 组内 lane 分列） */
@@ -970,7 +968,7 @@ struct Widget6x4Card {
   private w6NowLayer() {
     Column() {
       if (this.w6NowVisible()) {
-        Blank().height(this.w6NowPadVp()).hitTestBehavior(HitTestMode.None) // 占位块：不拦截点击
+        Blank().height(this.w6NowPadVp()) // 占位块：不拦截点击
         Row() {
           Column()
             .width(5)
@@ -984,11 +982,11 @@ struct Widget6x4Card {
             .borderRadius(1)
         }
         .width('100%')
-        .hitTestBehavior(HitTestMode.None) // 红线本身也不拦截点击，穿透到色块层
+         // 红线本身也不拦截点击，穿透到色块层
       }
     }
     .width('100%')
     .height('100%')
-    .hitTestBehavior(HitTestMode.None) // 装饰层：整层不参与命中测试，触碰事件穿透到下层色块
+     // 装饰层：整层不参与命中测试，触碰事件穿透到下层色块
   }
 }

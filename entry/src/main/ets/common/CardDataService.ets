@@ -167,7 +167,7 @@ export class CardDataService {
     }
     // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
     const cache: Map<string, formBindingData.FormBindingData> =
-      new Map<number, formBindingData.FormBindingData>();
+      new Map<string, formBindingData.FormBindingData>();
     const fallback: formBindingData.FormBindingData =
       formBindingData.createFormBindingData(await CardDataService.buildCardData(context, 0));
     cache.set('0_1', fallback);

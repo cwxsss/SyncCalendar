@@ -1,6 +1,6 @@
 {
-  "modelVersion": "26.0.0",
-  "description": "Please describe the basic information.",
+  "modelVersion": "6.0.0",
+  "description": "SyncCalendar",
   "dependencies": {
   },
   "devDependencies": {

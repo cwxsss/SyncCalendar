@@ -5,6 +5,8 @@
 /.hvigor/
 /oh_modules/
 /entry/oh_modules/
+*.hap
+*.app
 
 # IDE 配置
 /.idea/
