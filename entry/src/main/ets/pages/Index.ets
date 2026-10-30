@@ -50,6 +50,7 @@ struct Index {
   @Watch('onSelectedDateChange') @State selectedDate: number = 0; // 当天 0 点毫秒
   @State selectedDayEvents: DisplayEvent[] = []; // 当前选中日期的日程列表，保证 UI 响应式强刷新
   @State dataVersion: number = 0; // 数据版本戳，递增促发 ForEach 彻底重绘
+  @State detailSheetMode: string = 'detail'; // 'detail' | 'scope' | 'confirm'
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
@@ -957,6 +958,129 @@ struct Index {
 
   @Builder
   detailSheet() {
+    Column() {
+      if (this.detailSheetMode === 'scope') {
+        this.scopeContent()
+      } else if (this.detailSheetMode === 'confirm') {
+        this.confirmDeleteContent()
+      } else {
+        this.detailMainContent()
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scopeContent() {
+    Column({ space: 10 }) {
+      Text('删除重复日程')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12, bottom: 4 })
+
+      Text('这是一个重复日程，请选择作用的范围')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ bottom: 10 })
+
+      this.scopeOptionCard('one', '仅删除这一次', '只影响所选日期的这一次，其余保持不变')
+      this.scopeOptionCard('future', '删除此次及以后', '从这一次开始到最后一次都删除')
+      this.scopeOptionCard('all', '删除全部', '整条重复日程的所有发生都删除')
+
+      Text('取消')
+        .fontSize(15)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 18, bottom: 12 })
+        .onClick(() => {
+          this.detailSheetMode = 'detail';
+        })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  scopeOptionCard(mode: string, title: string, desc: string) {
+    Column({ space: 4 }) {
+      Text(title)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(mode === 'all' ? '#E64545' : $r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      Text(desc)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .borderRadius(14)
+    .backgroundColor($r('app.color.card_bg'))
+    .onClick(() => {
+      this.executeDeleteDetail(mode);
+    })
+  }
+
+  @Builder
+  confirmDeleteContent() {
+    Column({ space: 14 }) {
+      Text('删除日程')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 16, bottom: 4 })
+
+      Text(this.detailEvent !== null && this.detailEvent.title !== ''
+        ? `确定要删除日程「${this.detailEvent.title}」吗？`
+        : '确定要删除这条日程吗？')
+        .fontSize(14)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ left: 20, right: 20, bottom: 20 })
+
+      Button('确认删除')
+        .width('100%')
+        .height(44)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#FFFFFF')
+        .backgroundColor('#E64545')
+        .borderRadius(22)
+        .onClick(() => {
+          this.executeDeleteDetail('all');
+        })
+
+      Button('取消')
+        .width('100%')
+        .height(44)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .backgroundColor($r('app.color.card_bg'))
+        .borderRadius(22)
+        .onClick(() => {
+          this.detailSheetMode = 'detail';
+        })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  detailMainContent() {
     Column({ space: 12 }) {
       if (this.detailEvent !== null) {
         // 标题区：色点 + 标题 + 徽标紧跟标题 + 自绘关闭按钮（与标题同行）
@@ -1094,11 +1218,17 @@ struct Index {
             .height(44)
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#FA5151')
-            .backgroundColor('rgba(250, 81, 81, 0.1)')
-            .borderRadius(12)
+            .fontColor('#E64545')
+            .backgroundColor($r('app.color.card_bg'))
+            .borderRadius(22)
             .onClick(() => {
-              this.promptDeleteDetail();
+              if (this.detailEvent !== null) {
+                if (this.detailEvent.recurring) {
+                  this.detailSheetMode = 'scope';
+                } else {
+                  this.detailSheetMode = 'confirm';
+                }
+              }
             })
 
           Button('编辑日程')
@@ -1108,7 +1238,7 @@ struct Index {
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.button_text'))
             .backgroundColor($r('app.color.brand'))
-            .borderRadius(12)
+            .borderRadius(22)
             .onClick(() => {
               const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
               const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
@@ -1121,59 +1251,11 @@ struct Index {
             })
         }
         .width('100%')
+        .padding({ top: 8, bottom: 4 })
       }
     }
     .width('100%')
     .height('100%')
-    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  private promptDeleteDetail(): void {
-    if (this.detailEvent === null) {
-      return;
-    }
-    const target: DisplayEvent = this.detailEvent;
-    if (target.recurring) {
-      ActionSheet.show({
-        title: '删除重复日程',
-        message: '这是一个重复日程，请选择删除范围',
-        autoCancel: true,
-        alignment: DialogAlignment.Bottom,
-        offset: { dx: 0, dy: -20 },
-        sheets: [
-          {
-            title: '仅删除这一次',
-            action: () => {
-              this.executeDeleteDetail('one');
-            }
-          },
-          {
-            title: '删除全部',
-            action: () => {
-              this.executeDeleteDetail('all');
-            }
-          }
-        ]
-      });
-    } else {
-      AlertDialog.show({
-        title: '删除日程',
-        message: target.title === '' ? '确定要删除这条日程吗？' : `确定要删除「${target.title}」吗？`,
-        autoCancel: true,
-        primaryButton: {
-          value: '取消',
-          action: () => {}
-        },
-        secondaryButton: {
-          value: '删除',
-          fontColor: '#FA5151',
-          action: () => {
-            this.executeDeleteDetail('all');
-          }
-        }
-      });
-    }
   }
 
   private async executeDeleteDetail(scope: string): Promise<void> {
@@ -1225,9 +1307,25 @@ struct Index {
         // 立即从内存中过滤掉该次发生
         this.events = this.events.filter((e: DisplayEvent): boolean =>
           !(e.id === target.id && e.startTime === target.startTime));
+      } else if (scope === 'future') {
+        const boundsOcc: number = target.startTime;
+        let master: LocalEvent | null = cur;
+        if (cur.rrule === '' && cur.recurrenceId > 0) {
+          master = await EventDb.getMasterByUid(context, cur.calKey, cur.uid);
+        }
+        if (master !== null) {
+          const beforeThis: number = boundsOcc - 1000;
+          const truncated: string = IcsUtil.rruleWithUntil(master.rrule, beforeThis);
+          await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
+          await EventDb.purgeByUidFrom(context, master.calKey, master.uid, boundsOcc);
+        }
+        // 立即从当前内存过滤掉该时间及以后的发生
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          !(e.id === target.id && e.startTime >= boundsOcc));
       }
 
       this.detailShow = false;
+      this.detailSheetMode = 'detail';
       this.detailEvent = null;
 
       // 立即刷新内存与视图
@@ -1237,7 +1335,7 @@ struct Index {
 
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
 
-      // 后台异步推送
+      // 1) 后台异步推送 CalDAV 服务器
       if (cur.href !== '') {
         const accounts: DavAccount[] = await AccountStore.loadAll(context);
         const curNorm: string = DavClient.normalizeHref(cur.href);
@@ -1250,12 +1348,15 @@ struct Index {
           });
         }
       }
+
+      // 2) 刷新通知提醒
       try {
         ReminderService.refreshReminders(context as common.UIAbilityContext);
       } catch (e) {
         // 忽略
       }
-      // 联动清理系统日历中的镜像事件
+
+      // 3) 联动清理系统日历中的镜像事件
       try {
         if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
           SystemCalendarMirror.syncNow(context).catch((err: Error) => {
@@ -1265,7 +1366,8 @@ struct Index {
       } catch (err) {
         // 忽略
       }
-      // 联动刷新桌面服务卡片
+
+      // 4) 联动刷新桌面服务卡片
       try {
         CardDataService.pushToAllForms(context);
       } catch (err) {
