@@ -32,12 +32,14 @@ class MonthCell {
   inMonth: boolean = false;
   isToday: boolean = false;
   lunar: string = ''; // 农历（初一时显示月名）
+  hasEvents: boolean = false; // 是否有日程（日期下方小红点）
+  events: DisplayEvent[] = []; // 该日日程列表（全月展开视图展示）
 }
 
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
-const VIEW_ORDER: string[] = ['month', 'week', 'agenda'];
+const VIEW_ORDER: string[] = ['month', 'month_expanded', 'week', 'agenda'];
 
 @Entry
 @Component
@@ -67,6 +69,7 @@ struct Index {
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
   private swiperController: SwiperController = new SwiperController();
+  private expandedSwiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
   private navDir: number = 1; // 视图切换方向：1 前进（向下钻取），-1 后退（向上回退）
   private autoSyncTimer: number = -1;
@@ -465,6 +468,8 @@ struct Index {
       cell.inMonth = d.getMonth() === month;
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.events = this.eventsOfDate(dateMs);
+      cell.hasEvents = cell.events.length > 0;
       cells.push(cell);
     }
     return cells;
@@ -537,6 +542,8 @@ struct Index {
     this.selectedDate = this.startOfDay(now.getTime());
     this.rebuildPages();
     this.reloadEvents();
+    this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
   }
 
   /** Swiper 翻页后回正到中间页并切换基准月份 */
@@ -555,6 +562,7 @@ struct Index {
     this.reloadEvents();
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
   }
 
   // ---------- 同步 ----------
@@ -1036,6 +1044,8 @@ struct Index {
         this.modeTabs()
         if (this.mode === 'month') {
           this.monthBody()
+        } else if (this.mode === 'month_expanded') {
+          this.monthExpandedBody()
         } else if (this.mode === 'week') {
           this.weekBody()
         } else if (this.mode === 'todo') {
@@ -1385,10 +1395,11 @@ struct Index {
   modeTabs() {
     Row({ space: 4 }) {
       this.modeTab('month', '月')
+      this.modeTab('month_expanded', '全月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
       Blank()
-      if (this.mode === 'month') {
+      if (this.mode === 'month' || this.mode === 'month_expanded') {
         Text(this.fmtMonthTitle())
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
@@ -1613,6 +1624,15 @@ struct Index {
             .fontSize(8)
             .fontColor($r('app.color.text_hint'))
             .maxLines(1)
+          Row() {
+            if (cell.hasEvents) {
+              Circle({ width: 4, height: 4 })
+                .fill(cell.dateMs === this.selectedDate ? '#0057C2' : '#FF3B30')
+            }
+          }
+          .height(4)
+          .alignItems(VerticalAlign.Center)
+          .justifyContent(FlexAlign.Center)
         }
         .layoutWeight(1)
         .onClick(() => {
@@ -1645,6 +1665,8 @@ struct Index {
       cell.day = new Date(dateMs).getDate();
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.events = this.eventsOfDate(dateMs);
+      cell.hasEvents = cell.events.length > 0;
       cells.push(cell);
     }
     return cells;
@@ -1683,6 +1705,7 @@ struct Index {
       Column() {
         this.monthWeekHeader()
         this.monthSwiper()
+        this.monthExpandHandle()
         this.dayPanelHeader()
         this.eventList()
       }
@@ -1690,6 +1713,92 @@ struct Index {
       .layoutWeight(1)
       .transition(this.modeTransition())
     }
+  }
+
+  /** 月历展开把手（参考图2胶囊条，点击展开全月视图） */
+  @Builder
+  monthExpandHandle() {
+    Row() {
+      Row()
+        .width(36)
+        .height(4)
+        .borderRadius(2)
+        .backgroundColor($r('app.color.text_hint'))
+        .opacity(0.35)
+    }
+    .width('100%')
+    .height(16)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      this.switchModeAnimated('month_expanded');
+    })
+  }
+
+  /** 全月视图底部收起把手（参考图3） */
+  @Builder
+  monthCollapseHandle() {
+    Row() {
+      Column({ space: 1 }) {
+        Text('︿')
+          .fontSize(16)
+          .fontColor($r('app.color.text_hint'))
+          .opacity(0.8)
+        Text('收起')
+          .fontSize(10)
+          .fontColor($r('app.color.text_hint'))
+      }
+      .width('100%')
+      .height(36)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width('100%')
+    .onClick(() => {
+      this.switchModeAnimated('month');
+    })
+  }
+
+  /** 全月展开视图（参考图3：占满主区域，每个日期格内直接展示具体事项与+N） */
+  @Builder
+  monthExpandedBody() {
+    Column() {
+      // 星期表头
+      this.monthWeekHeader()
+
+      // 全月日历大网格 Swiper
+      Swiper(this.expandedSwiperController) {
+        ForEach(this.monthPages, (cells: MonthCell[]) => {
+          Column() {
+            ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
+              Row() {
+                ForEach(week, (cell: MonthCell) => {
+                  this.dayCellExpanded(cell)
+                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.events.length}`)
+              }
+              .width('100%')
+              .layoutWeight(1)
+            }, (week: MonthCell[], idx: number) => String(idx))
+          }
+          .width('100%')
+          .height('100%')
+        }, (cells: MonthCell[]) => String(cells[0].dateMs))
+      }
+      .index(1)
+      .loop(false)
+      .indicator(false)
+      .width('100%')
+      .layoutWeight(1)
+      .onChange((index: number) => {
+        this.handleSwiperChange(index);
+      })
+
+      // 底部收起按钮（参考图3）
+      this.monthCollapseHandle()
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .transition(this.modeTransition())
   }
 
   /** 月视图星期表头 */
@@ -2599,9 +2708,21 @@ struct Index {
             ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
           .maxLines(1)
       }
+      // 小红点：当天有日程时展示（参考图2）
+      Row() {
+        if (cell.hasEvents) {
+          Circle({ width: 4, height: 4 })
+            .fill(cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text')
+              : (!cell.inMonth ? '#FFA080' : '#FF3B30'))
+        }
+      }
+      .height(4)
+      .alignItems(VerticalAlign.Center)
+      .justifyContent(FlexAlign.Center)
     }
     .layoutWeight(1)
-    .padding({ top: 4, bottom: 4 })
+    .padding({ top: 4, bottom: 2 })
     .borderRadius(8)
     .onClick(() => {
       this.selectedDate = cell.dateMs;
@@ -2612,6 +2733,106 @@ struct Index {
         this.rebuildPages();
         this.swiperGuard = true;
         this.swiperController.changeIndex(1, false);
+        this.expandedSwiperController.changeIndex(1, false);
+      }
+    })
+  }
+
+  /** 全月展开视图单个日期格子（参考图3：顶部日期与农历，下方展示最多2条日程事项及+N） */
+  @Builder
+  dayCellExpanded(cell: MonthCell) {
+    Column() {
+      // 顶部：日期数字与农历
+      Row({ space: 2 }) {
+        Text(String(cell.day))
+          .fontSize(12)
+          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(!cell.inMonth
+            ? $r('app.color.text_hint')
+            : (cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text')
+              : (cell.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))))
+          .width(20)
+          .height(20)
+          .textAlign(TextAlign.Center)
+          .borderRadius(10)
+          .backgroundColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.selected_bg')
+            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+
+        Text(cell.lunar)
+          .fontSize(8)
+          .fontColor(!cell.inMonth ? $r('app.color.text_hint') : $r('app.color.text_hint'))
+          .maxLines(1)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 2, right: 2, top: 2 })
+
+      // 日程事项列表（格内直接展示具体事项条，参考图3）
+      Column({ space: 2 }) {
+        ForEach(cell.events.slice(0, 2), (e: DisplayEvent) => {
+          Row() {
+            // 左侧色彩条
+            Row()
+              .width(2)
+              .height(13)
+              .borderRadius(1)
+              .backgroundColor(e.color && e.color.length > 0 ? e.color : '#007DFF')
+
+            Text(e.title)
+              .fontSize(9)
+              .fontColor($r('app.color.text_primary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .margin({ left: 3 })
+              .layoutWeight(1)
+          }
+          .width('100%')
+          .height(15)
+          .padding({ left: 2, right: 2 })
+          .borderRadius(2)
+          .backgroundColor($r('app.color.card_bg'))
+          .opacity(!cell.inMonth ? 0.6 : 1.0)
+          .onClick(() => {
+            this.selectedDate = cell.dateMs;
+            this.showEventDetail(e);
+          })
+        }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+
+        // 超过2条显示 +N 标记
+        if (cell.events.length > 2) {
+          Text(`+${cell.events.length - 2}`)
+            .fontSize(9)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FF6B00')
+            .padding({ left: 4 })
+            .margin({ top: 1 })
+        }
+      }
+      .width('100%')
+      .margin({ top: 2 })
+      .alignItems(HorizontalAlign.Start)
+    }
+    .layoutWeight(1)
+    .height('100%')
+    .padding(2)
+    .border({
+      width: { right: 0.5, bottom: 0.5 },
+      color: $r('app.color.shadow_color')
+    })
+    .backgroundColor(cell.dateMs === this.selectedDate ? '#0A007DFF' : Color.Transparent)
+    .onClick(() => {
+      this.selectedDate = cell.dateMs;
+      if (!cell.inMonth) {
+        const d = new Date(cell.dateMs);
+        this.displayYear = d.getFullYear();
+        this.displayMonth = d.getMonth();
+        this.rebuildPages();
+        this.swiperGuard = true;
+        this.swiperController.changeIndex(1, false);
+        this.expandedSwiperController.changeIndex(1, false);
       }
     })
   }

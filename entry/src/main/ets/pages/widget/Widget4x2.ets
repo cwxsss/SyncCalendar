@@ -1,10 +1,10 @@
 // entry/src/main/ets/pages/widget/Widget4x2.ets
-// 2x4 服务卡片：2x2 的横向扩展。左侧 = 日期/星期/农历 + 今日日程条数（与 2x2 一致）；
-// 右侧 = **当前时间之后最近的两条**日程（不含全天/跨天，不显示"进行中"等字样，不显示日历本名）；
+// 2x4 服务卡片：2x2 的横向扩展。左侧 = 日期/星期/农历 + 日程条数（支持1天/3天/7天切换）；
+// 右侧 = 当前时刻起最近的两条日程（带日期标识，支持展示未来3天、7天的日程）；
 // 整卡点击进入 App，右上角 ＋ 直接新建日程
 let storage2x4 = new LocalStorage();
 
-/** 与 eventsJson 同结构的卡片单条日程（本卡片只用到标题/时间/日历色/进行中标记） */
+/** 与 eventsJson 同结构的卡片单条日程 */
 class CardItem2x4 {
   title: string = '';
   time: string = '';
@@ -12,6 +12,7 @@ class CardItem2x4 {
   calName: string = '';
   color: string = '#007DFF';
   isNow: boolean = false;
+  dateTag: string = ''; // '今天' | '明天' | '后天' | '10/31'
 }
 
 @Entry(storage2x4)
@@ -23,6 +24,8 @@ struct Widget4x2Card {
   @LocalStorageProp('lunarText') lunarText: string = '';
   @LocalStorageProp('todayCount') todayCount: number = 0;
   @LocalStorageProp('ongoingJson') ongoingJson: string = '[]';
+  @LocalStorageProp('cardDays') cardDays: number = 1;
+  @LocalStorageProp('rangeCount') rangeCount: number = 0;
   /** 卡片当前显示的那一天 0 点毫秒 —— 点卡片进 App 时定位到这一天 */
   @LocalStorageProp('selectedDate') selectedDate: number = 0;
 
@@ -34,6 +37,15 @@ struct Widget4x2Card {
     } catch (err) {
       return [];
     }
+  }
+
+  /** 循环切换天数：1天 -> 3天 -> 7天 -> 1天 */
+  private cycleDays(): void {
+    const nextDays: number = this.cardDays === 1 ? 3 : (this.cardDays === 3 ? 7 : 1);
+    postCardAction(this, {
+      action: 'message',
+      params: { cardDays: nextDays, pageAction: `days_${nextDays}` }
+    });
   }
 
   /** 右上角添加按钮：拉起 App 直接进入新建日程页（兄弟节点布局，点击不会冒泡到左侧日期区） */
@@ -68,8 +80,7 @@ struct Widget4x2Card {
     });
   }
 
-  /** 右侧单条：左色竖条 + 起止时间 + 标题。
-   *  不显示"进行中 / 即将开始"字样，也不显示日历本名 */
+  /** 右侧单条：左色竖条 + 日期标签/起止时间 + 标题。 */
   @Builder
   ongoingRow(item: CardItem2x4) {
     Row({ space: 8 }) {
@@ -79,6 +90,16 @@ struct Widget4x2Card {
         .borderRadius(2)
         .backgroundColor(item.color)
       Column({ space: 2 }) {
+        if (item.dateTag !== '') {
+          Text(item.dateTag)
+            .fontSize(8.5)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(item.dateTag === '今天' ? '#007DFF' : '#FF9500')
+            .backgroundColor(item.dateTag === '今天' ? '#EBF4FF' : '#FFF5E6')
+            .borderRadius(3)
+            .padding({ left: 3, right: 3, top: 1, bottom: 1 })
+            .maxLines(1)
+        }
         Text(item.time)
           .fontSize(10)
           .fontWeight(FontWeight.Medium)
@@ -91,7 +112,7 @@ struct Widget4x2Card {
             .maxLines(1)
         }
       }
-      .width(36)
+      .width(38)
       .alignItems(HorizontalAlign.Start)
       Text(item.title)
         .fontSize(13)
@@ -107,11 +128,13 @@ struct Widget4x2Card {
     .backgroundColor('#F5F7FA')
   }
 
-  /** 右侧空态：今日无日程 / 日程已全部结束 */
+  /** 右侧空态：日程为空或已结束 */
   @Builder
   emptyHint() {
     Column() {
-      Text(this.todayCount === 0 ? '今日暂无日程' : '今日日程已结束')
+      Text((this.cardDays > 1 ? this.rangeCount : this.todayCount) === 0
+        ? (this.cardDays === 7 ? '未来7天暂无日程' : (this.cardDays === 3 ? '未来3天暂无日程' : '今日暂无日程'))
+        : (this.cardDays > 1 ? '近期日程已结束' : '今日日程已结束'))
         .fontSize(12)
         .fontColor('#8A8A8A')
         .maxLines(2)
@@ -124,7 +147,7 @@ struct Widget4x2Card {
 
   build() {
     Row({ space: 10 }) {
-      // ===== 左半：与 2x2 一致（日期 / 星期 + 农历 / 今日条数大数字） =====
+      // ===== 左半：日期 / 星期 + 农历 / 条数大数字（支持1天/3天/7天） =====
       Column({ space: 6 }) {
         Row({ space: 6 }) {
           Column({ space: 2 }) {
@@ -152,18 +175,29 @@ struct Widget4x2Card {
           .color('#E5E5E5')
 
         Row({ space: 6 }) {
-          Text(`${this.todayCount}`)
+          Text(`${this.cardDays > 1 ? this.rangeCount : this.todayCount}`)
             .fontSize(38)
             .fontWeight(FontWeight.Bold)
             .fontColor('#007DFF')
           Column({ space: 2 }) {
             Row({ space: 4 }) {
-              Text('今日日程')
+              Text(this.cardDays === 7 ? '未来7天' : (this.cardDays === 3 ? '未来3天' : '今日日程'))
                 .fontSize(11)
                 .fontColor('#1A1A1A')
                 .maxLines(1)
+              Button() {
+                Text(this.cardDays === 7 ? '7天' : (this.cardDays === 3 ? '3天' : '1天'))
+                  .fontSize(9)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor('#007DFF')
+              }
+              .height(16)
+              .padding({ left: 4, right: 4 })
+              .borderRadius(8)
+              .backgroundColor('#EBF4FF')
+              .onClick(() => this.cycleDays())
             }
-            Text(this.todayCount === 0 ? '点击添加' : '点击查看')
+            Text((this.cardDays > 1 ? this.rangeCount : this.todayCount) === 0 ? '点击添加' : '点击查看')
               .fontSize(9)
               .fontColor('#8A8A8A')
               .maxLines(1)
@@ -191,7 +225,7 @@ struct Widget4x2Card {
           Column({ space: 6 }) {
             ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
               this.ongoingRow(item)
-            }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}`)
+            }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}_${item.dateTag}`)
           }
           .width('100%')
           .layoutWeight(1)
