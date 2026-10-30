@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "同步日历：以同步为核心的日历应用"
+      "value": "小褚日历：以同步为核心的日历应用"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "同步日历主界面"
+      "value": "小褚日历主界面"
     },
     {
       "name": "EntryAbility_label",
-      "value": "同步日历"
+      "value": "小褚日历"
     },
     {
       "name": "perm_read_calendar",
@@ -26,7 +26,7 @@
     },
     {
       "name": "card_ability_desc",
-      "value": "同步日历服务卡片"
+      "value": "小褚日历服务卡片"
     },
     {
       "name": "card_desc",

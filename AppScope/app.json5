@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "synccalendar.yangyq.net",
-    "vendor": "yangyq",
+    "bundleName": "xiao.chu.Calendar",
+    "vendor": "xiaochu",
     "versionCode": 10000,
     "versionName": "0.1.0",
     "buildVersion": "1",

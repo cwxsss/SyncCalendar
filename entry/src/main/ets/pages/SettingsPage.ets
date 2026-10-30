@@ -1132,8 +1132,8 @@ struct SettingsPage {
                   }
                   Flex({ wrap: FlexWrap.Wrap }) {
                     ForEach([
-                      { v: 1, label: '同步日历·本名' },
-                      { v: 2, label: '同步日历·账号·本名' },
+                      { v: 1, label: '小褚日历·本名' },
+                      { v: 2, label: '小褚日历·账号·本名' },
                       { v: 3, label: '账号·本名' }
                     ], (opt: Record<string, string | number>): void => {
                       Text(opt.label as string)
