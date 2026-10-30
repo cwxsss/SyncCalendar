@@ -1080,7 +1080,9 @@ struct EventEditPage {
       // 立即推送（尽力而为，失败不打断，下次同步会再推）
       if (e.href !== '') {
         const accounts: DavAccount[] = await AccountStore.loadAll(context);
-        const acc = accounts.find((a: DavAccount): boolean => a.calendarHrefs.includes(e.href));
+        const eNorm: string = DavClient.normalizeHref(e.href);
+        const acc = accounts.find((a: DavAccount): boolean =>
+          a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === eNorm));
         if (acc !== undefined) {
           const auth: string = DavClient.authHeader(acc.username, acc.password);
           await SyncEngine.pushDirtyForAccount(context, acc, auth);
@@ -1197,29 +1199,33 @@ struct EventEditPage {
       const cur: LocalEvent = this.original ?? this.event;
       const isSeries: boolean = this.isSeriesOccurrence();
       if (!isSeries || scope === 'all') {
-        // 普通日程 / 删除全部：整行标记删除（系列删除由 pushSeries 处理成 DELETE 资源）
-        await EventDb.markDeleted(context, cur.id);
-      } else if (scope === 'one') {
-        // 仅此次：主事件加 EXDATE 排除该次；若该行本身就是覆盖实例 → 直接删掉这一行
-        if (cur.rrule === '' && cur.recurrenceId > 0) {
-          await EventDb.markDeleted(context, cur.id);
+        // 普通日程 / 删除全部：整系列所有行标记删除（由 pushSeries 发出 DELETE 资源并本地清库）
+        if (isSeries) {
+          await EventDb.markDeletedByUid(context, cur.calKey, cur.uid);
         } else {
-          const master: LocalEvent | null = await this.loadMaster(context);
-          if (master !== null) {
-            const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
-            const occIcs: string = IcsUtil.fmtIcsTime(this.occStartMs, master.isAllDay);
-            if (!exList.includes(occIcs)) {
-              exList.push(occIcs);
-            }
-            await EventDb.setExdate(context, master.id, exList.join(';'));
-            // 若该次此前被单独改写过（存在覆盖行），一并清掉
-            const rows: LocalEvent[] = await EventDb.queryByUid(context, cur.calKey, cur.uid);
-            for (const r of rows) {
-              if (r.rrule === '' && r.recurrenceId > 0) {
-                await EventDb.markDeleted(context, r.id);
-              }
+          await EventDb.markDeleted(context, cur.id);
+        }
+      } else if (scope === 'one') {
+        // 仅此次：
+        // ⭐ 吸附校准目标发生时刻，确保生成的 EXDATE 绝对对齐
+        const bounds: SeriesBounds = await this.seriesBoundaries(context);
+        const master: LocalEvent | null = await this.loadMaster(context);
+        if (master !== null) {
+          const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+          const occIcs: string = IcsUtil.fmtIcsTime(bounds.thisOcc, master.isAllDay);
+          if (!exList.includes(occIcs)) {
+            exList.push(occIcs);
+          }
+          await EventDb.setExdate(context, master.id, exList.join(';'));
+          // 若该次此前被单独改写过（存在覆盖行），只清理对应发生时刻的那一行
+          const rows: LocalEvent[] = await EventDb.queryByUid(context, cur.calKey, cur.uid);
+          for (const r of rows) {
+            if (r.rrule === '' && r.recurrenceId > 0 && Math.abs(r.recurrenceId - bounds.thisOcc) < 12 * 3600000) {
+              await EventDb.markDeleted(context, r.id);
             }
           }
+        } else if (cur.rrule === '' && cur.recurrenceId > 0) {
+          await EventDb.markDeleted(context, cur.id);
         }
       } else {
         // 此次及以后：主事件 RRULE 截断到"此次之前"；该次及以后的本地行物理删除
@@ -1233,7 +1239,9 @@ struct EventEditPage {
       }
       if (cur.href !== '') {
         const accounts: DavAccount[] = await AccountStore.loadAll(context);
-        const acc = accounts.find((a: DavAccount): boolean => a.calendarHrefs.includes(cur.href));
+        const curNorm: string = DavClient.normalizeHref(cur.href);
+        const acc = accounts.find((a: DavAccount): boolean =>
+          a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === curNorm));
         if (acc !== undefined) {
           const auth: string = DavClient.authHeader(acc.username, acc.password);
           await SyncEngine.pushDirtyForAccount(context, acc, auth);
@@ -1254,6 +1262,14 @@ struct EventEditPage {
     } catch (err) {
       const ex = err as BusinessError;
       this.statusMsg = `删除失败：${ex.message}`;
+      try {
+        this.getUIContext().getPromptAction().showToast({
+          message: `删除失败：${ex.message}`,
+          duration: 3000
+        });
+      } catch (e2) {
+        // Toast 失败不影响
+      }
     }
     this.isSaving = false;
   }

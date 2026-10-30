@@ -491,6 +491,7 @@ struct Index {
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
     this.rebuildPages();
+    this.rebuildDayTimeline();
     // 当前正处于列表视图时立即重载，避免同步后列表空白
     if (this.mode === 'agenda') {
       await this.ensureAgendaData();

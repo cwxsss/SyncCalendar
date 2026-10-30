@@ -432,7 +432,11 @@ export class EventDb {
     //    语义与 `existing.find(x => !x.dirty && x.uid===r.uid && x.startTime===r.startTime
     //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
     const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    const dirtyDeletedUids: Set<string> = new Set<string>();
     for (const e of existing) {
+      if (e.dirty && e.deleted) {
+        dirtyDeletedUids.add(e.uid);
+      }
       if (e.dirty) {
         continue;
       }
@@ -455,6 +459,9 @@ export class EventDb {
       seenKeys.add(key);
       const found: LocalEvent | undefined = keyed.get(key);
       if (found === undefined) {
+        if (dirtyDeletedUids.has(r.uid)) {
+          continue; // 本地刚被用户删除待推送，忽略远端旧版本，防止被死灰复燃
+        }
         // 新增
         const e = new LocalEvent();
         e.uid = r.uid;
@@ -640,9 +647,10 @@ export class EventDb {
   /**
    * ⭐ 取同一个 UID 在同一个日历本下的**全部行**（主事件 + 覆盖实例）。
    * 用于"重复日程的单次/后续/全部"编辑与删除：重建整个系列后一次性推送。
-   * 只返回未删除的行。
+   * @param includeDeleted 是否包含被标记删除（deleted=1）的行
    */
-  static async queryByUid(context: common.Context, calKey: string, uid: string): Promise<LocalEvent[]> {
+  static async queryByUid(context: common.Context, calKey: string, uid: string,
+    includeDeleted: boolean = false): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
     predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
@@ -652,7 +660,7 @@ export class EventDb {
     try {
       while (rs.goToNextRow()) {
         const e = EventDb.fromRow(rs);
-        if (!e.deleted) {
+        if (includeDeleted || !e.deleted) {
           list.push(e);
         }
       }
@@ -660,6 +668,15 @@ export class EventDb {
       rs.close();
     }
     return list;
+  }
+
+  /** 将某个 UID 下的所有行（整系列：主事件与所有覆盖行）标记删除 */
+  static async markDeletedByUid(context: common.Context, calKey: string, uid: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = { 'deleted': 1, 'dirty': 1 };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
+    await store.update(bucket, predicates);
   }
 
   /** 物理删除某 uid 在某个日历本下的全部行（"删除全部"用） */
