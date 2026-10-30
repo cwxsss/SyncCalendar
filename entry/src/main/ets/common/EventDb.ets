@@ -433,14 +433,18 @@ export class EventDb {
     //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
     const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
     const dirtyDeletedUids: Set<string> = new Set<string>();
+    const dirtyKeyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
     for (const e of existing) {
       if (e.dirty && e.deleted) {
         dirtyDeletedUids.add(e.uid);
       }
+      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
       if (e.dirty) {
+        if (!dirtyKeyed.has(k)) {
+          dirtyKeyed.set(k, e);
+        }
         continue;
       }
-      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
       if (!keyed.has(k)) {
         keyed.set(k, e);
       }
@@ -457,11 +461,15 @@ export class EventDb {
         continue; // 同一资源内的重复条目 → 只保留一条
       }
       seenKeys.add(key);
+      if (dirtyDeletedUids.has(r.uid)) {
+        continue; // 本地刚被用户删除待推送，忽略远端旧版本，防止被死灰复燃
+      }
+      if (dirtyKeyed.has(key)) {
+        // 本地该事件有修改待推送，保留本地版本，忽略远端旧版本，绝不能作为新事件重复插入
+        continue;
+      }
       const found: LocalEvent | undefined = keyed.get(key);
       if (found === undefined) {
-        if (dirtyDeletedUids.has(r.uid)) {
-          continue; // 本地刚被用户删除待推送，忽略远端旧版本，防止被死灰复燃
-        }
         // 新增
         const e = new LocalEvent();
         e.uid = r.uid;
@@ -668,6 +676,17 @@ export class EventDb {
       rs.close();
     }
     return list;
+  }
+
+  /** 获取某 uid 的主事件（优先带 rrule 的行，无则最早一行） */
+  static async getMasterByUid(context: common.Context, calKey: string, uid: string): Promise<LocalEvent | null> {
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, calKey, uid);
+    for (const r of rows) {
+      if (r.rrule !== '') {
+        return r;
+      }
+    }
+    return rows.length > 0 ? rows[0] : null;
   }
 
   /** 将某个 UID 下的所有行（整系列：主事件与所有覆盖行）标记删除 */

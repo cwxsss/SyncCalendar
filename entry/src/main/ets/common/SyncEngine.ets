@@ -541,7 +541,22 @@ export class SyncEngine {
       }
       try {
         if (e.deleted) {
-          await DavClient.deleteRemote(url, auth);
+          try {
+            await DavClient.deleteRemote(url, auth);
+          } catch (delErr) {
+            if (delErr instanceof DavHttpError) {
+              const st = (delErr as DavHttpError).status;
+              if (st === 401) {
+                throw delErr as Error;
+              }
+              if (st !== 404 && st !== 410) {
+                throw delErr as Error;
+              }
+              LogUtil.write(`服务器上该单条资源已不存在(${st})，直接清理本地：uid=${e.uid}`);
+            } else {
+              throw delErr as Error;
+            }
+          }
           await EventDb.purge(context, e.id);
           LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
         } else {
@@ -602,11 +617,21 @@ export class SyncEngine {
       try {
         await DavClient.deleteRemote(url, auth);
       } catch (err) {
-        if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
-          throw err as Error;
+        if (err instanceof DavHttpError) {
+          const st = (err as DavHttpError).status;
+          if (st === 401) {
+            throw err as Error;
+          }
+          if (st === 404 || st === 410) {
+            LogUtil.write(`服务器上该重复系列已不存在(${st})，直接清理本地：uid=${uid}`);
+          } else {
+            LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+            return;
+          }
+        } else {
+          LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+          return;
         }
-        LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
-        return;
       }
       await EventDb.purgeByUid(context, calKey, uid);
       LogUtil.write(`推送删除重复系列（标题已脱敏）uid=${uid} → ${url}`);

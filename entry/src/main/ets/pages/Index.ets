@@ -48,6 +48,8 @@ struct Index {
   @State displayYear: number = 2026;
   @State displayMonth: number = 0; // 0-11
   @Watch('onSelectedDateChange') @State selectedDate: number = 0; // 当天 0 点毫秒
+  @State selectedDayEvents: DisplayEvent[] = []; // 当前选中日期的日程列表，保证 UI 响应式强刷新
+  @State dataVersion: number = 0; // 数据版本戳，递增促发 ForEach 彻底重绘
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
@@ -556,6 +558,8 @@ struct Index {
   /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
   private rebuildDayTimeline(): void {
     const dayEvents: DisplayEvent[] = this.eventsOfDate(this.selectedDate);
+    this.selectedDayEvents = dayEvents.slice();
+    this.dataVersion++;
     const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
     TimelineUtil.markNow(tl.blocks, this.nowMs);
     this.dayTimeline = tl;
@@ -1082,34 +1086,179 @@ struct Index {
         .align(Alignment.Top)
         .layoutWeight(1)
       }
-      // 可写日程：详情底部提供"编辑"入口（系统/只读日程无此按钮）
+      // 可写日程：详情底部提供"删除"与"编辑"入口（系统/只读日程无此按钮）
       if (this.detailEvent !== null && !this.detailEvent.isSystem && this.detailEvent.writable) {
-        Button('编辑日程')
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.button_text'))
-          .backgroundColor($r('app.color.brand'))
-          .borderRadius(12)
-          .onClick(() => {
-            const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
-            // ⭐ 把"用户点的是哪一次发生"一起带过去：重复日程展开后所有次共用主事件的 id，
-            //    不带发生时刻的话，编辑页无法知道用户点的是哪一次 → "仅这一次"会算错。
-            const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
-            this.detailShow = false;
-            if (id > 0) {
-              AppStorage.setOrCreate<number>('pendingEventId', id);
-              AppStorage.setOrCreate<number>('pendingOccurrenceTs', occ);
-              router.pushUrl({ url: 'pages/EventEditPage' });
-            }
-          })
+        Row({ space: 12 }) {
+          Button('删除日程')
+            .layoutWeight(1)
+            .height(44)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FA5151')
+            .backgroundColor('rgba(250, 81, 81, 0.1)')
+            .borderRadius(12)
+            .onClick(() => {
+              this.promptDeleteDetail();
+            })
+
+          Button('编辑日程')
+            .layoutWeight(1)
+            .height(44)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.button_text'))
+            .backgroundColor($r('app.color.brand'))
+            .borderRadius(12)
+            .onClick(() => {
+              const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
+              const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
+              this.detailShow = false;
+              if (id > 0) {
+                AppStorage.setOrCreate<number>('pendingEventId', id);
+                AppStorage.setOrCreate<number>('pendingOccurrenceTs', occ);
+                router.pushUrl({ url: 'pages/EventEditPage' });
+              }
+            })
+        }
+        .width('100%')
       }
     }
     .width('100%')
     .height('100%')
     .padding({ left: 16, right: 16, top: 16, bottom: 16 })
     .alignItems(HorizontalAlign.Start)
+  }
+
+  private promptDeleteDetail(): void {
+    if (this.detailEvent === null) {
+      return;
+    }
+    const target: DisplayEvent = this.detailEvent;
+    if (target.recurring) {
+      ActionSheet.show({
+        title: '删除重复日程',
+        message: '这是一个重复日程，请选择删除范围',
+        autoCancel: true,
+        alignment: DialogAlignment.Bottom,
+        offset: { dx: 0, dy: -20 },
+        sheets: [
+          {
+            title: '仅删除这一次',
+            action: () => {
+              this.executeDeleteDetail('one');
+            }
+          },
+          {
+            title: '删除全部',
+            action: () => {
+              this.executeDeleteDetail('all');
+            }
+          }
+        ]
+      });
+    } else {
+      AlertDialog.show({
+        title: '删除日程',
+        message: target.title === '' ? '确定要删除这条日程吗？' : `确定要删除「${target.title}」吗？`,
+        autoCancel: true,
+        primaryButton: {
+          value: '取消',
+          action: () => {}
+        },
+        secondaryButton: {
+          value: '删除',
+          fontColor: '#FA5151',
+          action: () => {
+            this.executeDeleteDetail('all');
+          }
+        }
+      });
+    }
+  }
+
+  private async executeDeleteDetail(scope: string): Promise<void> {
+    const target: DisplayEvent | null = this.detailEvent;
+    if (target === null) {
+      return;
+    }
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    try {
+      const cur: LocalEvent | null = await EventDb.getById(context, target.id);
+      if (cur === null) {
+        this.detailShow = false;
+        return;
+      }
+      if (!target.recurring || scope === 'all') {
+        if (target.recurring) {
+          await EventDb.markDeletedByUid(context, cur.calKey, cur.uid);
+        } else {
+          await EventDb.markDeleted(context, cur.id);
+        }
+        // 立即从当前内存列表清除该日程
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          target.recurring ? !(e.calKey === cur.calKey && e.id === cur.id) : e.id !== cur.id);
+      } else if (scope === 'one') {
+        const boundsOcc: number = target.startTime;
+        let master: LocalEvent | null = cur;
+        if (cur.rrule === '' && cur.recurrenceId > 0) {
+          master = await EventDb.getMasterByUid(context, cur.calKey, cur.uid);
+        }
+        if (master !== null) {
+          const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+          const occIcs: string = IcsUtil.fmtIcsTime(boundsOcc, master.isAllDay);
+          if (!exList.includes(occIcs)) {
+            exList.push(occIcs);
+          }
+          await EventDb.setExdate(context, master.id, exList.join(';'));
+          const rows: LocalEvent[] = await EventDb.queryByUid(context, cur.calKey, cur.uid);
+          for (const r of rows) {
+            if (r.rrule === '' && r.recurrenceId > 0 && Math.abs(r.recurrenceId - boundsOcc) < 12 * 3600000) {
+              await EventDb.markDeleted(context, r.id);
+            }
+          }
+        } else if (cur.rrule === '' && cur.recurrenceId > 0) {
+          await EventDb.markDeleted(context, cur.id);
+        }
+        // 立即从内存中过滤掉该次发生
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          !(e.id === target.id && e.startTime === target.startTime));
+      }
+
+      this.detailShow = false;
+      this.detailEvent = null;
+
+      // 立即刷新内存与视图
+      this.buildEventsByDay();
+      this.rebuildPages();
+      this.rebuildDayTimeline();
+
+      this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
+
+      // 后台异步推送
+      if (cur.href !== '') {
+        const accounts: DavAccount[] = await AccountStore.loadAll(context);
+        const curNorm: string = DavClient.normalizeHref(cur.href);
+        const acc = accounts.find((a: DavAccount): boolean =>
+          a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === curNorm));
+        if (acc !== undefined) {
+          const auth: string = DavClient.authHeader(acc.username, acc.password);
+          SyncEngine.pushDirtyForAccount(context, acc, auth).catch((err: Error) => {
+            LogUtil.write(`异步推送删除失败: ${err.message}`);
+          });
+        }
+      }
+      try {
+        ReminderService.refreshReminders(context as common.UIAbilityContext);
+      } catch (e) {
+        // 忽略
+      }
+    } catch (err) {
+      const ex = err as BusinessError;
+      this.getUIContext().getPromptAction().showToast({ message: `删除失败: ${ex.message}` });
+    }
   }
 
   private addEvent(): void {
@@ -2293,10 +2442,10 @@ struct Index {
     if (this.displayStyle === 'list') {
       Scroll() {
         Column({ space: 8 }) {
-          ForEach(this.eventsOfDate(this.selectedDate), (e: DisplayEvent) => {
+          ForEach(this.selectedDayEvents, (e: DisplayEvent) => {
             this.eventRow(e, this.isEventNow(e, this.selectedDate === this.startOfDay(this.nowMs)))
-          }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
-          if (this.eventsOfDate(this.selectedDate).length === 0 && !this.loading) {
+          }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+          if (this.selectedDayEvents.length === 0 && !this.loading) {
             Text('当天没有日程')
               .fontSize(13)
               .fontColor($r('app.color.text_hint'))
