@@ -26,16 +26,6 @@
         }
       },
       {
-        "name": "ohos.permission.READ_WHOLE_CALENDAR",
-        "reason": "$string:perm_read_whole_calendar",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "inuse"
-        }
-      },
-      {
         "name": "ohos.permission.WRITE_CALENDAR",
         "reason": "$string:perm_write_calendar",
         "usedScene": {

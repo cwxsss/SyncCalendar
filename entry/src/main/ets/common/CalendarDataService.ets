@@ -31,8 +31,7 @@ export class DisplayEvent {
 export class CalendarDataService {
   /** 本功能依赖的日历权限：读取本应用日历 + 读取全部日历（即"读取全部日程"） */
   private static readonly CALENDAR_PERMISSIONS: Permissions[] = [
-    'ohos.permission.READ_CALENDAR',
-    'ohos.permission.READ_WHOLE_CALENDAR'
+    'ohos.permission.READ_CALENDAR'
   ];
 
   /**
