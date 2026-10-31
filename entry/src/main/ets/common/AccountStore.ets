@@ -699,4 +699,45 @@ export class AccountStore {
       return false;
     }
   }
+
+  /**
+   * ⭐ 账号库是否**确认为空白**（不是"读取失败导致的空"）。
+   *
+   * 为什么需要它：`loadAll()` 内部把所有异常都 catch 掉并返回 `[]`，
+   * 于是调用方无法从返回值区分两种情况：
+   *   ① 账号库真的空（全新安装 / 用户重置 / **卸载重装**）；
+   *   ② 密文存在但解不开，或读取过程抛错（临时故障）。
+   *
+   * 系统日历镜像的孤儿清理必须只在 ① 时动手 —— ② 若照常清理，
+   * 会把"账号其实还在"的镜像账户全部误删（用户日程从系统日历里消失）。
+   *
+   * 判定口径（三者同时成立才算"确认空白"）：
+   *   - 偏好里**没有**账号密文（`data_b64` 为空）；
+   *   - 旧版明文存储也没有账号；
+   *   - 读取过程没有抛异常。
+   *
+   * @returns true = 确认空白，可安全清理孤儿镜像；false = 拿不准，调用方必须保守跳过
+   */
+  static async isEmptyVaultConfirmed(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences = await Vault.prefs(context);
+      const data: string = await store.get(VAULT_DATA, '') as string;
+      if (data !== '') {
+        // 有密文：只有能解出"0 个账号"才算确认空白；解不开一律视为拿不准
+        const plain: string | null = await Vault.decrypt(context, data);
+        if (plain === null) {
+          return false;
+        }
+        const arr: Array<Record<string, Object>> = JSON.parse(plain) as Array<Record<string, Object>>;
+        return arr.length === 0;
+      }
+      // 无密文：再看旧版明文存储是否还有残留账号
+      const legacy: DavAccount[] | null = await AccountStore.loadLegacy(context);
+      return legacy === null || legacy.length === 0;
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`[AccountStore] isEmptyVaultConfirmed 判定失败（按"拿不准"处理）: ${e.message}`);
+      return false;
+    }
+  }
 }

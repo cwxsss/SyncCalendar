@@ -795,10 +795,13 @@ export class SystemCalendarMirror {
   /**
    * ⭐ 兜底：清理"账号已不存在"的孤儿镜像账户（同步时调用，防止删除路径万一漏掉）。
    *
-   * ⚠️ **安全阀**：当前账号列表为空时**直接跳过** —— 无法区分"用户删光了账号"与
-   *    "账号存储临时读失败返回空"，后者若照常清理会把所有镜像账户误删。
-   *    "删光账号"这种场景已由 `removeByAccount` / 重置账号库两条显式路径覆盖。
-   * 只要还剩至少一个账号，就只清"accId 前缀不在当前账号集合里"的那些 —— 精准、不会误伤。
+   * 三种情况（0.1.1 起，配合"卸载残留"问题）：
+   *   ① **还有账号** → 只清"accId 不在当前账号集合里"的 —— 原逻辑，精准不误伤。
+   *   ② **账号库为空、且确认是真空**（`isEmptyVaultConfirmed()`）→ **全部清掉**。
+   *      这是卸载重装 / 用户重置账号库后的场景：旧镜像账户的 accId 不可能再匹配上，
+   *      留着只会变成系统日历里永远删不掉的幽灵本，还会继续提醒。
+   *   ③ **账号库为空、但拿不准**（读取异常 / 密文解不开）→ **仍然跳过**。
+   *      `loadAll()` 会把异常吞掉返回 `[]`，若不区分就会把用户真实在用的镜像全删了。
    *
    * @returns 删除的账户数
    */
@@ -812,8 +815,14 @@ export class SystemCalendarMirror {
     } catch (err) {
       return 0; // 读失败一律不动
     }
+    let wipeAll: boolean = false;
     if (accounts.length === 0) {
-      return 0; // 安全阀：见注释
+      // 空账号库：只有"确认空白"才敢全清，否则保守跳过（见上方 ③）
+      wipeAll = await AccountStore.isEmptyVaultConfirmed(context);
+      if (!wipeAll) {
+        return 0;
+      }
+      LogUtil.write('兜底清理孤儿镜像：账号库确认为空 → 清理全部镜像账户（卸载/重置后残留）');
     }
     const validAccIds: Set<string> = new Set<string>();
     for (const a of accounts) {
@@ -838,11 +847,13 @@ export class SystemCalendarMirror {
         } else {
           sep = dash >= 0 ? dash : under;
         }
-        if (sep <= 0) {
-          continue; // 解析不出 accId → 不动（宁可留，不误删）
+        // 非全清模式：必须能解析出 accId 才能比对，解析不出就跳过（宁可留，不误删）
+        // 全清模式：前缀已命中就是本应用建的，脏账户（解析不出 accId）也要删干净
+        if (!wipeAll && sep <= 0) {
+          continue;
         }
-        const accId: string = bucket.substring(0, sep);
-        if (validAccIds.has(accId)) {
+        const accId: string = sep > 0 ? bucket.substring(0, sep) : bucket;
+        if (!wipeAll && validAccIds.has(accId)) {
           continue;
         }
         try {

@@ -50,6 +50,7 @@ struct SettingsPage {
   @State mirrorKeys: string[] = [];         // 要镜像的 DAV 日历本 **bookId**（稳定标识，不用会变的 calKey）
   @State mirrorRunning: boolean = false;    // 正在执行镜像
   @State purgeRunning: boolean = false;     // 正在清理残留镜像账户
+  @State wipeAllRunning: boolean = false;   // 正在清除全部镜像（卸载前清干净）
   @State mirrorCandidates: BackupTarget[] = []; // 可镜像的本（已排除"系统日历备份目标本"，防回灌）
   @State mirrorInbound: boolean = false;         // 是否把系统日历的改动回写 CalDAV（默认关）
   @State accountDump: string = '';               // 系统日历账户清单（诊断用，清理后填充）
@@ -685,6 +686,81 @@ struct SettingsPage {
     }
   }
 
+  /**
+   * ⭐「彻底清除全部镜像数据」（卸载前清干净用）。
+   *
+   * 为什么需要它：鸿蒙**没有**「应用即将被卸载」的回调，系统日历属于**沙箱外**数据，
+   * 卸载时不会自动清理。用户卸载后，系统日历里会永久留着一堆
+   * 「同步日历·xxx」账户（还会继续提醒），只有重装并重新同步才能被当孤儿清掉。
+   * ⇒ 提供显式入口，让用户在卸载前主动清干净。
+   *
+   * ⚠️ 清除范围（务必与文案一致）：
+   *   - 只删**系统日历里本应用建立的镜像账户及其日程**
+   *   - **不动** CalDAV 账号配置（账号密码仍保留，重装后可直接用）
+   *   - **不动** 服务器上的任何日程（同步过去的内容一条都不会少）
+   */
+  private confirmWipeAllMirrors(): void {
+    if (this.context === undefined || this.wipeAllRunning) {
+      return;
+    }
+    this.getUIContext().showAlertDialog({
+      title: '彻底清除系统日历镜像数据',
+      message: '将删除本应用写入系统日历的全部镜像日历本及其日程。\n\n'
+        + '只影响系统日历：你的 CalDAV 账号与服务器上的日程完全不受影响。\n'
+        + '清除后系统日历里不再显示这些日程，也不再提醒；镜像开关会一并关闭。\n\n'
+        + '准备卸载本应用时，请先点这里清干净（卸载时系统不会自动清除）。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '确认清除',
+        action: (): void => {
+          this.doWipeAllMirrors();
+        }
+      }
+    });
+  }
+
+  private async doWipeAllMirrors(): Promise<void> {
+    if (this.context === undefined || this.wipeAllRunning) {
+      return;
+    }
+    this.wipeAllRunning = true;
+    try {
+      const n: number = await SystemCalendarMirror.removeAll(this.context);
+      // ⭐ 必须同时把"镜像开关"关掉并落库：否则下一轮同步会立刻按勾选重新建回来，
+      //    用户会以为"清了等于没清"。
+      this.mirrorEnabled = false;
+      await AppSettings.setMirrorEnabled(this.context, false);
+      // 镜像本没了 → 提醒要交回 App 负责，否则这些本会既没系统提醒、也没 App 提醒（漏提醒）
+      ReminderService.invalidateMirrorCache();
+      await ReminderService.refreshReminders(this.context as common.UIAbilityContext);
+      // ⭐ 清空结果必须说清楚：用户点这个按钮就是为了"确认卸载后不留东西"，
+      //    所以"0 个"也要区分是权限没给（没清成）还是本来就干净（放心）
+      const granted: boolean = await SystemCalendarMirror.hasPermission();
+      let msg: string = '';
+      if (n > 0) {
+        msg = `已清除 ${n} 个镜像日历本，系统日历中不再有本应用的日程；镜像开关已关闭`;
+      } else if (!granted) {
+        msg = '未授予"写入系统日历"权限，无法清除。请先在设置中允许本应用读写日历后重试';
+      } else {
+        msg = '系统日历中已没有本应用的镜像数据，无需清除';
+      }
+      this.getUIContext().getPromptAction().showToast({ message: msg, duration: 5000 });
+    } catch (err) {
+      const e = err as BusinessError;
+      this.getUIContext().getPromptAction().showToast({
+        message: `清除失败：${e.message ?? '请确认已授予"写入系统日历"权限'}`
+      });
+    } finally {
+      this.wipeAllRunning = false;
+    }
+  }
+
   private async saveInterval(minutes: number): Promise<void> {
     if (this.context === undefined) {
       return;
@@ -1186,6 +1262,7 @@ struct SettingsPage {
                     this.runMirrorNow();
                   })
 
+
                 Button(this.purgeRunning ? '正在清理…' : '清理残留镜像账户（诊断）')
                   .fontSize(13)
                   .fontColor($r('app.color.brand_text'))
@@ -1220,6 +1297,82 @@ struct SettingsPage {
                   .padding({ top: 4 })
                 }
               }
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // ⭐ WIPE_CARD_MOVED：数据清除独立成卡（不依赖镜像开关是否开启）
+          //    鸿蒙没有"应用即将被卸载"的回调，而系统日历属于沙箱外的系统数据，
+          //    卸载时不会自动清理 ⇒ 必须提供显式入口，让用户卸载前主动清干净。
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('清除系统日历数据')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('卸载本应用前请先清除，否则系统日历里会一直留着这些日程（还会提醒）')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+            }
+            .width('100%')
+
+            Button(this.wipeAllRunning ? '正在清除…' : '彻底清除系统日历镜像数据')
+              .fontSize(14)
+              .fontColor($r('app.color.error'))
+              .backgroundColor(Color.Transparent)
+              .border({ width: 1, color: $r('app.color.error') })
+              .width('100%')
+              .enabled(!this.wipeAllRunning)
+              .onClick(() => {
+                this.confirmWipeAllMirrors();
+              })
+
+            Text('只删系统日历里的镜像本；CalDAV 账号与服务器上的日程一条都不会少。清除后镜像开关会自动关闭。')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+
+            Button(this.purgeRunning ? '正在清理…' : '清理残留镜像账户（诊断）')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .backgroundColor(Color.Transparent)
+              .width('100%')
+              .enabled(!this.purgeRunning)
+              .onClick(() => {
+                this.runPurgeOrphans();
+              })
+
+            if (this.accountDump !== '') {
+              Column({ space: 4 }) {
+                Text('系统日历账户清单（MINE=我们建的，KEEP=本次保留；长按可复制）：')
+                  .fontSize(11)
+                  .fontColor($r('app.color.text_secondary'))
+                  .width('100%')
+                Scroll() {
+                  Text(this.accountDump)
+                    .fontSize(10)
+                    .lineHeight(14)
+                    .fontColor($r('app.color.text_primary'))
+                    .copyOption(CopyOptions.LocalDevice)
+                    .width('100%')
+                }
+                .height(150)
+                .width('100%')
+                .backgroundColor($r('app.color.page_bg'))
+                .borderRadius(8)
+                .padding(6)
+              }
+              .width('100%')
+              .padding({ top: 4 })
             }
           }
           .alignItems(HorizontalAlign.Start)
