@@ -30,8 +30,8 @@ export class IcsTime {
 export class IcsUtil {
   /** 解析 VCALENDAR 文本为事件列表 */
   static parse(ics: string): RemoteEvent[] {
-    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
-    const lines: string[] = unfolded.split(/\r?\n/);
+    const unfolded: string = ics.replace(/\r?\r\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\r\n/);
     const parsed: ParsedEvent[] = [];
     let current: ParsedEvent | null = null;
     for (const line of lines) {
@@ -172,8 +172,8 @@ export class IcsUtil {
 
   /** 解析 VCALENDAR 中的 VTODO 待办列表（待办为只读展示，不参与推送） */
   static parseTodos(ics: string): RemoteEvent[] {
-    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
-    const lines: string[] = unfolded.split(/\r?\n/);
+    const unfolded: string = ics.replace(/\r?\r\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\r\n/);
     const parsed: RemoteEvent[] = [];
     let current: RemoteEvent | null = null;
     for (const line of lines) {
@@ -423,11 +423,11 @@ export class IcsUtil {
   }
 
   static escape(s: string): string {
-    return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+    return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r\n/g, '\\r\n');
   }
 
   private static unescape(s: string): string {
-    return s.replace(/\\n/gi, '\n').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
+    return s.replace(/\\r\n/gi, '\r\n').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
   }
 
   /** 解析 iCal DURATION（ISO 8601 时长，如 PT1H30M / P2D / P1W），返回毫秒 */
@@ -479,5 +479,48 @@ export class IcsUtil {
     result2.time = t2;
     result2.allDay = false;
     return result2;
+  }
+
+  /** 标准 VTODO 字符串双向同步到 CalDAV 服务器 */
+    /** 标准 VTODO 字符串双向同步到 CalDAV 服务器 */
+  static buildTodo(e: LocalEvent): string {
+    const pad = (n: number): string => (n < 10 ? '0' : '') + n;
+    const fmtLocal = (ms: number): string => {
+      const d = new Date(ms);
+      return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) +
+        'T' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    };
+    const nowUtc: string = IcsUtil.fmtUtcNow();
+    const escapeText = (text: string): string => text
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\r?\n/g, '\\n');
+
+    let lines: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//XiaoChu//SyncCalendar//CN\r\n' +
+      'CALSCALE:GREGORIAN\r\n' +
+      'BEGIN:VTODO\r\n' +
+      'UID:' + e.uid + '\r\n' +
+      'DTSTAMP:' + nowUtc + '\r\n' +
+      'SUMMARY:' + escapeText(e.title) + '\r\n';
+
+    if (e.description !== '') {
+      lines += 'DESCRIPTION:' + escapeText(e.description) + '\r\n';
+    }
+    if (e.startTime > 0) {
+      lines += 'DUE:' + fmtLocal(e.startTime) + '\r\n';
+    }
+    if (e.completed) {
+      lines += 'STATUS:COMPLETED\r\n' +
+        'PERCENT-COMPLETE:100\r\n' +
+        'COMPLETED:' + nowUtc + '\r\n';
+    } else {
+      lines += 'STATUS:NEEDS-ACTION\r\n' +
+        'PERCENT-COMPLETE:0\r\n';
+    }
+    lines += 'END:VTODO\r\nEND:VCALENDAR\r\n';
+    return lines;
   }
 }

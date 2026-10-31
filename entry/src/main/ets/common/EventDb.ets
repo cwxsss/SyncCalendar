@@ -930,4 +930,53 @@ export class EventDb {
     }
     return moved;
   }
+
+  /**
+   * 更新待办完成状态并标记为 dirty 待推送
+   */
+  static async toggleTodoCompleted(context: common.Context, id: number, completed: boolean): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'completed': completed ? 1 : 0,
+      'dirty': 1
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  /**
+   * 全局搜索日程（按标题、地点、描述模糊匹配），排除已删除的行
+   * @param keyword 关键词
+   * @param limit 最多返回条数（默认 60）
+   */
+  static async search(context: common.Context, keyword: string, limit: number = 60): Promise<LocalEvent[]> {
+    const trimmed = keyword.trim();
+    if (trimmed === '') {
+      return [];
+    }
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('deleted', 0)
+      .and()
+      .beginWrap()
+      .like('title', '%' + trimmed + '%')
+      .or()
+      .like('location', '%' + trimmed + '%')
+      .or()
+      .like('description', '%' + trimmed + '%')
+      .endWrap()
+      .orderByDesc('start_time')
+      .limitAs(limit);
+    const rs = await store.query(predicates);
+    const list: LocalEvent[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        list.push(EventDb.fromRow(rs));
+      }
+    } finally {
+      rs.close();
+    }
+    return list;
+  }
 }

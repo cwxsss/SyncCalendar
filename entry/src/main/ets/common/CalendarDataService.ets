@@ -366,4 +366,38 @@ export class CalendarDataService {
     }
     return result;
   }
+
+  /**
+   * 模糊搜索日程（按标题、地点、描述），并补充日历本颜色与名称
+   */
+  static async searchEvents(context: common.Context, keyword: string, sources: CalSource[]): Promise<DisplayEvent[]> {
+    const rows = await EventDb.search(context, keyword);
+    const sourceMap = new Map<string, CalSource>();
+    for (const s of sources) {
+      sourceMap.set(s.calKey, s);
+    }
+    const list: DisplayEvent[] = [];
+    for (const r of rows) {
+      const src = sourceMap.get(r.calKey);
+      if (src !== undefined && !src.visible) {
+        continue;
+      }
+      const de = new DisplayEvent();
+      de.id = r.id;
+      de.calKey = r.calKey;
+      de.title = r.title === '' ? '(无标题)' : r.title;
+      de.description = r.description;
+      de.location = r.location;
+      de.startTime = r.startTime;
+      de.endTime = r.endTime;
+      de.isAllDay = r.isAllDay;
+      de.recurring = r.recurring || r.rrule !== '';
+            de.color = src !== undefined ? src.color : '#007DFF';
+      de.calName = src !== undefined ? src.name : '';
+      de.writable = src !== undefined ? src.writable : true;
+      de.isSystem = false;
+      list.push(de);
+    }
+    return list;
+  }
 }

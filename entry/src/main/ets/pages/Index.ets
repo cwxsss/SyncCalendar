@@ -24,6 +24,7 @@ import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
 import { MirrorInbound } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
+import { HolidayUtil, HolidayInfo } from '../common/HolidayUtil';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -34,6 +35,8 @@ class MonthCell {
   lunar: string = ''; // 农历（初一时显示月名）
   hasEvents: boolean = false; // 是否有日程（日期下方小红点）
   events: DisplayEvent[] = []; // 该日日程列表（全月展开视图展示）
+  holidayBadge: string = ''; // '休' | '班'
+  holidayType: string = '';  // 'holiday' | 'workday'
 }
 
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
@@ -52,6 +55,10 @@ struct Index {
   @State dataVersion: number = 0; // 数据版本戳，递增促发 ForEach 彻底重绘
   @State detailSheetMode: string = 'detail'; // 'detail' | 'scope' | 'confirm'
   @State topRangeMode: string = 'today'; // 顶部时间范围模式：'today' | '3days' | '7days' | ''（空表示选中非今天单日）
+  @State searchOpen: boolean = false; // 全局日程搜索弹窗
+  @State searchQuery: string = '';
+  @State searchResults: DisplayEvent[] = [];
+  @State searchLoading: boolean = false;
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
@@ -540,6 +547,15 @@ struct Index {
       cell.lunar = LunarUtil.lunarDayText(dateMs);
       cell.events = this.eventsOfDate(dateMs);
       cell.hasEvents = cell.events.length > 0;
+      const hInfo: HolidayInfo | null = HolidayUtil.getHoliday(dateMs);
+      if (hInfo !== null) {
+        cell.holidayBadge = hInfo.badge;
+        cell.holidayType = hInfo.type;
+        const hName: string = HolidayUtil.getName(dateMs);
+        if (hName !== '' && !cell.lunar.includes('节气')) {
+          cell.lunar = hName.length > 3 ? hName.substring(0, 2) : hName;
+        }
+      }
       cells.push(cell);
     }
     return cells;
@@ -1193,6 +1209,25 @@ struct Index {
             this.detailTag('只读')
           }
           Blank()
+          Button() {
+            Row({ space: 4 }) {
+              Text('⎘')
+                .fontSize(12)
+                .fontColor(('app.color.brand'))
+              Text('分享')
+                .fontSize(12)
+                .fontColor(('app.color.brand'))
+            }
+          }
+          .height(28)
+          .backgroundColor(Color.Transparent)
+          .border({ width: 1, color: ('app.color.brand') })
+          .borderRadius(14)
+          .padding({ left: 8, right: 8 })
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.shareEventIcs();
+          })
           Text('✕')
             .fontSize(16)
             .fontColor($r('app.color.text_secondary'))
@@ -1503,6 +1538,9 @@ struct Index {
         this.dropdownOverlay()
       }
 
+      // 全局日程搜索覆盖层
+      this.searchModal()
+
       Button() {
         Text('＋')
           .fontSize(26)
@@ -1724,6 +1762,198 @@ struct Index {
       })
   }
 
+  /** 触发全局模糊搜索 */
+  private async triggerSearch(kw: string): Promise<void> {
+    this.searchQuery = kw;
+    const trimmed = kw.trim();
+    if (trimmed === '') {
+      this.searchResults = [];
+      this.searchLoading = false;
+      return;
+    }
+    this.searchLoading = true;
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      const results = await CalendarDataService.searchEvents(ctx, trimmed, this.sources);
+      this.searchResults = results;
+    }
+    this.searchLoading = false;
+  }
+
+  /** 点击搜索结果：收起搜索面板并精准定位至该日程 */
+  private pickSearchResult(e: DisplayEvent): void {
+    this.searchOpen = false;
+    const dayStart = this.startOfDay(e.startTime);
+    this.selectedDate = dayStart;
+    const d = new Date(dayStart);
+    if (d.getFullYear() !== this.displayYear || d.getMonth() !== this.displayMonth) {
+      this.displayYear = d.getFullYear();
+      this.displayMonth = d.getMonth();
+      this.rebuildPages();
+    }
+    this.topRangeMode = (dayStart === this.startOfDay(Date.now())) ? 'today' : '';
+    this.rebuildDayTimeline();
+    this.openEvent(e);
+  }
+
+  /** 全局搜索浮层面板 */
+  @Builder
+  searchModal() {
+    if (this.searchOpen) {
+      Stack({ alignContent: Alignment.Top }) {
+        // 半透明背景遮罩
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#80000000')
+          .onClick(() => {
+            this.searchOpen = false;
+          })
+
+        // 搜索面板
+        Column({ space: 10 }) {
+          // 搜索栏
+          Row({ space: 8 }) {
+            Row({ space: 6 }) {
+              Text('🔍')
+                .fontSize(14)
+              TextInput({ text: this.searchQuery, placeholder: '搜索日程标题、地点、描述…' })
+                .layoutWeight(1)
+                .height(38)
+                .fontSize(14)
+                .backgroundColor(Color.Transparent)
+                .fontColor($r('app.color.text_primary'))
+                .placeholderColor($r('app.color.text_hint'))
+                .onChange((v: string) => {
+                  this.triggerSearch(v);
+                })
+              if (this.searchQuery !== '') {
+                Button() {
+                  Text('✕')
+                    .fontSize(12)
+                    .fontColor($r('app.color.text_hint'))
+                }
+                .width(24)
+                .height(24)
+                .backgroundColor(Color.Transparent)
+                .onClick(() => {
+                  this.triggerSearch('');
+                })
+              }
+            }
+            .layoutWeight(1)
+            .height(42)
+            .padding({ left: 10, right: 8 })
+            .borderRadius(10)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 1, color: $r('app.color.shadow_color') })
+
+            Button('取消')
+              .fontSize(14)
+              .fontColor($r('app.color.brand'))
+              .backgroundColor(Color.Transparent)
+              .onClick(() => {
+                this.searchOpen = false;
+              })
+          }
+          .width('100%')
+
+          // 结果列表
+          if (this.searchLoading) {
+            Row({ space: 8 }) {
+              LoadingProgress().width(20).height(20).color($r('app.color.brand'))
+              Text('正在搜索…').fontSize(13).fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+            .padding(20)
+          } else if (this.searchQuery.trim() !== '' && this.searchResults.length === 0) {
+            Text('未找到匹配的日程')
+              .fontSize(13)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+              .textAlign(TextAlign.Center)
+              .padding(30)
+          } else if (this.searchResults.length > 0) {
+            Text(`找到 ${this.searchResults.length} 条日程`)
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+              .padding({ left: 4 })
+
+            List({ space: 8 }) {
+              ForEach(this.searchResults, (e: DisplayEvent) => {
+                ListItem() {
+                  Row({ space: 10 }) {
+                    Column()
+                      .width(4)
+                      .height(40)
+                      .borderRadius(2)
+                      .backgroundColor(e.color)
+                    Column({ space: 3 }) {
+                      Text(e.title)
+                        .fontSize(15)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor($r('app.color.text_primary'))
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Row({ space: 8 }) {
+                        Text(this.fmtDateCn(e.startTime))
+                          .fontSize(12)
+                          .fontColor($r('app.color.text_secondary'))
+                        Text(e.isAllDay ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
+                          .fontSize(12)
+                          .fontColor($r('app.color.text_hint'))
+                      }
+                      if (e.location !== '') {
+                        Text(`📍 ${e.location}`)
+                          .fontSize(11)
+                          .fontColor($r('app.color.text_hint'))
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      }
+                    }
+                    .alignItems(HorizontalAlign.Start)
+                    .layoutWeight(1)
+
+                    if (e.calName !== '') {
+                      Text(e.calName)
+                        .fontSize(11)
+                        .fontColor(e.color)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .constraintSize({ maxWidth: '28%' })
+                    }
+                  }
+                  .alignItems(VerticalAlign.Center)
+                  .width('100%')
+                  .padding(10)
+                  .borderRadius(10)
+                  .backgroundColor($r('app.color.card_bg'))
+                  .border({ width: 1, color: $r('app.color.shadow_color') })
+                  .onClick(() => {
+                    this.pickSearchResult(e);
+                  })
+                }
+              }, (e: DisplayEvent) => `search_${e.id}_${e.startTime}`)
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .edgeEffect(EdgeEffect.Spring)
+          }
+        }
+        .width('100%')
+        .height('75%')
+        .padding({ left: 16, right: 16, top: 16, bottom: 20 })
+        .borderRadius({ bottomLeft: 16, bottomRight: 16 })
+        .backgroundColor($r('app.color.page_bg'))
+        .shadow({ radius: 16, color: '#40000000', offsetY: 6 })
+      }
+      .width('100%')
+      .height('100%')
+    }
+  }
+
   @Builder
   header() {
     Row({ space: 10 }) {
@@ -1738,6 +1968,20 @@ struct Index {
         .fontColor($r('app.color.text_primary'))
       Blank()
       this.topRangeSelector()
+      // 🔍 搜索按钮
+      Button() {
+        Text('🔍')
+          .fontSize(14)
+      }
+      .width(36)
+      .height(36)
+      .borderRadius(18)
+      .backgroundColor($r('app.color.card_bg'))
+      .border({ width: 1, color: $r('app.color.shadow_color') })
+      .margin({ right: 6 })
+      .onClick(() => {
+        this.searchOpen = true;
+      })
       // ≡ 菜单按钮
       Button() {
         Column({ space: 4 }) {
@@ -3112,6 +3356,51 @@ struct Index {
     .align(Alignment.Top)
   }
 
+  /** 点击待办：打勾完成/取消完成，本地落库并后台双向推送到 CalDAV */
+  private async toggleTodo(t: DisplayEvent): Promise<void> {
+    const nextCompleted: boolean = !t.completed;
+    t.completed = nextCompleted;
+    this.dataVersion++;
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
+      this.syncAll(false).catch((err: Error) => {
+        LogUtil.write('待办后台同步失败: ' + err.message);
+      });
+    }
+    this.getUIContext().getPromptAction().showToast({
+      message: nextCompleted ? '已标记为完成' : '已取消完成'
+    });
+  }
+
+  /** 一键复制标准 iCal (.ics) 日程到剪贴板，支持跨软件分享与导入 */
+  private async shareEventIcs(): Promise<void> {
+    if (this.detailEvent === null) {
+      return;
+    }
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      try {
+        const local = await EventDb.getById(ctx, this.detailEvent.id);
+        if (local === null) {
+          this.getUIContext().getPromptAction().showToast({ message: '日程数据未找到' });
+          return;
+        }
+        const ics = IcsUtil.buildSeries(local, []);
+        const pData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, ics);
+        const pb = pasteboard.getSystemPasteboard();
+        await pb.setData(pData);
+        this.getUIContext().getPromptAction().showToast({
+          message: '已复制标准 iCal (.ics) 日程，可直接分享'
+        });
+      } catch (err) {
+        this.getUIContext().getPromptAction().showToast({
+          message: '复制失败: ' + (err as Error).message 
+        });
+      }
+    }
+  }
+
   @Builder
   todoRow(t: DisplayEvent) {
     Row({ space: 10 }) {
@@ -3153,8 +3442,7 @@ struct Index {
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
     .onClick(() => {
-      this.getUIContext().getPromptAction()
-        .showToast({ message: '待办来自服务器，请在群晖日历等源端修改' });
+      this.toggleTodo(t);
     })
   }
 
@@ -3166,19 +3454,33 @@ struct Index {
   @Builder
   dayCell(cell: MonthCell) {
     Column({ space: 2 }) {
-      Text(String(cell.day))
-        .fontSize(this.wideLayout ? 12 : 13)
-        .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(!cell.inMonth
-          ? $r('app.color.text_hint')
-          : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
-        .width(this.wideLayout ? 22 : 26)
-        .height(this.wideLayout ? 22 : 26)
-        .textAlign(TextAlign.Center)
-        .borderRadius(this.wideLayout ? 11 : 13)
-        .backgroundColor(cell.dateMs === this.selectedDate
-          ? $r('app.color.selected_bg')
-          : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+      Stack({ alignContent: Alignment.TopEnd }) {
+        Text(String(cell.day))
+          .fontSize(this.wideLayout ? 12 : 13)
+          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(!cell.inMonth
+            ? $r('app.color.text_hint')
+            : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
+          .width(this.wideLayout ? 22 : 26)
+          .height(this.wideLayout ? 22 : 26)
+          .textAlign(TextAlign.Center)
+          .borderRadius(this.wideLayout ? 11 : 13)
+          .backgroundColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.selected_bg')
+            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+
+        if (cell.holidayBadge !== '') {
+          Text(cell.holidayBadge)
+            .fontSize(7)
+            .fontColor('#FFFFFF')
+            .backgroundColor(cell.holidayBadge === '休' ? '#FF3B30' : '#8E8E93')
+            .borderRadius(2)
+            .padding({ left: 1.5, right: 1.5 })
+            .height(10)
+            .lineHeight(10)
+            .margin({ top: -2, right: -4 })
+        }
+      }
       if (!this.wideLayout) {
         // 宽屏下月历格子变窄，省略农历腾出空间
         Text(cell.lunar)
@@ -3224,21 +3526,35 @@ struct Index {
     Column() {
       // 顶部：日期数字与农历
       Row({ space: 2 }) {
-        Text(String(cell.day))
-          .fontSize(12)
-          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
-          .fontColor(!cell.inMonth
-            ? $r('app.color.text_hint')
-            : (cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text')
-              : (cell.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))))
-          .width(20)
-          .height(20)
-          .textAlign(TextAlign.Center)
-          .borderRadius(10)
-          .backgroundColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.selected_bg')
-            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+        Stack({ alignContent: Alignment.TopEnd }) {
+          Text(String(cell.day))
+            .fontSize(12)
+            .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
+            .fontColor(!cell.inMonth
+              ? $r('app.color.text_hint')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text')
+                : (cell.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))))
+            .width(20)
+            .height(20)
+            .textAlign(TextAlign.Center)
+            .borderRadius(10)
+            .backgroundColor(cell.dateMs === this.selectedDate
+              ? $r('app.color.selected_bg')
+              : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+
+          if (cell.holidayBadge !== '') {
+            Text(cell.holidayBadge)
+              .fontSize(6)
+              .fontColor('#FFFFFF')
+              .backgroundColor(cell.holidayBadge === '休' ? '#FF3B30' : '#8E8E93')
+              .borderRadius(2)
+              .padding({ left: 1, right: 1 })
+              .height(9)
+              .lineHeight(9)
+              .margin({ top: -1, right: -2 })
+          }
+        }
 
         Text(cell.lunar)
           .fontSize(8)

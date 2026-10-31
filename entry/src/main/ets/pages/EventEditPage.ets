@@ -16,6 +16,7 @@ import { LogUtil } from '../common/LogUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
 import { PlaceSuggest, PlaceItem } from '../common/PlaceSuggest';
+import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
 
 /** 重复系列某次发生的前后边界（用于 EXDATE / UNTIL / 拆分） */
 class SeriesBounds {
@@ -36,6 +37,7 @@ class BookChoice {
 @Component
 struct EventEditPage {
   @State title: string = '';
+  @State smartInput: string = ''; // 自然语言智能解析输入
   @State location: string = '';
   /**
    * ⭐ 地点补全（鸿蒙 Map Kit / Site Kit）：
@@ -996,6 +998,27 @@ struct EventEditPage {
     }
   }
 
+  /** 智能解析用户输入的自然语言描述，秒填表单 */
+  private applySmartParse(): void {
+    if (this.smartInput.trim() === '') {
+      this.getUIContext().getPromptAction().showToast({ message: '请先粘贴或输入日程描述语句' });
+      return;
+    }
+    const res: ParsedEventInfo = SmartDateParser.parse(this.smartInput);
+    if (res.title !== '') {
+      this.title = res.title;
+      this.errorField = '';
+    }
+    if (res.location !== '') {
+      this.location = res.location;
+    }
+    this.allDay = res.isAllDay;
+    this.startMs = res.startTime;
+    this.endMs = res.endTime;
+    const msg = res.confidence ? '已自动识别时间与信息' : '已填入标题，请核对时间';
+    this.getUIContext().getPromptAction().showToast({ message: msg });
+  }
+
   private async save(): Promise<void> {
     if (this.isSaving) {
       return;
@@ -1323,6 +1346,37 @@ struct EventEditPage {
 
       Scroll(this.formScroller) {
         Column({ space: 14 }) {
+          if (!this.isExisting) {
+            Row({ space: 8 }) {
+              TextInput({ text: this.smartInput, placeholder: '⚡ 粘贴整句智能识别，如：明天下午3点开会' })
+                .layoutWeight(1)
+                .height(40)
+                .fontSize(13)
+                .backgroundColor(Color.Transparent)
+                .placeholderColor($r('app.color.text_hint'))
+                .fontColor($r('app.color.text_primary'))
+                .onChange((val: string) => {
+                  this.smartInput = val;
+                })
+              Button('智能解析')
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.button_text'))
+                .backgroundColor($r('app.color.brand'))
+                .height(32)
+                .borderRadius(8)
+                .padding({ left: 10, right: 10 })
+                .onClick(() => {
+                  this.applySmartParse();
+                })
+            }
+            .width('100%')
+            .padding({ left: 10, right: 8, top: 4, bottom: 4 })
+            .borderRadius(10)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 1, color: $r('app.color.shadow_color') })
+          }
+
           // 标题（必填）
           // ⭐ 校验失败时：输入框描红 + 紧贴下方一条红字说明。
           //    只在 errorField === 'title' 时出现，用户开始输入即自动清除。

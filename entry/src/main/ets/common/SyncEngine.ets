@@ -522,8 +522,32 @@ export class SyncEngine {
         continue;
       }
       if (e.kind === 'todo') {
-        // 待办只读：本地不会有 dirty 待办，兜底清除
-        await EventDb.clearDirty(context, e.id, e.etag);
+        let url: string;
+        if (e.remotePath.startsWith('http://') || e.remotePath.startsWith('https://')) {
+          url = e.remotePath;
+        } else if (e.remotePath.startsWith('/')) {
+          url = origin + e.remotePath;
+        } else {
+          url = e.href.endsWith('/') ? e.href + e.remotePath : (e.href + '/' + e.remotePath);
+        }
+        if (e.deleted) {
+          try {
+            await DavClient.deleteRemote(url, auth);
+            await EventDb.purge(context, e.id);
+            LogUtil.write('已从服务器删除待办: uid=' + e.uid);
+          } catch (err) {
+            LogUtil.write('删除待办失败: ' + (err as Error).message);
+          }
+        } else {
+          const ics: string = IcsUtil.buildTodo(e);
+          try {
+            const etag: string = await DavClient.putEvent(url, auth, ics);
+            await EventDb.clearDirty(context, e.id, etag);
+            LogUtil.write('待办状态已推送至服务器: uid=' + e.uid + ' completed=' + e.completed);
+          } catch (err) {
+            LogUtil.write('推送待办失败: ' + (err as Error).message);
+          }
+        }
         continue;
       }
       // ⭐ 重复系列（含覆盖实例）：按 uid 取全系列行，重建整份 .ics 后一次性 PUT。
