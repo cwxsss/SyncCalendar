@@ -51,6 +51,7 @@ struct Index {
   @State selectedDayEvents: DisplayEvent[] = []; // 当前选中日期的日程列表，保证 UI 响应式强刷新
   @State dataVersion: number = 0; // 数据版本戳，递增促发 ForEach 彻底重绘
   @State detailSheetMode: string = 'detail'; // 'detail' | 'scope' | 'confirm'
+  @State topRangeMode: string = 'today'; // 顶部时间范围模式：'today' | '3days' | '7days' | ''（空表示选中非今天单日）
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
@@ -556,19 +557,108 @@ struct Index {
     this.rebuildDayTimeline();
   }
 
+  /** 获取从今天开始未来指定天数（如3天、7天）的所有日程并按时间排序去重 */
+  private getRangeEvents(days: number): DisplayEvent[] {
+    const today = this.startOfDay(Date.now());
+    const seen = new Set<string>();
+    const result: DisplayEvent[] = [];
+    for (let i = 0; i < days; i++) {
+      const dayMs = today + i * 86400000;
+      const dayList = this.eventsByDay.get(dayMs) ?? [];
+      for (const e of dayList) {
+        const key = `${e.isSystem ? 's' : 'l'}_${e.id}_${e.startTime}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(e);
+        }
+      }
+    }
+    result.sort((a: DisplayEvent, b: DisplayEvent) => a.startTime - b.startTime);
+    return result;
+  }
+
+  /** 获取未来多天聚合标题，如：未来3天 (10月31日 - 11月2日) */
+  private getRangeTitle(days: number): string {
+    const today = this.startOfDay(Date.now());
+    const endDay = today + (days - 1) * 86400000;
+    const d1 = new Date(today);
+    const d2 = new Date(endDay);
+    const m1 = d1.getMonth() + 1;
+    const day1 = d1.getDate();
+    const m2 = d2.getMonth() + 1;
+    const day2 = d2.getDate();
+    const rangeStr = m1 === m2 ? `${m1}月${day1}日 - ${day2}日` : `${m1}月${day1}日 - ${m2}月${day2}日`;
+    return `未来${days}天 (${rangeStr})`;
+  }
+
+  /** 多天模式下日程卡片的日期前缀，如：今天、明天、后天、11月3日 */
+  private fmtEventDatePrefix(e: DisplayEvent): string {
+    const todayStart = this.startOfDay(this.nowMs);
+    const eventDayStart = this.startOfDay(e.startTime);
+    const diffDays = Math.round((eventDayStart - todayStart) / 86400000);
+    if (diffDays === 0) {
+      return '今天 ';
+    } else if (diffDays === 1) {
+      return '明天 ';
+    } else if (diffDays === 2) {
+      return '后天 ';
+    } else {
+      const d = new Date(e.startTime);
+      return `${d.getMonth() + 1}月${d.getDate()}日 `;
+    }
+  }
+
+  /** 顶部切换 今天 / 三天 / 七天 范围模式 */
+  private selectTopRange(key: string): void {
+    this.topRangeMode = key;
+    const now = new Date();
+    const needReload = (this.displayYear !== now.getFullYear() || this.displayMonth !== now.getMonth());
+    this.displayYear = now.getFullYear();
+    this.displayMonth = now.getMonth();
+    this.selectedDate = this.startOfDay(now.getTime());
+    this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
+    if (needReload) {
+      this.rebuildPages();
+      this.reloadEvents();
+    } else {
+      this.rebuildDayTimeline();
+    }
+  }
+
+  /** 点击月历/周条中的日期单元格：切换到该单日，并更新顶部选中状态 */
+  private selectDayCell(dateMs: number): void {
+    const today = this.startOfDay(Date.now());
+    this.topRangeMode = (dateMs === today) ? 'today' : '';
+    this.selectedDate = dateMs;
+    this.rebuildDayTimeline();
+  }
+
   /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
   private rebuildDayTimeline(): void {
-    const dayEvents: DisplayEvent[] = this.eventsOfDate(this.selectedDate);
+    let dayEvents: DisplayEvent[] = [];
+    if (this.topRangeMode === '3days') {
+      dayEvents = this.getRangeEvents(3);
+    } else if (this.topRangeMode === '7days') {
+      dayEvents = this.getRangeEvents(7);
+    } else {
+      dayEvents = this.eventsOfDate(this.selectedDate);
+    }
     this.selectedDayEvents = dayEvents.slice();
     this.dataVersion++;
     const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
     TimelineUtil.markNow(tl.blocks, this.nowMs);
     this.dayTimeline = tl;
-    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
+    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：模式 ${this.topRangeMode}，输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
   }
 
   /** 选中日期变化（点月格/周条）→ 重算该日时间轴 */
   private onSelectedDateChange(): void {
+    if (this.selectedDate !== this.startOfDay(Date.now())) {
+      this.topRangeMode = '';
+    } else if (this.topRangeMode === '') {
+      this.topRangeMode = 'today';
+    }
     this.rebuildDayTimeline();
   }
 
@@ -606,6 +696,7 @@ struct Index {
 
   /** 回到今天：切回本月并选中今天 */
   private goToday(): void {
+    this.topRangeMode = 'today';
     const now = new Date();
     this.displayYear = now.getFullYear();
     this.displayMonth = now.getMonth();
@@ -1605,6 +1696,35 @@ struct Index {
   }
 
   @Builder
+  topRangeSelector() {
+    Row({ space: 2 }) {
+      this.topRangeItem('today', '今天')
+      this.topRangeItem('3days', '三天')
+      this.topRangeItem('7days', '七天')
+    }
+    .padding(2)
+    .borderRadius(15)
+    .backgroundColor($r('app.color.chip_off_bg'))
+    .margin({ right: 6 })
+  }
+
+  @Builder
+  topRangeItem(key: string, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.topRangeMode === key ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.topRangeMode === key ? $r('app.color.button_text') : $r('app.color.text_secondary'))
+      .backgroundColor(this.topRangeMode === key ? $r('app.color.brand') : Color.Transparent)
+      .borderRadius(13)
+      .height(26)
+      .padding({ left: 8, right: 8 })
+      .textAlign(TextAlign.Center)
+      .onClick(() => {
+        this.selectTopRange(key);
+      })
+  }
+
+  @Builder
   header() {
     Row({ space: 10 }) {
       Image($r('app.media.app_icon'))
@@ -1617,17 +1737,7 @@ struct Index {
         .fontWeight(FontWeight.Bold)
         .fontColor($r('app.color.text_primary'))
       Blank()
-      Button('今天')
-        .fontSize(12)
-        .fontColor($r('app.color.brand'))
-        .backgroundColor(Color.Transparent)
-        .border({ width: 1, color: $r('app.color.brand'), radius: 14 })
-        .height(28)
-        .padding({ left: 12, right: 12 })
-        .margin({ right: 8 })
-        .onClick(() => {
-          this.goToday();
-        })
+      this.topRangeSelector()
       // ≡ 菜单按钮
       Button() {
         Column({ space: 4 }) {
@@ -1985,7 +2095,7 @@ struct Index {
         }
         .layoutWeight(1)
         .onClick(() => {
-          this.selectedDate = cell.dateMs;
+          this.selectDayCell(cell.dateMs);
         })
       }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
     }
@@ -2210,14 +2320,34 @@ struct Index {
   @Builder
   dayPanelHeader() {
     Row({ space: 8 }) {
-      Text(this.fmtDateCn(this.selectedDate))
-        .fontSize(13)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_secondary'))
+      if (this.topRangeMode === '3days') {
+        Text(this.getRangeTitle(3))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
+        Blank()
+        Text(`共 ${this.selectedDayEvents.length} 条`)
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      } else if (this.topRangeMode === '7days') {
+        Text(this.getRangeTitle(7))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
       Blank()
-      Text(this.fmtMonthTitle())
-        .fontSize(12)
-        .fontColor($r('app.color.text_hint'))
+        Text(`共 ${this.selectedDayEvents.length} 条`)
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      } else {
+        Text(this.fmtDateCn(this.selectedDate))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_secondary'))
+        Blank()
+        Text(this.fmtMonthTitle())
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      }
     }
     .width('100%')
     .padding({ left: 20, right: 20, top: 6 })
@@ -2530,7 +2660,7 @@ struct Index {
           .backgroundColor(cell.dateMs === this.selectedDate
             ? $r('app.color.chip_off_bg') : Color.Transparent)
           .onClick(() => {
-            this.selectedDate = cell.dateMs;
+            this.selectDayCell(cell.dateMs);
           })
         }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
       }
@@ -2557,14 +2687,14 @@ struct Index {
    *  - list 模式：按"行"平铺（eventRow），无时间刻度 → 不画红线，进行中改用文字标记。 */
   @Builder
   eventList() {
-    if (this.displayStyle === 'list') {
+    if (this.displayStyle === 'list' || this.topRangeMode === '3days' || this.topRangeMode === '7days') {
       Scroll() {
         Column({ space: 8 }) {
           ForEach(this.selectedDayEvents, (e: DisplayEvent) => {
-            this.eventRow(e, this.isEventNow(e, this.selectedDate === this.startOfDay(this.nowMs)))
+            this.eventRow(e, this.isEventNow(e, this.topRangeMode === '3days' || this.topRangeMode === '7days' || this.selectedDate === this.startOfDay(this.nowMs)))
           }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
           if (this.selectedDayEvents.length === 0 && !this.loading) {
-            Text('当天没有日程')
+            Text(this.topRangeMode === '3days' ? '未来三天没有日程' : (this.topRangeMode === '7days' ? '未来七天没有日程' : '当天没有日程'))
               .fontSize(13)
               .fontColor($r('app.color.text_hint'))
               .width('100%')
@@ -2773,8 +2903,8 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
-          Text(e.isAllDay || this.spansDays(e)
-            ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
+          Text((this.topRangeMode === '3days' || this.topRangeMode === '7days' ? this.fmtEventDatePrefix(e) : '') +
+            (e.isAllDay || this.spansDays(e) ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`))
             .fontSize(12)
             .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
           if (e.recurring) {
@@ -3074,7 +3204,7 @@ struct Index {
     .padding({ top: 4, bottom: 2 })
     .borderRadius(8)
     .onClick(() => {
-      this.selectedDate = cell.dateMs;
+      this.selectDayCell(cell.dateMs);
       if (!cell.inMonth) {
         const d = new Date(cell.dateMs);
         this.displayYear = d.getFullYear();
@@ -3146,7 +3276,7 @@ struct Index {
           .backgroundColor($r('app.color.card_bg'))
           .opacity(!cell.inMonth ? 0.6 : 1.0)
           .onClick(() => {
-            this.selectedDate = cell.dateMs;
+            this.selectDayCell(cell.dateMs);
             this.showEventDetail(e);
           })
         }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
@@ -3174,7 +3304,7 @@ struct Index {
     })
     .backgroundColor(cell.dateMs === this.selectedDate ? '#0A007DFF' : Color.Transparent)
     .onClick(() => {
-      this.selectedDate = cell.dateMs;
+      this.selectDayCell(cell.dateMs);
       if (!cell.inMonth) {
         const d = new Date(cell.dateMs);
         this.displayYear = d.getFullYear();
