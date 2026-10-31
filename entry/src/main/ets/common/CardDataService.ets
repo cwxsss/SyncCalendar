@@ -26,6 +26,20 @@ export class CardItem {
   showNowLine: boolean = false; // 红线画在该日程上方
   isNow: boolean = false;       // 该日程正在进行中
   nowLineBelow: boolean = false; // 今天所有有时间日程已结束：红线画在最后一条下方
+  location: string = '';        // 地点
+  dateTag: string = '';         // '今天' | '明天' | '后天' | '10/31' (多日显示用)
+}
+
+/** 卡片按天分组数据（3天 / 7天 多日日历卡片使用） */
+export class CardDayGroup {
+  dateKey: number = 0;          // 当天 0 点毫秒
+  dateLabel: string = '';       // '今天 · 10月30日' / '明天 · 10月31日'
+  shortDate: string = '';       // '10月30日'
+  weekday: string = '';         // '周五'
+  lunar: string = '';           // '九月三十'
+  isToday: boolean = false;
+  count: number = 0;            // 当天日程数
+  items: CardItem[] = [];       // 当天日程列表（全天在前、时间升序）
 }
 
 /** 卡片「全天/跨天」日程（**必须带 eventKey**，否则卡片侧 ForEach 的 key 会重复 → 只渲染出第一条） */
@@ -62,6 +76,11 @@ export class CardData {
   isToday: boolean = true;  // 当前显示的是否为今天（非今天不画红线）
   selectedDate: number = 0; // 当前卡片显示的那一天 0 点毫秒（点卡片进入日历时定位到这一天）
   dayCount: number = 0;     // 当前显示日的日程条数（含全天）
+  // ===== 3天 / 7天 多日卡片 =====
+  cardDays: number = 1;      // 1 | 3 | 7
+  daysRangeText: string = ''; // '10月30日 - 11月1日' / '未来3天'
+  rangeCount: number = 0;    // 当前所选天数范围内的全部日程总数
+  multiDayJson: string = '[]'; // CardDayGroup[] JSON（供多日列表渲染）
 }
 
 export class CardDataService {
@@ -83,6 +102,19 @@ export class CardDataService {
   }
   static clearDayOffset(formId: string): void {
     CardDataService.offsets.delete(formId);
+  }
+
+  // 每张卡片的日程显示天数跨度（formId → 1 | 3 | 7）
+  private static formDays: Map<string, number> = new Map<string, number>();
+
+  static setCardDays(formId: string, days: number): void {
+    CardDataService.formDays.set(formId, days);
+  }
+  static getCardDays(formId: string): number {
+    return CardDataService.formDays.get(formId) ?? 0;
+  }
+  static clearCardDays(formId: string): void {
+    CardDataService.formDays.delete(formId);
   }
 
   /** 注册卡片：内存 + 持久化 */
@@ -134,19 +166,21 @@ export class CardDataService {
       return;
     }
     // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
-    const cache: Map<number, formBindingData.FormBindingData> =
-      new Map<number, formBindingData.FormBindingData>();
+    const cache: Map<string, formBindingData.FormBindingData> =
+      new Map<string, formBindingData.FormBindingData>();
     const fallback: formBindingData.FormBindingData =
       formBindingData.createFormBindingData(await CardDataService.buildCardData(context, 0));
-    cache.set(0, fallback);
+    cache.set('0_1', fallback);
     const stale: string[] = [];
     for (const formId of CardDataService.formIds) {
       const off: number = CardDataService.getDayOffset(formId);
-      let binding: formBindingData.FormBindingData | undefined = cache.get(off);
+      const days: number = CardDataService.getCardDays(formId);
+      const cacheKey: string = `${off}_${days}`;
+      let binding: formBindingData.FormBindingData | undefined = cache.get(cacheKey);
       if (binding === undefined) {
         binding = formBindingData.createFormBindingData(
-          await CardDataService.buildCardData(context, off));
-        cache.set(off, binding);
+          await CardDataService.buildCardData(context, off, days));
+        cache.set(cacheKey, binding);
       }
       try {
         await formProvider.updateForm(formId, binding);
@@ -173,8 +207,15 @@ export class CardDataService {
   /** 构建卡片数据。
    *  @param dayOffset 相对"今天"的天数偏移（卡片翻页用：负数=过去，0=今天，正数=未来）
    *                   非今天时不输出 nowRatio（红线不显示）。 */
-  static async buildCardData(context: common.Context, dayOffset: number = 0): Promise<CardData> {
+  static async buildCardData(context: common.Context, dayOffset: number = 0, targetDays: number = 0): Promise<CardData> {
       const data = new CardData();
+      if (targetDays <= 0) {
+        targetDays = await AppSettings.getCardDaysRange(context);
+      }
+      if (targetDays !== 3 && targetDays !== 7) {
+        targetDays = 1;
+      }
+      data.cardDays = targetDays;
       try {
         LogUtil.init(context);
         const now = new Date();
@@ -305,6 +346,72 @@ export class CardDataService {
       // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
       data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;
 
+      // ===== 3天 / 7天 多日日历数据组装 =====
+      const multiDayGroups: CardDayGroup[] = [];
+      const numDays: number = targetDays > 1 ? targetDays : 1;
+      const endDayDate = new Date(baseStart + (numDays - 1) * 86400000);
+      if (numDays === 3) {
+        data.daysRangeText = dayOffset === 0
+          ? `未来3天 (${base.getMonth() + 1}/${base.getDate()}-${endDayDate.getMonth() + 1}/${endDayDate.getDate()})`
+          : `${base.getMonth() + 1}月${base.getDate()}日-${endDayDate.getMonth() + 1}月${endDayDate.getDate()}日`;
+      } else if (numDays === 7) {
+        data.daysRangeText = dayOffset === 0
+          ? `未来7天 (${base.getMonth() + 1}/${base.getDate()}-${endDayDate.getMonth() + 1}/${endDayDate.getDate()})`
+          : `${base.getMonth() + 1}月${base.getDate()}日-${endDayDate.getMonth() + 1}月${endDayDate.getDate()}日`;
+      } else {
+        data.daysRangeText = data.dateText;
+      }
+
+      for (let di = 0; di < numDays; di++) {
+        const curDayStart: number = baseStart + di * 86400000;
+        const curDayEnd: number = curDayStart + 86400000;
+        const cd: Date = new Date(curDayStart);
+        const grp = new CardDayGroup();
+        grp.dateKey = curDayStart;
+        grp.isToday = (curDayStart === todayStart);
+        grp.shortDate = `${cd.getMonth() + 1}月${cd.getDate()}日`;
+        grp.weekday = weekCn[cd.getDay()];
+        grp.lunar = LunarUtil.lunarDayText(curDayStart);
+        if (grp.isToday) {
+          grp.dateLabel = `今天 · ${grp.shortDate} ${grp.weekday}`;
+        } else if (curDayStart === todayStart + 86400000) {
+          grp.dateLabel = `明天 · ${grp.shortDate} ${grp.weekday}`;
+        } else if (curDayStart === todayStart + 2 * 86400000) {
+          grp.dateLabel = `后天 · ${grp.shortDate} ${grp.weekday}`;
+        } else {
+          grp.dateLabel = `${grp.shortDate} ${grp.weekday}`;
+        }
+
+        const dayEvs: DisplayEvent[] = events.filter((e: DisplayEvent): boolean =>
+          e.startTime < curDayEnd && e.endTime > curDayStart);
+        const dayAllDay = dayEvs.filter((e: DisplayEvent): boolean => e.isAllDay || spansDays(e));
+        const dayTimed = dayEvs.filter((e: DisplayEvent): boolean => !e.isAllDay && !spansDays(e))
+          .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+
+        for (const e of dayAllDay.concat(dayTimed)) {
+          const isDayLong: boolean = e.isAllDay || spansDays(e);
+          const ds = new Date(e.startTime);
+          const de = new Date(e.endTime);
+          const it = new CardItem();
+          it.title = e.title === '' ? '(无标题)' : e.title;
+          it.time = isDayLong ? '全天' : `${p(ds.getHours())}:${p(ds.getMinutes())}`;
+          it.endTime = isDayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
+          it.date = grp.dateLabel;
+          it.calName = e.calName;
+          it.color = e.color;
+          it.location = e.location;
+          it.startMs = e.startTime;
+          it.endMs = e.endTime;
+          it.isNow = grp.isToday && !isDayLong && e.startTime <= nowMs && nowMs < e.endTime;
+          it.dateTag = grp.isToday ? '今天' : (curDayStart === todayStart + 86400000 ? '明天' : (curDayStart === todayStart + 2 * 86400000 ? '后天' : `${cd.getMonth() + 1}/${cd.getDate()}`));
+          grp.items.push(it);
+        }
+        grp.count = grp.items.length;
+        multiDayGroups.push(grp);
+      }
+      data.multiDayJson = JSON.stringify(multiDayGroups);
+      data.rangeCount = multiDayGroups.reduce((acc: number, g: CardDayGroup): number => acc + g.count, 0);
+
       // ===== 2x4 卡片右侧：**当前时间之后最近的 2 条**日程 =====
       // 规则：只取"还没开始"的有时间日程（startTime >= now），
       //      **排除全天 / 跨天**，按开始时间升序取前 2 条。
@@ -312,7 +419,16 @@ export class CardDataService {
       const upcomingNext: DisplayEvent[] = upcoming
         .filter((e: DisplayEvent): boolean => !isDayLong(e) && e.startTime >= nowMs)
         .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
-      const ongoingPick: DisplayEvent[] = upcomingNext.slice(0, 2);
+      let ongoingPick: DisplayEvent[] = [];
+      if (targetDays > 1) {
+        const rangeEndMs: number = baseStart + numDays * 86400000;
+        const futureEvs: DisplayEvent[] = events
+          .filter((e: DisplayEvent): boolean => e.endTime >= (baseStart <= todayStart ? nowMs : baseStart) && e.startTime < rangeEndMs)
+          .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+        ongoingPick = futureEvs.slice(0, 2);
+      } else {
+        ongoingPick = upcomingNext.slice(0, 2);
+      }
       const ongoingItems: CardItem[] = [];
       for (const e of ongoingPick) {
         const dayLong: boolean = isDayLong(e);
@@ -325,6 +441,10 @@ export class CardDataService {
         oi.color = e.color;
         oi.startMs = e.startTime;
         oi.endMs = e.endTime;
+        const eDayStart: number = CardDataService.startOfDay(e.startTime);
+        oi.dateTag = eDayStart === todayStart ? '今天' : (eDayStart === todayStart + 86400000 ? '明天' : (eDayStart === todayStart + 2 * 86400000 ? '后天' : `${ds.getMonth() + 1}/${ds.getDate()}`));
+        oi.calName = e.calName;
+        oi.location = e.location;
         oi.isNow = false;
         ongoingItems.push(oi);
       }
@@ -369,13 +489,15 @@ export class CardDataService {
         li.endTime = isDayLong ? '' : `${p(de.getHours())}:${p(de.getMinutes())}`;
         li.color = e.color;
         li.calName = e.calName;
+        li.startMs = e.startTime;
+        li.endMs = e.endTime;
         li.isNow = data.isToday && !isDayLong && e.startTime <= nowMs && nowMs < e.endTime;
         dayList.push(li);
       }
       data.listJson = JSON.stringify(dayList);
       // 显示方式：与 App 内设置联动（列表模式卡片不画当前时间红线）
       data.displayStyle = await AppSettings.getDisplayStyle(context);
-      LogUtil.write(`卡片数据刷新：${items.length} 条，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，显示方式 ${data.displayStyle}`);
+      LogUtil.write(`卡片数据刷新：${items.length} 条，跨度 ${data.cardDays} 天(${data.rangeCount} 条)，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，显示方式 ${data.displayStyle}`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }

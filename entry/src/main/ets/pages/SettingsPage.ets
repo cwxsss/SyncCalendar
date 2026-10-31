@@ -45,6 +45,7 @@ struct SettingsPage {
   @State docUrl: string = '';
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   @State displayStyle: string = 'timeline'; // 日程显示方式：timeline（时间轴）| list（列表）
+  @State cardDaysRange: number = 1;         // 桌面卡片日程显示天数：1（当天）| 3（未来3天）| 7（未来7天）
   @State mirrorEnabled: boolean = false;    // 是否把选中 CalDAV 日历本镜像到系统日历（默认关）
   @State mirrorKeys: string[] = [];         // 要镜像的 DAV 日历本 **bookId**（稳定标识，不用会变的 calKey）
   @State mirrorRunning: boolean = false;    // 正在执行镜像
@@ -99,6 +100,9 @@ struct SettingsPage {
     });
     AppSettings.getDisplayStyle(ctx).then((v: string): void => {
       this.displayStyle = v;
+    });
+    AppSettings.getCardDaysRange(ctx).then((v: number): void => {
+      this.cardDaysRange = v;
     });
     this.refreshNotifyState();
     this.loadBackupSettings();
@@ -798,7 +802,8 @@ struct SettingsPage {
 
   private defaultViewLabel(): string {
     return this.defaultView === 'month' ? '月视图'
-      : (this.defaultView === 'week' ? '周视图' : '列表视图');
+      : (this.defaultView === 'month_expanded' ? '全月视图'
+      : (this.defaultView === 'week' ? '周视图' : '列表视图'));
   }
 
   private async saveDisplayStyle(style: string): Promise<void> {
@@ -817,6 +822,24 @@ struct SettingsPage {
       message: style === 'list'
         ? '已切换为列表显示（不显示当前时间红线）'
         : '已切换为时间轴显示'
+    });
+  }
+
+  private async saveCardDaysRange(days: number): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    this.cardDaysRange = days;
+    await AppSettings.setCardDaysRange(this.context, days);
+    // 同步刷新所有桌面卡片
+    try {
+      await CardDataService.pushToAllForms(this.context);
+    } catch (err) {
+      // 失败不影响设置保存
+    }
+    const label: string = days === 1 ? '当天（1天）' : (days === 3 ? '未来3天' : '未来7天');
+    this.getUIContext().getPromptAction().showToast({
+      message: `卡片显示范围已设为「${label}」`
     });
   }
 
@@ -1185,8 +1208,8 @@ struct SettingsPage {
                   }
                   Flex({ wrap: FlexWrap.Wrap }) {
                     ForEach([
-                      { v: 1, label: '同步日历·本名' },
-                      { v: 2, label: '同步日历·账号·本名' },
+                      { v: 1, label: '小褚日历·本名' },
+                      { v: 2, label: '小褚日历·账号·本名' },
                       { v: 3, label: '账号·本名' }
                     ], (opt: Record<string, string | number>): void => {
                       Text(opt.label as string)
@@ -1373,15 +1396,15 @@ struct SettingsPage {
               }
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
-              Select([{ value: '月视图' }, { value: '周视图' }, { value: '列表视图' }] as SelectOption[])
-                .selected(this.defaultView === 'month' ? 0 : (this.defaultView === 'week' ? 1 : 2))
+              Select([{ value: '月视图' }, { value: '全月视图' }, { value: '周视图' }, { value: '列表视图' }] as SelectOption[])
+                .selected(this.defaultView === 'month' ? 0 : (this.defaultView === 'month_expanded' ? 1 : (this.defaultView === 'week' ? 2 : 3)))
                 .value(this.defaultViewLabel())
                 .fontColor($r('app.color.text_primary'))
                 .font({ size: 14 })
                 .optionFont({ size: 14 })
                 .selectedOptionFont({ size: 14 })
                 .onSelect((index: number) => {
-                  const v: string = index === 0 ? 'month' : (index === 1 ? 'week' : 'agenda');
+                  const v: string = index === 0 ? 'month' : (index === 1 ? 'month_expanded' : (index === 2 ? 'week' : 'agenda'));
                   if (v !== this.defaultView) {
                     this.saveDefaultView(v);
                   }
@@ -1421,6 +1444,43 @@ struct SettingsPage {
                   const v: string = index === 1 ? 'list' : 'timeline';
                   if (v !== this.displayStyle) {
                     this.saveDisplayStyle(v);
+                  }
+                })
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 桌面卡片日程显示天数：当天（1天）/ 未来3天 / 未来7天
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('卡片显示范围')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('桌面服务卡片默认展示的日程范围，支持当天、未来3天或未来7天')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Select([{ value: '当天（1天）' }, { value: '未来3天' }, { value: '未来7天' }] as SelectOption[])
+                .selected(this.cardDaysRange === 7 ? 2 : (this.cardDaysRange === 3 ? 1 : 0))
+                .value(this.cardDaysRange === 7 ? '未来7天' : (this.cardDaysRange === 3 ? '未来3天' : '当天（1天）'))
+                .fontColor($r('app.color.text_primary'))
+                .font({ size: 14 })
+                .optionFont({ size: 14 })
+                .selectedOptionFont({ size: 14 })
+                .onSelect((index: number) => {
+                  const d: number = index === 2 ? 7 : (index === 1 ? 3 : 1);
+                  if (d !== this.cardDaysRange) {
+                    this.saveCardDaysRange(d);
                   }
                 })
             }

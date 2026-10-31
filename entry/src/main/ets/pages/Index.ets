@@ -32,12 +32,14 @@ class MonthCell {
   inMonth: boolean = false;
   isToday: boolean = false;
   lunar: string = ''; // 农历（初一时显示月名）
+  hasEvents: boolean = false; // 是否有日程（日期下方小红点）
+  events: DisplayEvent[] = []; // 该日日程列表（全月展开视图展示）
 }
 
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
-const VIEW_ORDER: string[] = ['month', 'week', 'agenda'];
+const VIEW_ORDER: string[] = ['month', 'month_expanded', 'week', 'agenda'];
 
 @Entry
 @Component
@@ -46,6 +48,10 @@ struct Index {
   @State displayYear: number = 2026;
   @State displayMonth: number = 0; // 0-11
   @Watch('onSelectedDateChange') @State selectedDate: number = 0; // 当天 0 点毫秒
+  @State selectedDayEvents: DisplayEvent[] = []; // 当前选中日期的日程列表，保证 UI 响应式强刷新
+  @State dataVersion: number = 0; // 数据版本戳，递增促发 ForEach 彻底重绘
+  @State detailSheetMode: string = 'detail'; // 'detail' | 'scope' | 'confirm'
+  @State topRangeMode: string = 'today'; // 顶部时间范围模式：'today' | '3days' | '7days' | ''（空表示选中非今天单日）
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
@@ -66,7 +72,10 @@ struct Index {
   private winSizeCallback: ((size: window.Size) => void) | null = null;
   private accounts: DavAccount[] = [];
   private sources: CalSource[] = [];
+  private eventsByDay: Map<number, DisplayEvent[]> = new Map<number, DisplayEvent[]>();
+  private isLoadingAll: boolean = false;
   private swiperController: SwiperController = new SwiperController();
+  private expandedSwiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
   private navDir: number = 1; // 视图切换方向：1 前进（向下钻取），-1 后退（向上回退）
   private autoSyncTimer: number = -1;
@@ -115,6 +124,9 @@ struct Index {
       AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
       // 合法性校验（防 int32 溢出等脏值把日历定位到 1970）
       if (openFromCard >= 946684800000 && openFromCard <= 4102444800000) {
+        const cd = new Date(openFromCard);
+        this.displayYear = cd.getFullYear();
+        this.displayMonth = cd.getMonth();
         this.selectedDate = this.startOfDay(openFromCard);
         LogUtil.write(`从卡片进入：定位到显示日 ${this.selectedDate}`);
       }
@@ -234,9 +246,36 @@ struct Index {
       AppStorage.setOrCreate<number>('widgetOpenDate', 0); // 用后即清，避免残留
       // 合法性校验（防 int32 溢出等脏值）
       if (d >= 946684800000 && d <= 4102444800000) {
-        this.selectedDate = this.startOfDay(d);
+        this.jumpToDate(d);
         LogUtil.write(`卡片切入（运行中）：定位到显示日 ${this.selectedDate}`);
       }
+    }
+  }
+
+  /**
+   * 定位到指定日期时间（毫秒时间戳）：
+   * 同步更新 selectedDate，并检查是否需要切换 displayYear / displayMonth；
+   * 若月份改变，则重新加载事件并重建日历三页，同时将 Swiper 索引归正到 1。
+   */
+  private jumpToDate(ms: number): void {
+    if (ms < 946684800000 || ms > 4102444800000) {
+      return;
+    }
+    const d = new Date(ms);
+    const targetDay = this.startOfDay(ms);
+    const targetY = d.getFullYear();
+    const targetM = d.getMonth();
+    this.selectedDate = targetDay;
+    if (targetY !== this.displayYear || targetM !== this.displayMonth) {
+      this.displayYear = targetY;
+      this.displayMonth = targetM;
+      this.rebuildPages();
+      this.reloadEvents();
+      this.swiperGuard = true;
+      this.swiperController.changeIndex(1, false);
+      this.expandedSwiperController.changeIndex(1, false);
+    } else {
+      this.rebuildDayTimeline();
     }
   }
 
@@ -384,16 +423,24 @@ struct Index {
 
   // ---------- 数据 ----------
   private async reloadAll(): Promise<void> {
-    const context = this.getUIContext().getHostContext();
-    if (context === undefined) {
+    if (this.isLoadingAll) {
       return;
     }
-    this.accounts = await AccountStore.loadAll(context);
-    this.sources = await CalendarDataService.loadSources(context);
-    // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
-    this.displayStyle = await AppSettings.getDisplayStyle(context);
-    await this.reloadEvents();
-    this.startAutoSync();
+    this.isLoadingAll = true;
+    try {
+      const context = this.getUIContext().getHostContext();
+      if (context === undefined) {
+        return;
+      }
+      this.accounts = await AccountStore.loadAll(context);
+      this.sources = await CalendarDataService.loadSources(context);
+      // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
+      this.displayStyle = await AppSettings.getDisplayStyle(context);
+      await this.reloadEvents();
+      this.startAutoSync();
+    } finally {
+      this.isLoadingAll = false;
+    }
   }
 
   /** 自动同步：每 15 秒检查一次，到达设置的间隔（AppStorage.syncIntervalMinutes）才真正同步 */
@@ -433,19 +480,45 @@ struct Index {
     }
     this.loading = true;
     this.agendaStale = true; // 数据可能变化，列表视图需要重新加载
-    const monthStart: number = new Date(this.displayYear, this.displayMonth, 1).getTime();
-    // 覆盖：上月尾 7 天 + 本月 + 下月，并确保选中日始终在区间内（跨月点选不漏数据）
-    const rangeStart: number = Math.min(monthStart - 7 * 86400000, this.selectedDate - 7 * 86400000);
-    const rangeEnd: number = Math.max(monthStart + 62 * 86400000, this.selectedDate + 8 * 86400000);
+
+    // 计算覆盖 [上月前14天, 下月后14天] 的完整时间区间，确保三页 Swiper 的所有 42 格数据完整
+    const prevMonth = this.addMonths(this.displayYear, this.displayMonth, -1);
+    const prevStart: number = new Date(prevMonth[0], prevMonth[1], 1).getTime();
+    const nextMonth = this.addMonths(this.displayYear, this.displayMonth, 1);
+    const nextEnd: number = new Date(nextMonth[0], nextMonth[1] + 1, 0, 23, 59, 59).getTime();
+
+    const rangeStart: number = Math.min(prevStart - 14 * 86400000, this.selectedDate - 14 * 86400000);
+    const rangeEnd: number = Math.max(nextEnd + 14 * 86400000, this.selectedDate + 14 * 86400000);
+
     this.events = await CalendarDataService.loadEvents(context, rangeStart, rangeEnd, this.sources);
+    this.buildEventsByDay();
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
     this.rebuildPages();
+    this.rebuildDayTimeline();
     // 当前正处于列表视图时立即重载，避免同步后列表空白
     if (this.mode === 'agenda') {
       await this.ensureAgendaData();
     }
     this.loading = false;
+  }
+
+  /** 将事件按天构建哈希索引，供 buildMonthCells $O(1)$ 快速提取 */
+  private buildEventsByDay(): void {
+    const map = new Map<number, DisplayEvent[]>();
+    for (const e of this.events) {
+      const startDay = this.startOfDay(e.startTime);
+      const endDay = this.startOfDay(e.endTime);
+      for (let t = startDay; t <= endDay; t += 86400000) {
+        const arr = map.get(t);
+        if (arr === undefined) {
+          map.set(t, [e]);
+        } else {
+          arr.push(e);
+        }
+      }
+    }
+    this.eventsByDay = map;
   }
 
   /** 构建某年某月的 42 格 */
@@ -465,6 +538,8 @@ struct Index {
       cell.inMonth = d.getMonth() === month;
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.events = this.eventsOfDate(dateMs);
+      cell.hasEvents = cell.events.length > 0;
       cells.push(cell);
     }
     return cells;
@@ -482,17 +557,108 @@ struct Index {
     this.rebuildDayTimeline();
   }
 
+  /** 获取从今天开始未来指定天数（如3天、7天）的所有日程并按时间排序去重 */
+  private getRangeEvents(days: number): DisplayEvent[] {
+    const today = this.startOfDay(Date.now());
+    const seen = new Set<string>();
+    const result: DisplayEvent[] = [];
+    for (let i = 0; i < days; i++) {
+      const dayMs = today + i * 86400000;
+      const dayList = this.eventsByDay.get(dayMs) ?? [];
+      for (const e of dayList) {
+        const key = `${e.isSystem ? 's' : 'l'}_${e.id}_${e.startTime}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(e);
+        }
+      }
+    }
+    result.sort((a: DisplayEvent, b: DisplayEvent) => a.startTime - b.startTime);
+    return result;
+  }
+
+  /** 获取未来多天聚合标题，如：未来3天 (10月31日 - 11月2日) */
+  private getRangeTitle(days: number): string {
+    const today = this.startOfDay(Date.now());
+    const endDay = today + (days - 1) * 86400000;
+    const d1 = new Date(today);
+    const d2 = new Date(endDay);
+    const m1 = d1.getMonth() + 1;
+    const day1 = d1.getDate();
+    const m2 = d2.getMonth() + 1;
+    const day2 = d2.getDate();
+    const rangeStr = m1 === m2 ? `${m1}月${day1}日 - ${day2}日` : `${m1}月${day1}日 - ${m2}月${day2}日`;
+    return `未来${days}天 (${rangeStr})`;
+  }
+
+  /** 多天模式下日程卡片的日期前缀，如：今天、明天、后天、11月3日 */
+  private fmtEventDatePrefix(e: DisplayEvent): string {
+    const todayStart = this.startOfDay(this.nowMs);
+    const eventDayStart = this.startOfDay(e.startTime);
+    const diffDays = Math.round((eventDayStart - todayStart) / 86400000);
+    if (diffDays === 0) {
+      return '今天 ';
+    } else if (diffDays === 1) {
+      return '明天 ';
+    } else if (diffDays === 2) {
+      return '后天 ';
+    } else {
+      const d = new Date(e.startTime);
+      return `${d.getMonth() + 1}月${d.getDate()}日 `;
+    }
+  }
+
+  /** 顶部切换 今天 / 三天 / 七天 范围模式 */
+  private selectTopRange(key: string): void {
+    this.topRangeMode = key;
+    const now = new Date();
+    const needReload = (this.displayYear !== now.getFullYear() || this.displayMonth !== now.getMonth());
+    this.displayYear = now.getFullYear();
+    this.displayMonth = now.getMonth();
+    this.selectedDate = this.startOfDay(now.getTime());
+    this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
+    if (needReload) {
+      this.rebuildPages();
+      this.reloadEvents();
+    } else {
+      this.rebuildDayTimeline();
+    }
+  }
+
+  /** 点击月历/周条中的日期单元格：切换到该单日，并更新顶部选中状态 */
+  private selectDayCell(dateMs: number): void {
+    const today = this.startOfDay(Date.now());
+    this.topRangeMode = (dateMs === today) ? 'today' : '';
+    this.selectedDate = dateMs;
+    this.rebuildDayTimeline();
+  }
+
   /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
   private rebuildDayTimeline(): void {
-    const dayEvents: DisplayEvent[] = this.eventsOfDate(this.selectedDate);
+    let dayEvents: DisplayEvent[] = [];
+    if (this.topRangeMode === '3days') {
+      dayEvents = this.getRangeEvents(3);
+    } else if (this.topRangeMode === '7days') {
+      dayEvents = this.getRangeEvents(7);
+    } else {
+      dayEvents = this.eventsOfDate(this.selectedDate);
+    }
+    this.selectedDayEvents = dayEvents.slice();
+    this.dataVersion++;
     const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
     TimelineUtil.markNow(tl.blocks, this.nowMs);
     this.dayTimeline = tl;
-    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
+    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：模式 ${this.topRangeMode}，输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
   }
 
   /** 选中日期变化（点月格/周条）→ 重算该日时间轴 */
   private onSelectedDateChange(): void {
+    if (this.selectedDate !== this.startOfDay(Date.now())) {
+      this.topRangeMode = '';
+    } else if (this.topRangeMode === '') {
+      this.topRangeMode = 'today';
+    }
     this.rebuildDayTimeline();
   }
 
@@ -513,8 +679,7 @@ struct Index {
   }
 
   private eventsOfDate(dateMs: number): DisplayEvent[] {
-    return this.events.filter((e: DisplayEvent): boolean =>
-      this.startOfDay(e.startTime) <= dateMs && e.endTime >= dateMs);
+    return this.eventsByDay.get(dateMs) ?? [];
   }
 
   /** 红线日程唯一 key（与时间轴色块 key 保持一致） */
@@ -531,12 +696,15 @@ struct Index {
 
   /** 回到今天：切回本月并选中今天 */
   private goToday(): void {
+    this.topRangeMode = 'today';
     const now = new Date();
     this.displayYear = now.getFullYear();
     this.displayMonth = now.getMonth();
     this.selectedDate = this.startOfDay(now.getTime());
     this.rebuildPages();
     this.reloadEvents();
+    this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
   }
 
   /** Swiper 翻页后回正到中间页并切换基准月份 */
@@ -552,9 +720,27 @@ struct Index {
     const nm = this.addMonths(this.displayYear, this.displayMonth, delta);
     this.displayYear = nm[0];
     this.displayMonth = nm[1];
-    this.reloadEvents();
+
+    // 翻月联动更新选中日：如果当前真实今天在目标月内则选中今天，否则保持选中相同日号（防超出月天数）
+    const now = new Date();
+    if (now.getFullYear() === nm[0] && now.getMonth() === nm[1]) {
+      this.selectedDate = this.startOfDay(now.getTime());
+    } else {
+      const oldD = new Date(this.selectedDate);
+      const targetDay = oldD.getDate();
+      const maxDays = new Date(nm[0], nm[1] + 1, 0).getDate();
+      const clampedDay = Math.min(targetDay, maxDays);
+      this.selectedDate = new Date(nm[0], nm[1], clampedDay).getTime();
+    }
+
+    // 先用现有内存数据同步构建新三页（此时新的 monthPages[1] 与刚刚滑到的目标页视觉完全一致）
+    this.rebuildPages();
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
+    this.expandedSwiperController.changeIndex(1, false);
+
+    // 异步拉取新边缘月份数据以刷新缓存
+    this.reloadEvents();
   }
 
   // ---------- 同步 ----------
@@ -863,6 +1049,129 @@ struct Index {
 
   @Builder
   detailSheet() {
+    Column() {
+      if (this.detailSheetMode === 'scope') {
+        this.scopeContent()
+      } else if (this.detailSheetMode === 'confirm') {
+        this.confirmDeleteContent()
+      } else {
+        this.detailMainContent()
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scopeContent() {
+    Column({ space: 10 }) {
+      Text('删除重复日程')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12, bottom: 4 })
+
+      Text('这是一个重复日程，请选择作用的范围')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ bottom: 10 })
+
+      this.scopeOptionCard('one', '仅删除这一次', '只影响所选日期的这一次，其余保持不变')
+      this.scopeOptionCard('future', '删除此次及以后', '从这一次开始到最后一次都删除')
+      this.scopeOptionCard('all', '删除全部', '整条重复日程的所有发生都删除')
+
+      Text('取消')
+        .fontSize(15)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 18, bottom: 12 })
+        .onClick(() => {
+          this.detailSheetMode = 'detail';
+        })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  scopeOptionCard(mode: string, title: string, desc: string) {
+    Column({ space: 4 }) {
+      Text(title)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(mode === 'all' ? '#E64545' : $r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      Text(desc)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .borderRadius(14)
+    .backgroundColor($r('app.color.card_bg'))
+    .onClick(() => {
+      this.executeDeleteDetail(mode);
+    })
+  }
+
+  @Builder
+  confirmDeleteContent() {
+    Column({ space: 14 }) {
+      Text('删除日程')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 16, bottom: 4 })
+
+      Text(this.detailEvent !== null && this.detailEvent.title !== ''
+        ? `确定要删除日程「${this.detailEvent.title}」吗？`
+        : '确定要删除这条日程吗？')
+        .fontSize(14)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ left: 20, right: 20, bottom: 20 })
+
+      Button('确认删除')
+        .width('100%')
+        .height(44)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#FFFFFF')
+        .backgroundColor('#E64545')
+        .borderRadius(22)
+        .onClick(() => {
+          this.executeDeleteDetail('all');
+        })
+
+      Button('取消')
+        .width('100%')
+        .height(44)
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .backgroundColor($r('app.color.card_bg'))
+        .borderRadius(22)
+        .onClick(() => {
+          this.detailSheetMode = 'detail';
+        })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  detailMainContent() {
     Column({ space: 12 }) {
       if (this.detailEvent !== null) {
         // 标题区：色点 + 标题 + 徽标紧跟标题 + 自绘关闭按钮（与标题同行）
@@ -992,34 +1301,173 @@ struct Index {
         .align(Alignment.Top)
         .layoutWeight(1)
       }
-      // 可写日程：详情底部提供"编辑"入口（系统/只读日程无此按钮）
+      // 可写日程：详情底部提供"删除"与"编辑"入口（系统/只读日程无此按钮）
       if (this.detailEvent !== null && !this.detailEvent.isSystem && this.detailEvent.writable) {
-        Button('编辑日程')
-          .width('100%')
-          .height(44)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.button_text'))
-          .backgroundColor($r('app.color.brand'))
-          .borderRadius(12)
-          .onClick(() => {
-            const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
-            // ⭐ 把"用户点的是哪一次发生"一起带过去：重复日程展开后所有次共用主事件的 id，
-            //    不带发生时刻的话，编辑页无法知道用户点的是哪一次 → "仅这一次"会算错。
-            const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
-            this.detailShow = false;
-            if (id > 0) {
-              AppStorage.setOrCreate<number>('pendingEventId', id);
-              AppStorage.setOrCreate<number>('pendingOccurrenceTs', occ);
-              router.pushUrl({ url: 'pages/EventEditPage' });
-            }
-          })
+        Row({ space: 12 }) {
+          Button('删除日程')
+            .layoutWeight(1)
+            .height(44)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#E64545')
+            .backgroundColor($r('app.color.card_bg'))
+            .borderRadius(22)
+            .onClick(() => {
+              if (this.detailEvent !== null) {
+                if (this.detailEvent.recurring) {
+                  this.detailSheetMode = 'scope';
+                } else {
+                  this.detailSheetMode = 'confirm';
+                }
+              }
+            })
+
+          Button('编辑日程')
+            .layoutWeight(1)
+            .height(44)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.button_text'))
+            .backgroundColor($r('app.color.brand'))
+            .borderRadius(22)
+            .onClick(() => {
+              const id: number = this.detailEvent !== null ? this.detailEvent.id : 0;
+              const occ: number = this.detailEvent !== null ? this.detailEvent.startTime : 0;
+              this.detailShow = false;
+              if (id > 0) {
+                AppStorage.setOrCreate<number>('pendingEventId', id);
+                AppStorage.setOrCreate<number>('pendingOccurrenceTs', occ);
+                router.pushUrl({ url: 'pages/EventEditPage' });
+              }
+            })
+        }
+        .width('100%')
+        .padding({ top: 8, bottom: 4 })
       }
     }
     .width('100%')
     .height('100%')
-    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
-    .alignItems(HorizontalAlign.Start)
+  }
+
+  private async executeDeleteDetail(scope: string): Promise<void> {
+    const target: DisplayEvent | null = this.detailEvent;
+    if (target === null) {
+      return;
+    }
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    try {
+      const cur: LocalEvent | null = await EventDb.getById(context, target.id);
+      if (cur === null) {
+        this.detailShow = false;
+        return;
+      }
+      if (!target.recurring || scope === 'all') {
+        if (target.recurring) {
+          await EventDb.markDeletedByUid(context, cur.calKey, cur.uid);
+        } else {
+          await EventDb.markDeleted(context, cur.id);
+        }
+        // 立即从当前内存列表清除该日程
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          target.recurring ? !(e.calKey === cur.calKey && e.id === cur.id) : e.id !== cur.id);
+      } else if (scope === 'one') {
+        const boundsOcc: number = target.startTime;
+        let master: LocalEvent | null = cur;
+        if (cur.rrule === '' && cur.recurrenceId > 0) {
+          master = await EventDb.getMasterByUid(context, cur.calKey, cur.uid);
+        }
+        if (master !== null) {
+          const exList: string[] = master.exdate === '' ? [] : master.exdate.split(';');
+          const occIcs: string = IcsUtil.fmtIcsTime(boundsOcc, master.isAllDay);
+          if (!exList.includes(occIcs)) {
+            exList.push(occIcs);
+          }
+          await EventDb.setExdate(context, master.id, exList.join(';'));
+          const rows: LocalEvent[] = await EventDb.queryByUid(context, cur.calKey, cur.uid);
+          for (const r of rows) {
+            if (r.rrule === '' && r.recurrenceId > 0 && Math.abs(r.recurrenceId - boundsOcc) < 12 * 3600000) {
+              await EventDb.markDeleted(context, r.id);
+            }
+          }
+        } else if (cur.rrule === '' && cur.recurrenceId > 0) {
+          await EventDb.markDeleted(context, cur.id);
+        }
+        // 立即从内存中过滤掉该次发生
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          !(e.id === target.id && e.startTime === target.startTime));
+      } else if (scope === 'future') {
+        const boundsOcc: number = target.startTime;
+        let master: LocalEvent | null = cur;
+        if (cur.rrule === '' && cur.recurrenceId > 0) {
+          master = await EventDb.getMasterByUid(context, cur.calKey, cur.uid);
+        }
+        if (master !== null) {
+          const beforeThis: number = boundsOcc - 1000;
+          const truncated: string = IcsUtil.rruleWithUntil(master.rrule, beforeThis);
+          await EventDb.setRruleForUid(context, master.calKey, master.uid, truncated);
+          await EventDb.purgeByUidFrom(context, master.calKey, master.uid, boundsOcc);
+        }
+        // 立即从当前内存过滤掉该时间及以后的发生
+        this.events = this.events.filter((e: DisplayEvent): boolean =>
+          !(e.id === target.id && e.startTime >= boundsOcc));
+      }
+
+      this.detailShow = false;
+      this.detailSheetMode = 'detail';
+      this.detailEvent = null;
+
+      // 立即刷新内存与视图
+      this.buildEventsByDay();
+      this.rebuildPages();
+      this.rebuildDayTimeline();
+
+      this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
+
+      // 1) 后台异步推送 CalDAV 服务器
+      if (cur.href !== '') {
+        const accounts: DavAccount[] = await AccountStore.loadAll(context);
+        const curNorm: string = DavClient.normalizeHref(cur.href);
+        const acc = accounts.find((a: DavAccount): boolean =>
+          a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === curNorm));
+        if (acc !== undefined) {
+          const auth: string = DavClient.authHeader(acc.username, acc.password);
+          SyncEngine.pushDirtyForAccount(context, acc, auth).catch((err: Error) => {
+            LogUtil.write(`异步推送删除失败: ${err.message}`);
+          });
+        }
+      }
+
+      // 2) 刷新通知提醒
+      try {
+        ReminderService.refreshReminders(context as common.UIAbilityContext);
+      } catch (e) {
+        // 忽略
+      }
+
+      // 3) 联动清理系统日历中的镜像事件
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`详情弹窗删除后同步清理系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {
+        // 忽略
+      }
+
+      // 4) 联动刷新桌面服务卡片
+      try {
+        CardDataService.pushToAllForms(context);
+      } catch (err) {
+        // 忽略
+      }
+    } catch (err) {
+      const ex = err as BusinessError;
+      this.getUIContext().getPromptAction().showToast({ message: `删除失败: ${ex.message}` });
+    }
   }
 
   private addEvent(): void {
@@ -1036,6 +1484,8 @@ struct Index {
         this.modeTabs()
         if (this.mode === 'month') {
           this.monthBody()
+        } else if (this.mode === 'month_expanded') {
+          this.monthExpandedBody()
         } else if (this.mode === 'week') {
           this.weekBody()
         } else if (this.mode === 'todo') {
@@ -1246,6 +1696,35 @@ struct Index {
   }
 
   @Builder
+  topRangeSelector() {
+    Row({ space: 2 }) {
+      this.topRangeItem('today', '今天')
+      this.topRangeItem('3days', '三天')
+      this.topRangeItem('7days', '七天')
+    }
+    .padding(2)
+    .borderRadius(15)
+    .backgroundColor($r('app.color.chip_off_bg'))
+    .margin({ right: 6 })
+  }
+
+  @Builder
+  topRangeItem(key: string, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.topRangeMode === key ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.topRangeMode === key ? $r('app.color.button_text') : $r('app.color.text_secondary'))
+      .backgroundColor(this.topRangeMode === key ? $r('app.color.brand') : Color.Transparent)
+      .borderRadius(13)
+      .height(26)
+      .padding({ left: 8, right: 8 })
+      .textAlign(TextAlign.Center)
+      .onClick(() => {
+        this.selectTopRange(key);
+      })
+  }
+
+  @Builder
   header() {
     Row({ space: 10 }) {
       Image($r('app.media.app_icon'))
@@ -1258,17 +1737,7 @@ struct Index {
         .fontWeight(FontWeight.Bold)
         .fontColor($r('app.color.text_primary'))
       Blank()
-      Button('今天')
-        .fontSize(12)
-        .fontColor($r('app.color.brand'))
-        .backgroundColor(Color.Transparent)
-        .border({ width: 1, color: $r('app.color.brand'), radius: 14 })
-        .height(28)
-        .padding({ left: 12, right: 12 })
-        .margin({ right: 8 })
-        .onClick(() => {
-          this.goToday();
-        })
+      this.topRangeSelector()
       // ≡ 菜单按钮
       Button() {
         Column({ space: 4 }) {
@@ -1385,10 +1854,11 @@ struct Index {
   modeTabs() {
     Row({ space: 4 }) {
       this.modeTab('month', '月')
+      this.modeTab('month_expanded', '全月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
       Blank()
-      if (this.mode === 'month') {
+      if (this.mode === 'month' || this.mode === 'month_expanded') {
         Text(this.fmtMonthTitle())
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
@@ -1613,12 +2083,21 @@ struct Index {
             .fontSize(8)
             .fontColor($r('app.color.text_hint'))
             .maxLines(1)
+          Row() {
+            if (cell.hasEvents) {
+              Circle({ width: 4, height: 4 })
+                .fill(cell.dateMs === this.selectedDate ? '#0057C2' : '#FF3B30')
+            }
+          }
+          .height(4)
+          .alignItems(VerticalAlign.Center)
+          .justifyContent(FlexAlign.Center)
         }
         .layoutWeight(1)
         .onClick(() => {
-          this.selectedDate = cell.dateMs;
+          this.selectDayCell(cell.dateMs);
         })
-      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -1645,6 +2124,8 @@ struct Index {
       cell.day = new Date(dateMs).getDate();
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.events = this.eventsOfDate(dateMs);
+      cell.hasEvents = cell.events.length > 0;
       cells.push(cell);
     }
     return cells;
@@ -1683,6 +2164,7 @@ struct Index {
       Column() {
         this.monthWeekHeader()
         this.monthSwiper()
+        this.monthExpandHandle()
         this.dayPanelHeader()
         this.eventList()
       }
@@ -1690,6 +2172,92 @@ struct Index {
       .layoutWeight(1)
       .transition(this.modeTransition())
     }
+  }
+
+  /** 月历展开把手（参考图2胶囊条，点击展开全月视图） */
+  @Builder
+  monthExpandHandle() {
+    Row() {
+      Row()
+        .width(36)
+        .height(4)
+        .borderRadius(2)
+        .backgroundColor($r('app.color.text_hint'))
+        .opacity(0.35)
+    }
+    .width('100%')
+    .height(16)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      this.switchModeAnimated('month_expanded');
+    })
+  }
+
+  /** 全月视图底部收起把手（参考图3） */
+  @Builder
+  monthCollapseHandle() {
+    Row() {
+      Column({ space: 1 }) {
+        Text('︿')
+          .fontSize(16)
+          .fontColor($r('app.color.text_hint'))
+          .opacity(0.8)
+        Text('收起')
+          .fontSize(10)
+          .fontColor($r('app.color.text_hint'))
+      }
+      .width('100%')
+      .height(36)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width('100%')
+    .onClick(() => {
+      this.switchModeAnimated('month');
+    })
+  }
+
+  /** 全月展开视图（参考图3：占满主区域，每个日期格内直接展示具体事项与+N） */
+  @Builder
+  monthExpandedBody() {
+    Column() {
+      // 星期表头
+      this.monthWeekHeader()
+
+      // 全月日历大网格 Swiper
+      Swiper(this.expandedSwiperController) {
+        ForEach(this.monthPages, (cells: MonthCell[], pIdx: number) => {
+          Column() {
+            ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
+              Row() {
+                ForEach(week, (cell: MonthCell) => {
+                  this.dayCellExpanded(cell)
+                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
+              }
+              .width('100%')
+              .layoutWeight(1)
+            }, (week: MonthCell[], idx: number) => String(idx))
+          }
+          .width('100%')
+          .height('100%')
+        }, (cells: MonthCell[], pIdx: number) => `ep_${pIdx}_${cells[0]?.dateMs ?? 0}`)
+      }
+      .index(1)
+      .loop(false)
+      .indicator(false)
+      .width('100%')
+      .layoutWeight(1)
+      .onAnimationEnd((index: number) => {
+        this.handleSwiperChange(index);
+      })
+
+      // 底部收起按钮（参考图3）
+      this.monthCollapseHandle()
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .transition(this.modeTransition())
   }
 
   /** 月视图星期表头 */
@@ -1712,13 +2280,13 @@ struct Index {
   @Builder
   monthSwiper() {
     Swiper(this.swiperController) {
-      ForEach(this.monthPages, (cells: MonthCell[]) => {
+      ForEach(this.monthPages, (cells: MonthCell[], pIdx: number) => {
         Column({ space: 2 }) {
           ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
             Row({ space: 2 }) {
               ForEach(week, (cell: MonthCell) => {
                 this.dayCell(cell)
-              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
             }
             .width('100%')
             .layoutWeight(this.wideLayout ? 1 : 0)
@@ -1727,14 +2295,14 @@ struct Index {
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
         // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
-      }, (cells: MonthCell[]) => String(cells[0].dateMs))
+      }, (cells: MonthCell[], pIdx: number) => `p_${pIdx}_${cells[0]?.dateMs ?? 0}`)
     }
     .index(1)
     .loop(false)
     .indicator(false)
     .width('100%')
     .layoutWeight(this.wideLayout ? 1 : 0)
-    .onChange((index: number) => {
+    .onAnimationEnd((index: number) => {
       this.handleSwiperChange(index);
     })
     // 上划月份网格 → 切到周视图（带动画）；水平滑动仍由 Swiper 负责翻月
@@ -1752,14 +2320,34 @@ struct Index {
   @Builder
   dayPanelHeader() {
     Row({ space: 8 }) {
-      Text(this.fmtDateCn(this.selectedDate))
-        .fontSize(13)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_secondary'))
+      if (this.topRangeMode === '3days') {
+        Text(this.getRangeTitle(3))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
+        Blank()
+        Text(`共 ${this.selectedDayEvents.length} 条`)
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      } else if (this.topRangeMode === '7days') {
+        Text(this.getRangeTitle(7))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
       Blank()
-      Text(this.fmtMonthTitle())
-        .fontSize(12)
-        .fontColor($r('app.color.text_hint'))
+        Text(`共 ${this.selectedDayEvents.length} 条`)
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      } else {
+        Text(this.fmtDateCn(this.selectedDate))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_secondary'))
+        Blank()
+        Text(this.fmtMonthTitle())
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+      }
     }
     .width('100%')
     .padding({ left: 20, right: 20, top: 6 })
@@ -2072,9 +2660,9 @@ struct Index {
           .backgroundColor(cell.dateMs === this.selectedDate
             ? $r('app.color.chip_off_bg') : Color.Transparent)
           .onClick(() => {
-            this.selectedDate = cell.dateMs;
+            this.selectDayCell(cell.dateMs);
           })
-        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
       }
       .width('100%')
       .padding({ left: 8, right: 8, top: 2, bottom: 8 })
@@ -2099,14 +2687,14 @@ struct Index {
    *  - list 模式：按"行"平铺（eventRow），无时间刻度 → 不画红线，进行中改用文字标记。 */
   @Builder
   eventList() {
-    if (this.displayStyle === 'list') {
+    if (this.displayStyle === 'list' || this.topRangeMode === '3days' || this.topRangeMode === '7days') {
       Scroll() {
         Column({ space: 8 }) {
-          ForEach(this.eventsOfDate(this.selectedDate), (e: DisplayEvent) => {
-            this.eventRow(e, this.isEventNow(e, this.selectedDate === this.startOfDay(this.nowMs)))
-          }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
-          if (this.eventsOfDate(this.selectedDate).length === 0 && !this.loading) {
-            Text('当天没有日程')
+          ForEach(this.selectedDayEvents, (e: DisplayEvent) => {
+            this.eventRow(e, this.isEventNow(e, this.topRangeMode === '3days' || this.topRangeMode === '7days' || this.selectedDate === this.startOfDay(this.nowMs)))
+          }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+          if (this.selectedDayEvents.length === 0 && !this.loading) {
+            Text(this.topRangeMode === '3days' ? '未来三天没有日程' : (this.topRangeMode === '7days' ? '未来七天没有日程' : '当天没有日程'))
               .fontSize(13)
               .fontColor($r('app.color.text_hint'))
               .width('100%')
@@ -2315,8 +2903,8 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
-          Text(e.isAllDay || this.spansDays(e)
-            ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`)
+          Text((this.topRangeMode === '3days' || this.topRangeMode === '7days' ? this.fmtEventDatePrefix(e) : '') +
+            (e.isAllDay || this.spansDays(e) ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`))
             .fontSize(12)
             .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
           if (e.recurring) {
@@ -2599,12 +3187,24 @@ struct Index {
             ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
           .maxLines(1)
       }
+      // 小红点：当天有日程时展示（参考图2）
+      Row() {
+        if (cell.hasEvents) {
+          Circle({ width: 4, height: 4 })
+            .fill(cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text')
+              : (!cell.inMonth ? '#FFA080' : '#FF3B30'))
+        }
+      }
+      .height(4)
+      .alignItems(VerticalAlign.Center)
+      .justifyContent(FlexAlign.Center)
     }
     .layoutWeight(1)
-    .padding({ top: 4, bottom: 4 })
+    .padding({ top: 4, bottom: 2 })
     .borderRadius(8)
     .onClick(() => {
-      this.selectedDate = cell.dateMs;
+      this.selectDayCell(cell.dateMs);
       if (!cell.inMonth) {
         const d = new Date(cell.dateMs);
         this.displayYear = d.getFullYear();
@@ -2612,6 +3212,108 @@ struct Index {
         this.rebuildPages();
         this.swiperGuard = true;
         this.swiperController.changeIndex(1, false);
+        this.expandedSwiperController.changeIndex(1, false);
+        this.reloadEvents();
+      }
+    })
+  }
+
+  /** 全月展开视图单个日期格子（参考图3：顶部日期与农历，下方展示最多2条日程事项及+N） */
+  @Builder
+  dayCellExpanded(cell: MonthCell) {
+    Column() {
+      // 顶部：日期数字与农历
+      Row({ space: 2 }) {
+        Text(String(cell.day))
+          .fontSize(12)
+          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(!cell.inMonth
+            ? $r('app.color.text_hint')
+            : (cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text')
+              : (cell.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))))
+          .width(20)
+          .height(20)
+          .textAlign(TextAlign.Center)
+          .borderRadius(10)
+          .backgroundColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.selected_bg')
+            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+
+        Text(cell.lunar)
+          .fontSize(8)
+          .fontColor(!cell.inMonth ? $r('app.color.text_hint') : $r('app.color.text_hint'))
+          .maxLines(1)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 2, right: 2, top: 2 })
+
+      // 日程事项列表（格内直接展示具体事项条，参考图3）
+      Column({ space: 2 }) {
+        ForEach(cell.events.slice(0, 2), (e: DisplayEvent) => {
+          Row() {
+            // 左侧色彩条
+            Row()
+              .width(2)
+              .height(13)
+              .borderRadius(1)
+              .backgroundColor(e.color && e.color.length > 0 ? e.color : '#007DFF')
+
+            Text(e.title)
+              .fontSize(9)
+              .fontColor($r('app.color.text_primary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .margin({ left: 3 })
+              .layoutWeight(1)
+          }
+          .width('100%')
+          .height(15)
+          .padding({ left: 2, right: 2 })
+          .borderRadius(2)
+          .backgroundColor($r('app.color.card_bg'))
+          .opacity(!cell.inMonth ? 0.6 : 1.0)
+          .onClick(() => {
+            this.selectDayCell(cell.dateMs);
+            this.showEventDetail(e);
+          })
+        }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+
+        // 超过2条显示 +N 标记
+        if (cell.events.length > 2) {
+          Text(`+${cell.events.length - 2}`)
+            .fontSize(9)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FF6B00')
+            .padding({ left: 4 })
+            .margin({ top: 1 })
+        }
+      }
+      .width('100%')
+      .margin({ top: 2 })
+      .alignItems(HorizontalAlign.Start)
+    }
+    .layoutWeight(1)
+    .height('100%')
+    .padding(2)
+    .border({
+      width: { right: 0.5, bottom: 0.5 },
+      color: $r('app.color.shadow_color')
+    })
+    .backgroundColor(cell.dateMs === this.selectedDate ? '#0A007DFF' : Color.Transparent)
+    .onClick(() => {
+      this.selectDayCell(cell.dateMs);
+      if (!cell.inMonth) {
+        const d = new Date(cell.dateMs);
+        this.displayYear = d.getFullYear();
+        this.displayMonth = d.getMonth();
+        this.rebuildPages();
+        this.swiperGuard = true;
+        this.swiperController.changeIndex(1, false);
+        this.expandedSwiperController.changeIndex(1, false);
+        this.reloadEvents();
       }
     })
   }

@@ -19,14 +19,15 @@ export default class EntryFormAbility extends FormExtensionAbility {
   }
 
   /** 组装更新数据并推送到指定卡片 */
-  private pushData(formId: string, dayOffset: number = 0): void {
-    CardDataService.buildCardData(this.context, dayOffset).then((data: CardData): void => {
+  private pushData(formId: string, dayOffset: number = 0, cardDays: number = 0): void {
+    const days: number = cardDays > 0 ? cardDays : CardDataService.getCardDays(formId);
+    CardDataService.buildCardData(this.context, dayOffset, days).then((data: CardData): void => {
       const binding: formBindingData.FormBindingData =
         formBindingData.createFormBindingData(data);
       formProvider.updateForm(formId, binding).catch((err: BusinessError): void => {
         LogUtil.write(`卡片 ${formId} 更新失败: ${err.message}`);
       });
-      LogUtil.write(`卡片 ${formId} 数据已推送`);
+      LogUtil.write(`卡片 ${formId} 数据已推送（跨度 ${data.cardDays} 天，偏移 ${dayOffset}）`);
     }).catch((err: BusinessError): void => {
       LogUtil.write(`卡片数据构建失败: ${err.message}`);
     });
@@ -54,24 +55,12 @@ export default class EntryFormAbility extends FormExtensionAbility {
     LogUtil.write(`系统触发卡片更新: formId=${formId}（进程 pid=${EntryFormAbility.pidOf()}）`);
     CardDataService.registerForm(this.context, formId);
     // ⭐ ① 先用**本地缓存**立刻刷新卡片（几毫秒，不依赖网络）
-    //    保留用户翻到的日期（系统定时刷新不应把用户翻走的日期拽回今天）
-    this.pushData(formId, CardDataService.getDayOffset(formId));
+    //    保留用户翻到的日期与选择的展示天数
+    this.pushData(formId, CardDataService.getDayOffset(formId), CardDataService.getCardDays(formId));
     // ⭐ ② 再借这次系统刷新顺带跑一次后台同步（见 runOnceThrottledByCard：带节流、永不抛错）
     //    同步成功后再推一次，让卡片显示刚同步回来的最新数据。
-    //
-    // ⚠️ 关键约束（依据官方 FormExtensionAbility 生命周期文档）：
-    //    "FormExtensionAbility 进程不能常驻后台，生命周期回调中无法处理长时间的任务，
-    //     生命周期调度完成后会继续存在 **10 秒**……可能需要 10 秒以上才能完成的业务逻辑，
-    //     建议拉起主应用进行处理。"
-    //   ⇒ 本处同步**可能被进程回收中断**。这是**可接受**的，因为：
-    //      · 同步是幂等的（基于 etag 增量比对 + dirty 标记），中断不会损坏任何数据；
-    //      · 中断只是"这一次没同步成"，下个 30 分钟卡片再刷新时会重试；
-    //      · 正常网络下 1~3 个账号的**增量**同步通常数秒内完成，落在 10 秒窗口内。
-    //   ⇒ 因此它是"**尽力而为地提高后台同步频率**"，与 workScheduler 2 小时兜底、
-    //     回前台/网络恢复补同步共同构成多层保障，**不承诺 30 分钟必然同步成功**。
-    //   （不采用"拉起主应用同步"是因为会每 30 分钟弹出一次界面，体验不可接受。）
     BackgroundSyncRunner.runOnceThrottledByCard(this.context).then((): void => {
-      this.pushData(formId, CardDataService.getDayOffset(formId));
+      this.pushData(formId, CardDataService.getDayOffset(formId), CardDataService.getCardDays(formId));
     }).catch((err: BusinessError): void => {
       LogUtil.write(`卡片驱动同步失败: ${err.message}`);
     });
@@ -82,23 +71,45 @@ export default class EntryFormAbility extends FormExtensionAbility {
     LogUtil.write(`移除卡片: formId=${formId}`);
     CardDataService.unregisterForm(this.context, formId);
     CardDataService.clearDayOffset(formId);
+    CardDataService.clearCardDays(formId);
   }
 
-  /** 卡片上「‹ / › / 回到今天」按钮触发：message 里带 pageAction=prev|next|today */
+  /** 卡片上按钮触发：message 里带 pageAction=prev|next|today 或 cardDays=1|3|7 */
   onFormEvent(formId: string, message: string): void {
     LogUtil.init(this.context);
     const cur: number = CardDataService.getDayOffset(formId);
+    let curDays: number = CardDataService.getCardDays(formId);
+    if (curDays <= 0) {
+      curDays = 1;
+    }
     let next: number = cur;
-    // 不用 JSON 解析：不同版本 message 的格式可能是 {params:{...}} 或直接 {...}，直接子串匹配更稳
-    if (message.indexOf('prev') >= 0) {
-      next = cur - 1;
+    let nextDays: number = curDays;
+
+    // 支持 1天 / 3天 / 7天 跨度切换及翻页
+    if (message.indexOf('days_1') >= 0 || message.indexOf('"cardDays":1') >= 0) {
+      nextDays = 1;
+      next = 0;
+      CardDataService.setCardDays(formId, 1);
+    } else if (message.indexOf('days_3') >= 0 || message.indexOf('"cardDays":3') >= 0) {
+      nextDays = 3;
+      next = 0;
+      CardDataService.setCardDays(formId, 3);
+    } else if (message.indexOf('days_7') >= 0 || message.indexOf('"cardDays":7') >= 0) {
+      nextDays = 7;
+      next = 0;
+      CardDataService.setCardDays(formId, 7);
+    } else if (message.indexOf('prev') >= 0) {
+      const step: number = (curDays === 7 ? 7 : (curDays === 3 ? 3 : 1));
+      next = cur - step;
     } else if (message.indexOf('next') >= 0) {
-      next = cur + 1;
+      const step: number = (curDays === 7 ? 7 : (curDays === 3 ? 3 : 1));
+      next = cur + step;
     } else if (message.indexOf('today') >= 0) {
       next = 0;
     }
+
     CardDataService.setDayOffset(formId, next);
-    LogUtil.write(`卡片翻页: formId=${formId} ${cur} → ${next}`);
-    this.pushData(formId, next);
+    LogUtil.write(`卡片事件: formId=${formId} off=${cur}→${next}, days=${curDays}→${nextDays}`);
+    this.pushData(formId, next, nextDays);
   }
 }

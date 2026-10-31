@@ -31,8 +31,7 @@ export class DisplayEvent {
 export class CalendarDataService {
   /** 本功能依赖的日历权限：读取本应用日历 + 读取全部日历（即"读取全部日程"） */
   private static readonly CALENDAR_PERMISSIONS: Permissions[] = [
-    'ohos.permission.READ_CALENDAR',
-    'ohos.permission.READ_WHOLE_CALENDAR'
+    'ohos.permission.READ_CALENDAR'
   ];
 
   /**
@@ -220,7 +219,7 @@ export class CalendarDataService {
         const baseColor: string = colorOf(e.calKey);
         const baseName: string = nameOf(e.calKey);
         const dur: number = Math.max(0, e.endTime - e.startTime);
-        let times: number[] = [e.startTime];
+        let times: number[] = [];
         if (e.rrule !== '') {
           const exNums: number[] = [];
           if (e.exdate !== '') {
@@ -232,10 +231,10 @@ export class CalendarDataService {
             }
           }
           const occs: number[] = RruleUtil.expand(e.rrule, e.startTime, start, end, exNums, 1500);
-          if (occs.length > 0) {
-            times = occs.filter((occ: number): boolean =>
-              !overrideKeys.includes(EventDb.overrideKey(e.calKey, e.uid, 0, occ)));
-          }
+          times = occs.filter((occ: number): boolean =>
+            !overrideKeys.includes(EventDb.overrideKey(e.calKey, e.uid, 0, occ)));
+        } else {
+          times = [e.startTime];
         }
         for (const occ of times) {
           const d = new DisplayEvent();

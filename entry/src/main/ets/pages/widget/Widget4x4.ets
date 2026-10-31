@@ -34,6 +34,18 @@ class TAllDay {
 }
 
 /** 列表模式单条日程（解析 listJson） */
+/** 多日卡片分组 */
+class CardDayGroup4 {
+  dateKey: number = 0;
+  dateLabel: string = '';
+  shortDate: string = '';
+  weekday: string = '';
+  lunar: string = '';
+  isToday: boolean = false;
+  count: number = 0;
+  items: LItem4[] = [];
+}
+
 class LItem4 {
   title: string = '';
   time: string = '';
@@ -41,6 +53,7 @@ class LItem4 {
   color: string = '#007DFF';
   calName: string = '';
   isNow: boolean = false;
+  startMs: number = 0;
 }
 
 /** 冲突组：组内**贪心分列**，lanes[i] = 第 i 列（同列互不重叠） */
@@ -92,6 +105,10 @@ struct Widget4x4Card {
   @LocalStorageProp('listJson') listJson: string = '[]';
   @LocalStorageProp('displayStyle') displayStyle: string = 'timeline';
   @LocalStorageProp('selectedDate') selectedDate: number = 0; // 卡片当前显示日 0 点毫秒
+  @LocalStorageProp('cardDays') cardDays: number = 1;         // 1 | 3 | 7
+  @LocalStorageProp('daysRangeText') daysRangeText: string = '';
+  @LocalStorageProp('rangeCount') rangeCount: number = 0;
+  @LocalStorageProp('multiDayJson') multiDayJson: string = '[]';
 
   private parseBlocks(): TBlock[] {
     try {
@@ -481,7 +498,7 @@ struct Widget4x4Card {
 
   /** 列表模式单条行：左侧日历色条（进行中变红）+ 时间 + 标题 + 所属日历本；不画红线 */
   @Builder
-  listRow(item: LItem4) {
+  listRow(item: LItem4, fallbackDateMs: number = 0) {
     Row({ space: 8 }) {
       Column()
         .width(3)
@@ -542,6 +559,14 @@ struct Widget4x4Card {
     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .borderRadius(8)
     .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
+    .onClick(() => {
+      const targetDate = item.startMs > 0 ? item.startMs : (fallbackDateMs > 0 ? fallbackDateMs : this.selectedDate);
+      postCardAction(this, {
+        action: 'router',
+        abilityName: 'EntryAbility',
+        params: { openDate: `${targetDate}` }
+      });
+    })
   }
 
   /** 列表模式主体：空态 / 可滚动的"行"列表（无时间轴、无红线） */
@@ -574,23 +599,133 @@ struct Widget4x4Card {
     }
   }
 
+  private parseMultiDays(): CardDayGroup4[] {
+    try {
+      return JSON.parse(this.multiDayJson) as CardDayGroup4[];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  private switchDays(days: number): void {
+    postCardAction(this, {
+      action: 'message',
+      params: { cardDays: days, pageAction: `days_${days}` }
+    });
+  }
+
+  @Builder
+  private rangeBtn(days: number, label: string) {
+    Button() {
+      Text(label)
+        .fontSize(10)
+        .fontWeight(this.cardDays === days ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.cardDays === days ? '#FFFFFF' : '#666666')
+    }
+    .height(20)
+    .padding({ left: 5, right: 5, top: 0, bottom: 0 })
+    .borderRadius(10)
+    .backgroundColor(this.cardDays === days ? '#007DFF' : '#00000000')
+    .onClick(() => this.switchDays(days))
+  }
+
+  @Builder
+  private rangeSwitcher() {
+    Row({ space: 1 }) {
+      this.rangeBtn(1, '1天')
+      this.rangeBtn(3, '3天')
+      this.rangeBtn(7, '7天')
+    }
+    .padding(1)
+    .borderRadius(11)
+    .backgroundColor('#F2F3F5')
+  }
+
+  @Builder
+  multiDayBody() {
+    if (this.rangeCount === 0) {
+      Column({ space: 6 }) {
+        Text('📅')
+          .fontSize(24)
+        Text(this.cardDays === 3 ? '未来3天暂无日程' : '未来7天暂无日程')
+          .fontSize(13)
+          .fontColor('#8A8A8A')
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .justifyContent(FlexAlign.Center)
+    } else {
+      List({ space: 8 }) {
+        ForEach(this.parseMultiDays(), (group: CardDayGroup4) => {
+          ListItem() {
+            Column({ space: 4 }) {
+              Row({ space: 4 }) {
+                Text(group.dateLabel)
+                  .fontSize(11)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(group.isToday ? '#007DFF' : '#1A1A1A')
+                Text(group.lunar)
+                  .fontSize(9)
+                  .fontColor('#8A8A8A')
+                Blank()
+                Text(group.count === 0 ? '无日程' : `${group.count} 条`)
+                  .fontSize(9)
+                  .fontColor(group.count === 0 ? '#B0B0B0' : '#8A8A8A')
+              }
+              .width('100%')
+              .padding({ left: 2, right: 2, top: 2, bottom: 2 })
+
+              if (group.count === 0) {
+                if (this.cardDays === 3 || group.isToday) {
+                  Row() {
+                    Text('暂无日程安排')
+                      .fontSize(10)
+                      .fontColor('#B8B8B8')
+                  }
+                  .width('100%')
+                  .padding({ left: 10, top: 2, bottom: 2 })
+                }
+              } else {
+                Column({ space: 4 }) {
+                  ForEach(group.items, (item: LItem4) => {
+                    this.listRow(item, group.dateKey)
+                  }, (item: LItem4, idx: number) => `m_${group.dateKey}_${idx}_${item.time}_${item.title}`)
+                }
+                .width('100%')
+              }
+            }
+            .width('100%')
+          }
+          .width('100%')
+        }, (group: CardDayGroup4) => `grp_${group.dateKey}_${group.count}`)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+      .cachedCount(10)
+    }
+  }
+
   build() {
     Column({ space: 6 }) {
       Row({ space: 4 }) {
         this.pageBtn('‹', 'prev')
         Column() {
-          Text(this.dateMd)
-            .fontSize(12)
+          Text(this.cardDays > 1 ? this.daysRangeText : this.dateMd)
+            .fontSize(this.cardDays > 1 ? 11 : 12)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .fontWeight(FontWeight.Bold)
             .fontColor(this.isToday ? '#007DFF' : '#1A1A1A')
             .maxLines(1)
-          Text(this.lunarText)
+          Text(this.cardDays > 1 ? (this.rangeCount === 0 ? '暂无日程' : `共 ${this.rangeCount} 条`) : this.lunarText)
             .fontSize(9)
             .fontColor('#8A8A8A')
             .maxLines(1)
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
+
+        this.rangeSwitcher()
         this.pageBtn('›', 'next')
         this.sideBtn()
       }
@@ -598,7 +733,9 @@ struct Widget4x4Card {
 
       Divider().strokeWidth(0.5).color('#E5E5E5')
 
-      if (this.displayStyle === 'list') {
+      if (this.cardDays > 1) {
+        this.multiDayBody()
+      } else if (this.displayStyle === 'list') {
         this.listBody()
       } else {
       // 卡片不支持 Scroll，但支持 List / ListItem：
@@ -704,12 +841,12 @@ struct Widget4x4Card {
           .width('100%')
           .height(W4_HOUR)
           .border({ width: { bottom: 0.5 }, color: { bottom: '#14000000' } })
-          .hitTestBehavior(HitTestMode.None) // 装饰层子节点同样不参与命中测试
+           // 装饰层子节点同样不参与命中测试
       }, (h: number) => `gd_${h}`)
     }
     .width('100%')
     .height('100%')
-    .hitTestBehavior(HitTestMode.None) // 装饰层：不参与命中测试，触碰事件穿透到下层色块
+     // 装饰层：不参与命中测试，触碰事件穿透到下层色块
   }
 
   /** 第 2 层：日程色块（冲突组分行 + 组内 lane 分列） */
@@ -843,7 +980,7 @@ struct Widget4x4Card {
   private w4NowLayer() {
     Column() {
       if (this.w4NowVisible()) {
-        Blank().height(this.w4NowPadVp()).hitTestBehavior(HitTestMode.None) // 占位块：不拦截点击
+        Blank().height(this.w4NowPadVp()) // 占位块：不拦截点击
         Row() {
           Column()
             .width(5)
@@ -857,11 +994,11 @@ struct Widget4x4Card {
             .borderRadius(1)
         }
         .width('100%')
-        .hitTestBehavior(HitTestMode.None) // 红线本身也不拦截点击，穿透到色块层
+         // 红线本身也不拦截点击，穿透到色块层
       }
     }
     .width('100%')
     .height('100%')
-    .hitTestBehavior(HitTestMode.None) // 装饰层：整层不参与命中测试，触碰事件穿透到下层色块
+     // 装饰层：整层不参与命中测试，触碰事件穿透到下层色块
   }
 }

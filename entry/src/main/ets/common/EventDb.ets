@@ -36,6 +36,7 @@ export class LocalEvent {
 /** 远端事件条目（REPORT 解析结果） */
 export class RemoteEvent {
   uid: string = '';
+  remotePath: string = '';
   etag: string = '';
   title: string = '';
   description: string = '';
@@ -432,11 +433,19 @@ export class EventDb {
     //    语义与 `existing.find(x => !x.dirty && x.uid===r.uid && x.startTime===r.startTime
     //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
     const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    const dirtyDeletedUids: Set<string> = new Set<string>();
+    const dirtyKeyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
     for (const e of existing) {
-      if (e.dirty) {
-        continue;
+      if (e.dirty && e.deleted) {
+        dirtyDeletedUids.add(e.uid);
       }
       const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
+      if (e.dirty) {
+        if (!dirtyKeyed.has(k)) {
+          dirtyKeyed.set(k, e);
+        }
+        continue;
+      }
       if (!keyed.has(k)) {
         keyed.set(k, e);
       }
@@ -453,6 +462,13 @@ export class EventDb {
         continue; // 同一资源内的重复条目 → 只保留一条
       }
       seenKeys.add(key);
+      if (dirtyDeletedUids.has(r.uid)) {
+        continue; // 本地刚被用户删除待推送，忽略远端旧版本，防止被死灰复燃
+      }
+      if (dirtyKeyed.has(key)) {
+        // 本地该事件有修改待推送，保留本地版本，忽略远端旧版本，绝不能作为新事件重复插入
+        continue;
+      }
       const found: LocalEvent | undefined = keyed.get(key);
       if (found === undefined) {
         // 新增
@@ -460,7 +476,7 @@ export class EventDb {
         e.uid = r.uid;
         e.calKey = calKey;
         e.href = href;
-        e.remotePath = encodeURIComponent(r.uid) + '.ics';
+        e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
         e.title = r.title;
         e.description = r.description;
         e.location = r.location;
@@ -489,6 +505,9 @@ export class EventDb {
         // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
         // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
         found.href = href;
+        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+          found.remotePath = r.remotePath;
+        }
         found.title = r.title;
         found.description = r.description;
         found.location = r.location;
@@ -640,9 +659,10 @@ export class EventDb {
   /**
    * ⭐ 取同一个 UID 在同一个日历本下的**全部行**（主事件 + 覆盖实例）。
    * 用于"重复日程的单次/后续/全部"编辑与删除：重建整个系列后一次性推送。
-   * 只返回未删除的行。
+   * @param includeDeleted 是否包含被标记删除（deleted=1）的行
    */
-  static async queryByUid(context: common.Context, calKey: string, uid: string): Promise<LocalEvent[]> {
+  static async queryByUid(context: common.Context, calKey: string, uid: string,
+    includeDeleted: boolean = false): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
     predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
@@ -652,7 +672,7 @@ export class EventDb {
     try {
       while (rs.goToNextRow()) {
         const e = EventDb.fromRow(rs);
-        if (!e.deleted) {
+        if (includeDeleted || !e.deleted) {
           list.push(e);
         }
       }
@@ -660,6 +680,26 @@ export class EventDb {
       rs.close();
     }
     return list;
+  }
+
+  /** 获取某 uid 的主事件（优先带 rrule 的行，无则最早一行） */
+  static async getMasterByUid(context: common.Context, calKey: string, uid: string): Promise<LocalEvent | null> {
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, calKey, uid);
+    for (const r of rows) {
+      if (r.rrule !== '') {
+        return r;
+      }
+    }
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  /** 将某个 UID 下的所有行（整系列：主事件与所有覆盖行）标记删除 */
+  static async markDeletedByUid(context: common.Context, calKey: string, uid: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = { 'deleted': 1, 'dirty': 1 };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('cal_key', calKey).and().equalTo('uid', uid);
+    await store.update(bucket, predicates);
   }
 
   /** 物理删除某 uid 在某个日历本下的全部行（"删除全部"用） */

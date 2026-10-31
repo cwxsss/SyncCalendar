@@ -234,6 +234,7 @@ export class SyncEngine {
               return [];
             }
             const resUid: string = SyncEngine.resUidFromHref(it.href);
+            const fileName: string = it.href.substring(it.href.lastIndexOf('/') + 1);
             const parsed: RemoteEvent[] = IcsUtil.parse(raw);
             const out: RemoteEvent[] = [];
             for (const r of parsed) {
@@ -243,6 +244,7 @@ export class SyncEngine {
               if (r.uid === '') {
                 r.uid = resUid;
               }
+              r.remotePath = fileName;
               r.etag = it.etag;
               out.push(r);
             }
@@ -479,6 +481,7 @@ export class SyncEngine {
   private static rowToRemote(e: LocalEvent, etag: string): RemoteEvent {
     const r = new RemoteEvent();
     r.uid = e.uid;
+    r.remotePath = e.remotePath;
     r.etag = etag;
     r.title = e.title;
     r.description = e.description;
@@ -501,14 +504,18 @@ export class SyncEngine {
    */
   static async pushDirtyForAccount(context: common.Context, acc: DavAccount, auth: string): Promise<void> {
     const dirty: LocalEvent[] = await EventDb.getDirty(context);
-    const mine: LocalEvent[] = dirty.filter((e: LocalEvent): boolean => acc.calendarHrefs.includes(e.href));
+    const normHrefs: string[] = acc.calendarHrefs.map((h: string): string => DavClient.normalizeHref(h));
+    const mine: LocalEvent[] = dirty.filter((e: LocalEvent): boolean =>
+      normHrefs.includes(DavClient.normalizeHref(e.href)));
     LogUtil.write(`推送本地修改：全部待推送 ${dirty.length} 条，属于账号 id=${acc.id} 的 ${mine.length} 条`);
     // ⭐ 同一个重复系列（uid + 日历本）在一次推送里只处理一次：整份 .ics（主事件 + 各覆盖实例）
     //    一起重建后推送，避免"先 PUT 覆盖实例、后 PUT 主事件"互相覆盖。
     const pushedSeries: Set<string> = new Set<string>();
+    const originMatch = /https?:\/\/[^/]+/i.exec(acc.serverUrl);
+    const origin: string = originMatch !== null ? originMatch[0] : '';
     for (const e of mine) {
       // 只读日历本：推送必然 403，跳过并保留 dirty（权限恢复后可再推）
-      const bookIdx: number = acc.calendarHrefs.indexOf(e.href);
+      const bookIdx: number = normHrefs.indexOf(DavClient.normalizeHref(e.href));
       if (bookIdx >= 0 && acc.calendarWritable.length > bookIdx
         && acc.calendarWritable[bookIdx] === '0') {
         LogUtil.write(`推送跳过只读日历本事件（标题已脱敏）uid=${e.uid}`);
@@ -531,10 +538,28 @@ export class SyncEngine {
       if ((e.recurring || e.rrule !== '') && pushedSeries.has(seriesKey)) {
         continue; // 该系列已在上面整体推送过
       }
-      const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
+      let url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
+      if (!url.startsWith('http') && origin !== '') {
+        url = origin + url;
+      }
       try {
         if (e.deleted) {
-          await DavClient.deleteRemote(url, auth);
+          try {
+            await DavClient.deleteRemote(url, auth);
+          } catch (delErr) {
+            if (delErr instanceof DavHttpError) {
+              const st = (delErr as DavHttpError).status;
+              if (st === 401) {
+                throw delErr as Error;
+              }
+              if (st !== 404 && st !== 410) {
+                throw delErr as Error;
+              }
+              LogUtil.write(`服务器上该单条资源已不存在(${st})，直接清理本地：uid=${e.uid}`);
+            } else {
+              throw delErr as Error;
+            }
+          }
           await EventDb.purge(context, e.id);
           LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
         } else {
@@ -566,7 +591,8 @@ export class SyncEngine {
     trigger: LocalEvent): Promise<void> {
     const calKey: string = trigger.calKey;
     const uid: string = trigger.uid;
-    const rows: LocalEvent[] = await EventDb.queryByUid(context, calKey, uid);
+    // ⭐ 查询该 UID 下的所有行（包括被标记删除的行，以便处理整系列删除）
+    const rows: LocalEvent[] = await EventDb.queryByUid(context, calKey, uid, true);
     // 主事件：优先取带 RRULE 的行；退而取最早一行
     let master: LocalEvent | null = null;
     for (const r of rows) {
@@ -583,17 +609,32 @@ export class SyncEngine {
     }
     const href: string = master.href;
     const path: string = master.remotePath !== '' ? master.remotePath : encodeURIComponent(uid) + '.ics';
-    const url: string = href.endsWith('/') ? href + path : `${href}/${path}`;
-    // 整个系列被删除（主事件行 deleted）→ DELETE 资源 + 清掉该 uid 全部本地行
-    if (master.deleted) {
+    const originMatch = /https?:\/\/[^/]+/i.exec(href.startsWith('http') ? href : acc.serverUrl);
+    const origin: string = originMatch !== null ? originMatch[0] : '';
+    let url: string = href.endsWith('/') ? href + path : `${href}/${path}`;
+    if (!url.startsWith('http') && origin !== '') {
+      url = origin + url;
+    }
+    // 整个系列被删除（主事件行 deleted 或触发者标记删除且无存活 master）→ DELETE 资源 + 清掉该 uid 全部本地行
+    if (master.deleted || trigger.deleted) {
       try {
         await DavClient.deleteRemote(url, auth);
       } catch (err) {
-        if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
-          throw err as Error;
+        if (err instanceof DavHttpError) {
+          const st = (err as DavHttpError).status;
+          if (st === 401) {
+            throw err as Error;
+          }
+          if (st === 404 || st === 410) {
+            LogUtil.write(`服务器上该重复系列已不存在(${st})，直接清理本地：uid=${uid}`);
+          } else {
+            LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+            return;
+          }
+        } else {
+          LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+          return;
         }
-        LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
-        return;
       }
       await EventDb.purgeByUid(context, calKey, uid);
       LogUtil.write(`推送删除重复系列（标题已脱敏）uid=${uid} → ${url}`);
@@ -601,7 +642,7 @@ export class SyncEngine {
     }
     const overrides: LocalEvent[] = [];
     for (const r of rows) {
-      if (r.id !== master.id && r.rrule === '' && r.recurrenceId > 0) {
+      if (r.id !== master.id && r.rrule === '' && r.recurrenceId > 0 && !r.deleted) {
         overrides.push(r);
       }
     }
@@ -609,10 +650,14 @@ export class SyncEngine {
     const ics: string = IcsUtil.buildSeries(master, overrides);
     try {
       const etag: string = await DavClient.putEvent(url, auth, ics);
-      // 清掉本系列全部行的 dirty（第一条写回 etag）
+      // 清掉本系列存活行的 dirty；将被标记删除的覆盖行从本地物理清除
       let first: boolean = true;
       for (const r of rows) {
-        await EventDb.clearDirty(context, r.id, first ? etag : '');
+        if (r.deleted) {
+          await EventDb.purge(context, r.id);
+        } else {
+          await EventDb.clearDirty(context, r.id, first ? etag : '');
+        }
         first = false;
       }
       LogUtil.write(`推送重复系列（标题已脱敏）uid=${uid} → ${url}（${ics.length} 字节，覆盖实例=${overrides.length}）`);

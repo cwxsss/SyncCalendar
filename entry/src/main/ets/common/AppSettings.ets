@@ -30,6 +30,7 @@ export class AppSettings {
   private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
   private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
+  private static readonly KEY_CARD_DAYS_RANGE: string = 'card_days_range'; // 桌面卡片日程显示天数跨度：1 | 3 | 7
   private static readonly KEY_MIRROR_ENABLED: string = 'mirror_enabled';   // 是否把选中 CalDAV 日历本镜像到系统日历（默认关）
   private static readonly KEY_MIRROR_KEYS: string = 'mirror_cal_keys';     // 要镜像的 DAV 日历本 calKey 列表
   private static readonly KEY_MIRROR_BOOK_IDS: string = 'mirror_book_ids'; // ⭐ 要镜像的日历本**稳定标识** bookId（由服务器 href 派生，不随序号变）
@@ -119,13 +120,13 @@ export class AppSettings {
     }
   }
 
-  /** 打开 App 后默认展示的视图：'month' | 'week' | 'agenda'（默认 month） */
+  /** 打开 App 后默认展示的视图：'month' | 'month_expanded' | 'week' | 'agenda'（默认 month） */
   static async getDefaultView(context: common.Context): Promise<string> {
     try {
       const store: preferences.Preferences =
         await preferences.getPreferences(context, AppSettings.STORE);
       const v: string = await store.get(AppSettings.KEY_DEFAULT_VIEW, 'month') as string;
-      return (v === 'week' || v === 'agenda') ? v : 'month';
+      return (v === 'week' || v === 'agenda' || v === 'month_expanded') ? v : 'month';
     } catch (err) {
       return 'month';
     }
@@ -170,6 +171,33 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存日程显示方式失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 桌面卡片日程显示天数跨度：1（当天） | 3（未来3天） | 7（未来7天）。默认 1。
+   */
+  static async getCardDaysRange(context: common.Context): Promise<number> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const v: number = await store.get(AppSettings.KEY_CARD_DAYS_RANGE, 1) as number;
+      return (v === 3 || v === 7) ? v : 1;
+    } catch (err) {
+      return 1;
+    }
+  }
+
+  static async setCardDaysRange(context: common.Context, days: number): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      const val: number = (days === 3 || days === 7) ? days : 1;
+      await store.put(AppSettings.KEY_CARD_DAYS_RANGE, val);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存卡片显示天数跨度失败: ${e.message}`);
     }
   }
 
