@@ -180,3 +180,4 @@ export class HolidayUtil {
     return h !== null ? h.name : '';
   }
 }
+
