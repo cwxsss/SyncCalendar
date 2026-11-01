@@ -163,7 +163,14 @@ export class IcsUtil {
     if (propPart.toUpperCase().includes('VALUE=DATE-TIME')) {
       return 0;
     }
+    const valUp: string = value.trim().toUpperCase();
+    if (valUp === 'PT0S' || valUp === '-PT0M' || valUp === 'PT0M' || valUp === '-PT0S') {
+      return -1; // 到期时
+    }
     const dur: number = IcsUtil.parseDurationMs(value);
+    if (dur === 0) {
+      return -1; // 到期时
+    }
     if (dur < 0) {
       return Math.min(1440, Math.round(-dur / 60000));
     }
@@ -210,6 +217,7 @@ export class IcsUtil {
         current.location = IcsUtil.unescape(value);
       } else if (propName === 'RRULE') {
         current.recurring = true;
+        current.rrule = value;
       } else if (propName === 'DUE' || propName === 'DTSTART') {
         const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
         const t = IcsUtil.parseTime(value, isDateOnly);
@@ -398,17 +406,19 @@ export class IcsUtil {
   private static valarms(minutes: number[]): string {
     let out: string = '';
     for (const m of minutes) {
-      if (m > 0) {
+      if (m > 0 || m === -1) {
         out += IcsUtil.valarm(m);
       }
     }
     return out;
   }
 
-  /** 由提前分钟数生成 VALARM（TRIGGER 负时长 = 提前触发） */
+  /** 由提前分钟数生成 VALARM（TRIGGER 负时长 = 提前触发，-1/0 = 到期时） */
   private static valarm(minutes: number): string {
     let trigger: string;
-    if (minutes >= 1440 && minutes % 1440 === 0) {
+    if (minutes === -1 || minutes === 0) {
+      trigger = 'PT0S';
+    } else if (minutes >= 1440 && minutes % 1440 === 0) {
       trigger = `-P${minutes / 1440}D`;
     } else if (minutes >= 60 && minutes % 60 === 0) {
       trigger = `-PT${minutes / 60}H`;
@@ -519,6 +529,12 @@ export class IcsUtil {
     } else {
       lines += 'STATUS:NEEDS-ACTION\r\n' +
         'PERCENT-COMPLETE:0\r\n';
+    }
+    if (e.rrule !== '') {
+      lines += 'RRULE:' + e.rrule + '\r\n';
+    }
+    if (e.reminders && e.reminders.length > 0) {
+      lines += IcsUtil.valarms(e.reminders);
     }
     lines += 'END:VTODO\r\nEND:VCALENDAR\r\n';
     return lines;

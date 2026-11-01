@@ -3227,6 +3227,14 @@ struct Index {
             Text('待办 · ' + (e.isAllDay ? '全天截止' : (e.startTime > 0 ? `截止 ${this.fmtTime(e.startTime)}` : '无截止时间')))
               .fontSize(12)
               .fontColor($r('app.color.text_secondary'))
+            if (e.rrule !== '' || e.recurring) {
+              Text(`↻ ${this.fmtTodoRepeat(e.rrule)}`)
+                .fontSize(10)
+                .fontColor($r('app.color.text_hint'))
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .borderRadius(4)
+                .backgroundColor($r('app.color.chip_off_bg'))
+            }
           } else {
             Text((this.topRangeMode === '3days' || this.topRangeMode === '7days' ? this.fmtEventDatePrefix(e) : '') +
               (e.isAllDay || this.spansDays(e) ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`))
@@ -3583,8 +3591,55 @@ struct Index {
 
   /** 点击待办：打勾完成/取消完成，0ms 瞬间响应渲染，本地落库并后台双向推送到 CalDAV */
   private async toggleTodo(t: DisplayEvent): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    // 判断是否为重复待办从未完成勾选为完成
+    if (!t.completed && (t.rrule !== '' || t.recurring)) {
+      const nextOcc = RruleUtil.nextOccurrence(t.rrule, t.startTime > 0 ? t.startTime : Date.now());
+      if (nextOcc > 0) {
+        // 重复待办自动推进到下一次发生时刻
+        this.todos = this.todos.map((item: DisplayEvent): DisplayEvent => {
+          if (item.id === t.id) {
+            const copy = new DisplayEvent();
+            copy.id = item.id;
+            copy.isSystem = item.isSystem;
+            copy.title = item.title;
+            copy.description = item.description;
+            copy.location = item.location;
+            copy.startTime = nextOcc;
+            copy.endTime = nextOcc;
+            copy.isAllDay = item.isAllDay;
+            copy.calKey = item.calKey;
+            copy.calName = item.calName;
+            copy.color = item.color;
+            copy.completed = false;
+            copy.recurring = item.recurring;
+            copy.writable = item.writable;
+            copy.kind = item.kind;
+            copy.rrule = item.rrule;
+            return copy;
+          }
+          return item;
+        });
+        this.buildEventsByDay();
+        this.dataVersion++;
+
+        const nextDateStr: string = this.fmtDateCn(nextOcc);
+        this.getUIContext().getPromptAction().showToast({
+          message: `已完成本次，下期截止：${nextDateStr}`
+        });
+
+        if (ctx !== undefined) {
+          await EventDb.advanceTodo(ctx, t.id, nextOcc);
+          this.syncAll(false).catch((err: Error) => {
+            LogUtil.write('待办后台同步失败: ' + err.message);
+          });
+        }
+        return;
+      }
+    }
+
+    // 常规待办完成 / 取消完成 或重复待办最后一期完成
     const nextCompleted: boolean = !t.completed;
-    // 立即不可变替换 todos 数组，0ms 瞬间局部渲染触发 ArkUI 状态更新！
     this.todos = this.todos.map((item: DisplayEvent): DisplayEvent => {
       if (item.id === t.id) {
         const copy = new DisplayEvent();
@@ -3603,25 +3658,47 @@ struct Index {
         copy.recurring = item.recurring;
         copy.writable = item.writable;
         copy.kind = item.kind;
+        copy.rrule = item.rrule;
         return copy;
       }
       return item;
     });
+    this.buildEventsByDay();
     this.dataVersion++;
 
-    // 立即弹 Toast 反馈
     this.getUIContext().getPromptAction().showToast({
       message: nextCompleted ? '已标记为完成' : '已取消完成'
     });
 
-    // 异步更新数据库与后台同步
-    const ctx = this.getUIContext().getHostContext();
     if (ctx !== undefined) {
       await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
       this.syncAll(false).catch((err: Error) => {
         LogUtil.write('待办后台同步失败: ' + err.message);
       });
     }
+  }
+
+  private fmtTodoRepeat(rrule: string): string {
+    if (rrule === '') {
+      return '重复';
+    }
+    const u = rrule.toUpperCase();
+    if (u.includes('BYDAY=MO,TU,WE,TH,FR')) {
+      return '工作日';
+    }
+    if (u.includes('FREQ=DAILY')) {
+      return '每天';
+    }
+    if (u.includes('FREQ=WEEKLY')) {
+      return '每周';
+    }
+    if (u.includes('FREQ=MONTHLY')) {
+      return '每月';
+    }
+    if (u.includes('FREQ=YEARLY')) {
+      return '每年';
+    }
+    return '重复';
   }
 
   
@@ -3714,9 +3791,19 @@ struct Index {
           .decoration({ type: t.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间')
-          .fontSize(12)
-          .fontColor($r('app.color.text_secondary'))
+        Row({ space: 6 }) {
+          Text(t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间')
+            .fontSize(12)
+            .fontColor($r('app.color.text_secondary'))
+          if (t.rrule !== '' || t.recurring) {
+            Text(`↻ ${this.fmtTodoRepeat(t.rrule)}`)
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .borderRadius(4)
+              .backgroundColor($r('app.color.chip_off_bg'))
+          }
+        }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)

@@ -26,6 +26,7 @@ export class DisplayEvent {
   completed: boolean = false; // 仅待办使用
   kind: string = 'event';     // 'event' | 'todo'
   recurring: boolean = false; // 是否为重复日程展开出的发生
+  rrule: string = '';         // 原始重复规则（待办/日程）
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
@@ -392,6 +393,8 @@ export class CalendarDataService {
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
         d.kind = 'todo';
+        d.rrule = e.rrule;
+        d.recurring = e.rrule !== '';
         result.push(d);
       }
     } catch (err) {

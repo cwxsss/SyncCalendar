@@ -250,4 +250,25 @@ export class RruleUtil {
     return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]),
       Number(m[4]), Number(m[5]), Number(m[6])).getTime();
   }
+
+
+  /**
+   * 计算指定规则在基准时间之后的下一次发生时刻（毫秒）。
+   * @param rrule 原始 RRULE 字符串
+   * @param currentMs 当前截止时间或发生时间（毫秒）
+   * @returns 下一次发生时刻毫秒戳；若重复已终止或规则无效则返回 0
+   */
+  static nextOccurrence(rrule: string, currentMs: number): number {
+    if (rrule.trim() === '' || currentMs <= 0) {
+      return 0;
+    }
+    const winEnd = currentMs + 730 * DAY_MS; // 往后寻找两年区间
+    const occs = RruleUtil.expand(rrule, currentMs, currentMs, winEnd, [], 20);
+    for (const occ of occs) {
+      if (occ > currentMs) {
+        return occ;
+      }
+    }
+    return 0;
+  }
 }

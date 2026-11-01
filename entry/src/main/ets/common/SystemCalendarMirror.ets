@@ -1243,8 +1243,9 @@ export class SystemCalendarMirror {
     const base: number = SystemCalendarMirror.reminderBaseMs(startTs, isAllDay);
     const kept: number[] = [];
     for (const r of reminders) {
-      if (r > 0 && base - r * 60000 > now) {
-        kept.push(r);
+      const m: number = (r === -1 ? 0 : r);
+      if ((r > 0 || r === -1) && base - m * 60000 > now) {
+        kept.push(m);
       }
     }
     return kept;

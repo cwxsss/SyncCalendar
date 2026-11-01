@@ -154,7 +154,7 @@ export class EventDb {
   static normalizeReminders(list: number[]): number[] {
     const set = new Set<number>();
     for (const n of list) {
-      if (n > 0) {
+      if (n > 0 || n === -1) {
         set.add(n);
       }
     }
@@ -206,8 +206,8 @@ export class EventDb {
     const remStr: string = rs.getString(rs.getColumnIndex('reminders'));
     if (remStr !== '') {
       e.reminders = remStr.split(',').map((s: string): number => Number(s))
-        .filter((n: number): boolean => !Number.isNaN(n) && n > 0);
-    } else if (e.reminder > 0) {
+        .filter((n: number): boolean => !Number.isNaN(n) && (n > 0 || n === -1));
+    } else if (e.reminder > 0 || e.reminder === -1) {
       e.reminders = [e.reminder];
     }
     return e;
@@ -938,6 +938,22 @@ export class EventDb {
     const store = await EventDb.getDb(context);
     const bucket: relationalStore.ValuesBucket = {
       'completed': completed ? 1 : 0,
+      'dirty': 1
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  /**
+   * 重复待办完成时：将截止时间推进到下一次发生时刻，重置为未完成并标记 dirty 待推送
+   */
+  static async advanceTodo(context: common.Context, id: number, nextDueMs: number): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'start_time': nextDueMs,
+      'end_time': nextDueMs,
+      'completed': 0,
       'dirty': 1
     };
     const predicates = new relationalStore.RdbPredicates('events');

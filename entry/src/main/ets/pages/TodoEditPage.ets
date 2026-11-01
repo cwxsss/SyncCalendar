@@ -32,6 +32,8 @@ struct TodoEditPage {
   @State dueHour: number = 18;
   @State dueMinute: number = 0;
   @State reminderList: number[] = []; // 提醒提前分钟数：空=不提醒，-1=到期时，5/15/30/60/1440
+  @State repeatMode: string = 'none'; // none | daily | workday | weekly | monthly | yearly | custom
+  @State rrule: string = '';
   @State books: TodoBookChoice[] = [];
   @State chosenKey: string = '';
   @State isSaving: boolean = false;
@@ -73,6 +75,8 @@ struct TodoEditPage {
         }
 
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders : (loaded.reminder !== 0 ? [loaded.reminder] : []);
+        this.rrule = loaded.rrule;
+        this.repeatMode = this.modeFromRrule(loaded.rrule);
       }
     }
   }
@@ -243,6 +247,9 @@ struct TodoEditPage {
         e.isAllDay = isAllDay;
         e.calKey = targetKey;
         e.href = targetHref;
+        const effectiveRrule: string = this.modeToRrule(this.repeatMode);
+        e.rrule = effectiveRrule;
+        e.recurring = effectiveRrule !== '';
         e.reminders = this.reminderList;
         e.reminder = this.reminderList.length > 0 ? this.reminderList[0] : 0;
         e.dirty = true;
@@ -263,6 +270,9 @@ struct TodoEditPage {
         e.kind = 'todo';
         e.completed = false;
         e.dirty = true;
+        const effectiveRrule: string = this.modeToRrule(this.repeatMode);
+        e.rrule = effectiveRrule;
+        e.recurring = effectiveRrule !== '';
         e.reminders = this.reminderList;
         e.reminder = this.reminderList.length > 0 ? this.reminderList[0] : 0;
         await EventDb.insertLocal(ctx, e);
@@ -605,6 +615,39 @@ struct TodoEditPage {
           .backgroundColor($r('app.color.card_bg'))
           .border({ width: 1, color: $r('app.color.shadow_color') })
 
+          // 重复功能卡片
+          Column({ space: 10 }) {
+            Row() {
+              Text('重复')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_primary'))
+              Blank()
+              Text(this.repeatLabel(this.repeatMode))
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+            }
+            .width('100%')
+
+            Flex({ wrap: FlexWrap.Wrap, space: { main: { value: 8, unit: 1 }, cross: { value: 8, unit: 1 } } }) {
+              this.repeatChip('none', '不重复')
+              this.repeatChip('daily', '每天')
+              this.repeatChip('workday', '工作日')
+              this.repeatChip('weekly', '每周')
+              this.repeatChip('monthly', '每月')
+              this.repeatChip('yearly', '每年')
+              if (this.repeatMode === 'custom') {
+                this.repeatChip('custom', '自定义')
+              }
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
           // 所属日历本卡片
           if (this.books.length > 0) {
             Column({ space: 10 }) {
@@ -743,4 +786,78 @@ struct TodoEditPage {
     const found = this.books.find(b => b.calKey === this.chosenKey);
     return found !== undefined ? found.color : '#007DFF';
   }
+
+  private modeFromRrule(rrule: string): string {
+    if (rrule === '') {
+      return 'none';
+    }
+    const u = rrule.toUpperCase();
+    if (u.includes('BYDAY=MO,TU,WE,TH,FR')) {
+      return 'workday';
+    }
+    if (u.includes('FREQ=DAILY')) {
+      return 'daily';
+    }
+    if (u.includes('FREQ=WEEKLY')) {
+      return 'weekly';
+    }
+    if (u.includes('FREQ=MONTHLY')) {
+      return 'monthly';
+    }
+    if (u.includes('FREQ=YEARLY')) {
+      return 'yearly';
+    }
+    return 'custom';
+  }
+
+  private modeToRrule(mode: string): string {
+    if (mode === 'none') {
+      return '';
+    }
+    if (mode === 'daily') {
+      return 'FREQ=DAILY;INTERVAL=1';
+    }
+    if (mode === 'workday') {
+      return 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR';
+    }
+    if (mode === 'weekly') {
+      return 'FREQ=WEEKLY;INTERVAL=1';
+    }
+    if (mode === 'monthly') {
+      return 'FREQ=MONTHLY;INTERVAL=1';
+    }
+    if (mode === 'yearly') {
+      return 'FREQ=YEARLY;INTERVAL=1';
+    }
+    return this.rrule;
+  }
+
+  private repeatLabel(mode: string): string {
+    if (mode === 'none') return '不重复';
+    if (mode === 'daily') return '每天重复';
+    if (mode === 'workday') return '工作日重复';
+    if (mode === 'weekly') return '每周重复';
+    if (mode === 'monthly') return '每月重复';
+    if (mode === 'yearly') return '每年重复';
+    return '自定义重复';
+  }
+
+  @Builder
+  repeatChip(mode: string, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.repeatMode === mode ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.repeatMode === mode ? $r('app.color.button_text') : $r('app.color.text_primary'))
+      .backgroundColor(this.repeatMode === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+      .borderRadius(14)
+      .height(28)
+      .padding({ left: 10, right: 10 })
+      .onClick(() => {
+        this.repeatMode = mode;
+        if (mode !== 'none' && !this.hasDueDate) {
+          this.hasDueDate = true;
+        }
+      })
+  }
+
 }

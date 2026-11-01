@@ -182,12 +182,13 @@ export class ReminderService {
         }
         // 多提醒：每个提前量各发一条（含旧单提醒数据回退）
         const rems: number[] = e.reminders.length > 0 ? e.reminders
-          : (e.reminder > 0 ? [e.reminder] : []);
+          : (e.reminder > 0 || e.reminder === -1 ? [e.reminder] : []);
         for (const rem of rems) {
           if (published >= ReminderService.MAX_REMINDERS) {
             break;
           }
-          const remindAt: number = e.startTime - rem * 60000;
+          const remMin: number = (rem === -1 ? 0 : rem);
+          const remindAt: number = e.startTime - remMin * 60000;
           if (remindAt <= now) {
             continue; // 提醒时间已过
           }
@@ -204,8 +205,10 @@ export class ReminderService {
               second: 0
             },
             title: '日程提醒',
-            content: `「${calName}」中的「${e.title}」将在 ${rem} 分钟后开始`,
-            notificationId: (e.id * 10 + rem) % 100000,
+            content: (rem === -1 || rem === 0)
+              ? `「${calName}」中的「${e.title}」现在开始`
+              : `「${calName}」中的「${e.title}」将在 ${rem} 分钟后开始`,
+            notificationId: (e.id * 10 + (rem === -1 ? 9 : rem)) % 100000,
             expiredContent: '该日程已开始',
             ringDuration: 5,
             snoozeTimes: 0,
@@ -264,18 +267,22 @@ export class ReminderService {
           continue; // ⭐ 已镜像 → 交由系统日历提醒
         }
         const rems: number[] = e.reminders.length > 0 ? e.reminders
-          : (e.reminder > 0 ? [e.reminder] : []);
+          : (e.reminder > 0 || e.reminder === -1 ? [e.reminder] : []);
         for (const rem of rems) {
-          const remindAt: number = e.startTime - rem * 60000;
+          const remMin: number = (rem === -1 ? 0 : rem);
+          const remindAt: number = e.startTime - remMin * 60000;
           if (remindAt <= from || remindAt > now) {
             continue; // 不在本次检查窗口内
           }
           const calName: string = await ReminderService.calName(context, e.calKey);
-          const minLeft: number = Math.max(1,
+          const minLeft: number = Math.max(0,
             Math.ceil((e.startTime - Date.now()) / 60000));
+          const text: string = (rem === -1 || minLeft === 0)
+            ? `「${calName}」中的「${e.title}」现在开始`
+            : `「${calName}」中的「${e.title}」将在 ${minLeft} 分钟后开始`;
           const fired2: number = await ReminderService.notifyNow(
-            '日程提醒', `「${calName}」中的「${e.title}」将在 ${minLeft} 分钟后开始`,
-            (e.id * 10 + rem) % 100000);
+            '日程提醒', text,
+            (e.id * 10 + (rem === -1 ? 9 : rem)) % 100000);
           if (fired2 === 0) {
             fired++;
           }

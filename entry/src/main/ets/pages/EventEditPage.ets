@@ -248,7 +248,7 @@ struct EventEditPage {
         this.repeatMode = loaded.rrule !== '' ? this.modeFromRrule(loaded.rrule) : 'none';
         this.parseRepeatEnd(loaded.rrule);
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders
-          : (loaded.reminder > 0 ? [loaded.reminder] : []);
+          : (loaded.reminder > 0 || loaded.reminder === -1 ? [loaded.reminder] : []);
         // ⭐ 目标发生时刻（"仅这一次"要排除/覆盖的那一次）：
         //  ① 覆盖行 → 用 RECURRENCE-ID（原始发生时刻）
         //  ② 调用方显式传入了"用户点的是哪一次" → 用它（列表里点开的某次发生，行的 id 是主事件 id，
@@ -646,6 +646,9 @@ struct EventEditPage {
   private reminderLabel(m: number): string {
     if (m === 0) {
       return '不提醒';
+    }
+    if (m === -1) {
+      return '到期时';
     }
     if (m < 60) {
       return `提前${m}分钟`;
@@ -1575,6 +1578,7 @@ struct EventEditPage {
               .fontColor($r('app.color.text_secondary'))
             Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
               this.reminderChip(0)
+              this.reminderChip(-1)
               this.reminderChip(5)
               this.reminderChip(10)
               this.reminderChip(15)
