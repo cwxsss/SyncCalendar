@@ -8,6 +8,7 @@ import { LogUtil } from './LogUtil';
 export class AppSettings {
   private static readonly STORE: string = 'sync_settings';
   private static readonly KEY_SHOW_SYSTEM: string = 'show_system_calendar';
+  private static readonly KEY_SHOW_TODOS_IN_CALENDAR: string = 'show_todos_in_calendar';
   private static readonly KEY_SYNC_INTERVAL: string = 'sync_interval_minutes';
   private static readonly KEY_BACKGROUND_SYNC: string = 'background_sync';
   private static readonly KEY_SYS_MODE: string = 'sys_cal_mode';       // 'display' | 'backup'
@@ -678,6 +679,29 @@ export class AppSettings {
     } catch (err) {
       const e = err as BusinessError;
       console.error(`保存设置失败: ${e.message}`);
+    }
+  }
+
+  /** 是否在日历视图中显示待办事项（默认开启） */
+  static async getShowTodosInCalendar(context: common.Context): Promise<boolean> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      return await store.get(AppSettings.KEY_SHOW_TODOS_IN_CALENDAR, true) as boolean;
+    } catch (err) {
+      return true;
+    }
+  }
+
+  static async setShowTodosInCalendar(context: common.Context, value: boolean): Promise<void> {
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, AppSettings.STORE);
+      await store.put(AppSettings.KEY_SHOW_TODOS_IN_CALENDAR, value);
+      await store.flush();
+    } catch (err) {
+      const e = err as BusinessError;
+      console.error(`保存待办在日历中显示状态失败: ${e.message}`);
     }
   }
 

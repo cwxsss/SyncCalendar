@@ -425,9 +425,9 @@ export class CardDataService {
         const futureEvs: DisplayEvent[] = events
           .filter((e: DisplayEvent): boolean => e.endTime >= (baseStart <= todayStart ? nowMs : baseStart) && e.startTime < rangeEndMs)
           .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
-        ongoingPick = futureEvs.slice(0, 2);
+        ongoingPick = futureEvs.slice(0, 15);
       } else {
-        ongoingPick = upcomingNext.slice(0, 2);
+        ongoingPick = upcomingNext.slice(0, 15);
       }
       const ongoingItems: CardItem[] = [];
       for (const e of ongoingPick) {

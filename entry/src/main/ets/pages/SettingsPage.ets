@@ -28,6 +28,7 @@ class BackupTarget {
 @Component
 struct SettingsPage {
   @State showSystem: boolean = true;
+  @State showTodosInCalendar: boolean = true;
   @State intervalMinutes: number = 15; // ⭐ 0.0.8：默认 15 分钟（原 1 分钟会烧光短时任务配额）
   @State backgroundSync: boolean = false;
   @State sysMode: string = 'display'; // display | backup
@@ -68,6 +69,9 @@ struct SettingsPage {
       return;
     }
     this.context = ctx;
+    AppSettings.getShowTodosInCalendar(ctx).then((v: boolean): void => {
+      this.showTodosInCalendar = v;
+    });
     AppSettings.getShowSystemCalendar(ctx).then((v: boolean): void => {
       this.showSystem = v;
       // 状态自洽：若记录为"开"，但权限已被用户在系统设置里回收 → 自动回落为"关"，避免开关与实际不符
@@ -527,6 +531,16 @@ struct SettingsPage {
    * ⚠️ 合规约束（《审核指南》7.17）：读取系统日历依赖"读取全部日程"敏感权限，
    * **只有在用户主动打开该开关时才申请**；未授权则开关回弹、不保存设置。
    */
+  private async saveShowTodosInCalendar(value: boolean): Promise<void> {
+    if (this.context === undefined) {
+      return;
+    }
+    await AppSettings.setShowTodosInCalendar(this.context, value);
+    this.getUIContext().getPromptAction().showToast({
+      message: value ? '已开启在日历中显示待办' : '已关闭在日历中显示待办'
+    });
+  }
+
   private async saveShowSystem(value: boolean): Promise<void> {
     if (this.context === undefined) {
       return;
@@ -1573,6 +1587,38 @@ struct SettingsPage {
                   if (isOn !== this.showSystem) {
                     this.showSystem = isOn;
                     this.saveShowSystem(isOn);
+                  }
+                })
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+
+          // 在日历中显示待办事项
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('在日历中显示待办事项')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('开启后，有截止时间的待办将合并在日历对应日期展示')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.showTodosInCalendar })
+                .selectedColor($r('app.color.brand'))
+                .onChange((isOn: boolean) => {
+                  if (isOn !== this.showTodosInCalendar) {
+                    this.showTodosInCalendar = isOn;
+                    this.saveShowTodosInCalendar(isOn);
                   }
                 })
             }

@@ -329,10 +329,34 @@ struct TodoEditPage {
 
         Blank()
 
-        Text(this.isExisting ? '编辑待办' : '新建待办')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
+        if (this.isExisting) {
+          Text('编辑待办')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+        } else {
+          Row({ space: 4 }) {
+            Text('日程')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+              .backgroundColor($r('app.color.chip_off_bg'))
+              .borderRadius(14)
+              .padding({ left: 14, right: 14, top: 5, bottom: 5 })
+              .onClick(() => {
+                router.replaceUrl({ url: 'pages/EventEditPage' });
+              })
+            Text('待办')
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.button_text'))
+              .backgroundColor($r('app.color.brand'))
+              .borderRadius(14)
+              .padding({ left: 14, right: 14, top: 5, bottom: 5 })
+          }
+          .padding(2)
+          .borderRadius(16)
+          .backgroundColor($r('app.color.chip_off_bg'))
+        }
 
         Blank()
 

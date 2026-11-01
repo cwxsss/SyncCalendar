@@ -24,6 +24,7 @@ export class DisplayEvent {
   calName: string = '';
   color: string = '#007DFF';
   completed: boolean = false; // 仅待办使用
+  kind: string = 'event';     // 'event' | 'todo'
   recurring: boolean = false; // 是否为重复日程展开出的发生
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
@@ -245,7 +246,8 @@ export class CalendarDataService {
           d.location = e.location;
           d.startTime = occ;
           d.endTime = occ + dur;
-          d.isAllDay = e.isAllDay;
+          const spanFullDay = (dur > 0 && dur % 86400000 === 0 && new Date(occ).getHours() === 0);
+          d.isAllDay = e.isAllDay || spanFullDay;
           d.calKey = e.calKey;
           d.calName = baseName;
           d.color = baseColor;
@@ -269,10 +271,12 @@ export class CalendarDataService {
         const calendars: calendarManager.Calendar[] = await mgr.getAllCalendars();
         for (const cal of calendars) {
           let accountName: string = '';
+          let displayName: string = '';
           let color = '#9AA0A6';
           try {
             const account: calendarManager.CalendarAccount = cal.getAccount();
             accountName = account.name;
+            displayName = account.displayName ?? '';
             const config: calendarManager.CalendarConfig = cal.getConfig();
             if (typeof config.color === 'string') {
               color = config.color;
@@ -280,6 +284,15 @@ export class CalendarDataService {
           } catch (err) {
             // 忽略单个日历
           }
+
+          // 核心过滤：若该系统日历为本应用镜像写入的账户，跳过不重复加载（CalDAV 本地数据为权威来源）
+          const isOurMirror = accountName.startsWith('syncal_') ||
+            displayName.includes('同步日历') ||
+            displayName.includes('小褚日历');
+          if (isOurMirror) {
+            continue;
+          }
+
           const sysKey: string = `sys_${accountName}`;
           if (!visibleKeys.includes(sysKey)) {
             continue;
@@ -296,14 +309,34 @@ export class CalendarDataService {
               d.location = ev.location !== undefined && ev.location.location !== undefined ? ev.location.location : '';
               d.startTime = ev.startTime;
               d.endTime = ev.endTime;
-              d.isAllDay = ev.isAllDay === true;
+              const span24h = (d.endTime > d.startTime) && ((d.endTime - d.startTime) % 86400000 === 0);
+              d.isAllDay = ev.isAllDay === true || (span24h && new Date(d.startTime).getHours() === 0);
               d.calKey = sysKey;
               d.calName = nameOf(sysKey);
               d.color = color;
-              // 去重：与本地(DAV/本机)同标题+同时间的视为同一条，避免两个来源重复展示
-              const dup: boolean = result.some((x: DisplayEvent): boolean => !x.isSystem &&
-                x.title === d.title && x.startTime === d.startTime &&
-                x.endTime === d.endTime && x.isAllDay === d.isAllDay);
+
+              // 智能去重：与本地 CalDAV 日程完全重合时只展示一个（以本地为主）
+              const dup: boolean = result.some((x: DisplayEvent): boolean => {
+                if (x.isSystem) {
+                  return false;
+                }
+                const t1 = x.title.trim().toLowerCase();
+                const t2 = d.title.trim().toLowerCase();
+                if (t1 !== t2 && !t1.includes(t2) && !t2.includes(t1)) {
+                  return false;
+                }
+                // 全天日程：同一天即视为同一条
+                if (x.isAllDay || d.isAllDay) {
+                  const d1 = new Date(x.startTime);
+                  const d2 = new Date(d.startTime);
+                  return d1.getFullYear() === d2.getFullYear() &&
+                         d1.getMonth() === d2.getMonth() &&
+                         d1.getDate() === d2.getDate();
+                }
+                // 定时日程：开始时间相差在 60 秒内
+                return Math.abs(x.startTime - d.startTime) <= 60000;
+              });
+
               if (!dup) {
                 result.push(d);
               } else {
@@ -358,6 +391,7 @@ export class CalendarDataService {
         d.calKey = e.calKey;
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
+        d.kind = 'todo';
         result.push(d);
       }
     } catch (err) {

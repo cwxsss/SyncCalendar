@@ -96,6 +96,7 @@ struct Index {
   private permissionAsked: boolean = false;
   @State detailShow: boolean = false; // 只读日程详情半屏弹层
   @State detailEvent: DisplayEvent | null = null;
+  @State showTodosInCalendar: boolean = true;
   // 服务卡片"添加"按钮深链：EntryAbility 写入，本页读取后拉起新建日程页
   @Watch('onWidgetActionChange') @StorageLink('widgetAction') widgetAction: string = '';
   // 服务卡片点击进入日历时携带的"显示日"毫秒（用户可能已翻到其他日期）：消费后定位 selectedDate
@@ -499,9 +500,10 @@ struct Index {
     const rangeStart: number = Math.min(prevStart - 14 * 86400000, this.selectedDate - 14 * 86400000);
     const rangeEnd: number = Math.max(nextEnd + 14 * 86400000, this.selectedDate + 14 * 86400000);
 
+    this.showTodosInCalendar = await AppSettings.getShowTodosInCalendar(context);
     this.events = await CalendarDataService.loadEvents(context, rangeStart, rangeEnd, this.sources);
-    this.buildEventsByDay();
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
+    this.buildEventsByDay();
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
     this.rebuildPages();
     this.rebuildDayTimeline();
@@ -510,6 +512,7 @@ struct Index {
       await this.ensureAgendaData();
     }
     this.loading = false;
+    this.dataVersion++;
   }
 
   /** 将事件按天构建哈希索引，供 buildMonthCells $O(1)$ 快速提取 */
@@ -517,7 +520,9 @@ struct Index {
     const map = new Map<number, DisplayEvent[]>();
     for (const e of this.events) {
       const startDay = this.startOfDay(e.startTime);
-      const endDay = this.startOfDay(e.endTime);
+      // 修复问题 7：半开区间判定。如果结束时间在某天 00:00:00，则实际属于前一天结束，不计入下一天！
+      const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
+      const endDay = this.startOfDay(effectiveEnd);
       for (let t = startDay; t <= endDay; t += 86400000) {
         const arr = map.get(t);
         if (arr === undefined) {
@@ -527,6 +532,24 @@ struct Index {
         }
       }
     }
+
+    // 修复问题 2：若用户开启「在日历中显示待办」，将有截止时间的待办合并投射到日程按天索引中
+    if (this.showTodosInCalendar && this.todos.length > 0) {
+      for (const t of this.todos) {
+        if (t.startTime > 0) {
+          const tDay = this.startOfDay(t.startTime);
+          const arr = map.get(tDay);
+          if (arr === undefined) {
+            map.set(tDay, [t]);
+          } else {
+            if (!arr.some((x: DisplayEvent): boolean => x.id === t.id && x.kind === 'todo')) {
+              arr.push(t);
+            }
+          }
+        }
+      }
+    }
+
     this.eventsByDay = map;
   }
 
@@ -924,6 +947,11 @@ struct Index {
   }
 
   private openEvent(e: DisplayEvent): void {
+    if (e.kind === 'todo') {
+      AppStorage.setOrCreate<number>('pendingTodoId', e.id);
+      router.pushUrl({ url: 'pages/TodoEditPage' });
+      return;
+    }
     // 所有日程点击都弹出详情（只读/可写/系统一致）；可写日程在详情中可点"编辑"进入编辑页
     this.showEventDetail(e);
   }
@@ -2360,7 +2388,7 @@ struct Index {
         .onClick(() => {
           this.selectDayCell(cell.dateMs);
         })
-      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
+      }, (cell: MonthCell) => `${this.dataVersion}_${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -2496,7 +2524,7 @@ struct Index {
               Row() {
                 ForEach(week, (cell: MonthCell) => {
                   this.dayCellExpanded(cell)
-                }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
+                }, (cell: MonthCell) => `${this.dataVersion}_${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
               }
               .width('100%')
               .layoutWeight(1)
@@ -2504,7 +2532,7 @@ struct Index {
           }
           .width('100%')
           .height('100%')
-        }, (cells: MonthCell[], pIdx: number) => `ep_${pIdx}_${cells[0]?.dateMs ?? 0}`)
+        }, (cells: MonthCell[], pIdx: number) => `${this.dataVersion}_ep_${pIdx}_${cells[0]?.dateMs ?? 0}`)
       }
       .index(1)
       .loop(false)
@@ -2549,7 +2577,7 @@ struct Index {
             Row({ space: 2 }) {
               ForEach(week, (cell: MonthCell) => {
                 this.dayCell(cell)
-              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
+              }, (cell: MonthCell) => `${this.dataVersion}_${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
             }
             .width('100%')
             .layoutWeight(this.wideLayout ? 1 : 0)
@@ -2558,7 +2586,7 @@ struct Index {
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
         // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
-      }, (cells: MonthCell[], pIdx: number) => `p_${pIdx}_${cells[0]?.dateMs ?? 0}`)
+      }, (cells: MonthCell[], pIdx: number) => `${this.dataVersion}_p_${pIdx}_${cells[0]?.dateMs ?? 0}`)
     }
     .index(1)
     .loop(false)
@@ -2925,7 +2953,7 @@ struct Index {
           .onClick(() => {
             this.selectDayCell(cell.dateMs);
           })
-        }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
+        }, (cell: MonthCell) => `${this.dataVersion}_${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
       }
       .width('100%')
       .padding({ left: 8, right: 8, top: 2, bottom: 8 })
@@ -3154,37 +3182,72 @@ struct Index {
   @Builder
   eventRow(e: DisplayEvent, isNow: boolean = false) {
     Row({ space: 10 }) {
-      Column()
-        .width(4)
-        .height(38)
-        .borderRadius(2)
-        .backgroundColor(isNow ? '#FF3B30' : e.color)
+      if (e.kind === 'todo') {
+        // 待办专属勾选按钮（36x36 舒适触控区）
+        Row() {
+          if (e.completed) {
+            Text('✓')
+              .fontSize(12)
+              .fontColor($r('app.color.button_text'))
+              .width(20)
+              .height(20)
+              .textAlign(TextAlign.Center)
+              .borderRadius(10)
+              .backgroundColor(e.color)
+          } else {
+            Text('')
+              .width(20)
+              .height(20)
+              .borderRadius(10)
+              .border({ width: 2, color: e.color })
+          }
+        }
+        .width(36)
+        .height(36)
+        .justifyContent(FlexAlign.Center)
+        .onClick(() => {
+          this.toggleTodo(e);
+        })
+      } else {
+        Column()
+          .width(4)
+          .height(38)
+          .borderRadius(2)
+          .backgroundColor(isNow ? '#FF3B30' : e.color)
+      }
       Column({ space: 3 }) {
-        Text(e.title === '' ? '(无标题)' : e.title)
+        Text(e.title === '' ? (e.kind === 'todo' ? '(无标题待办)' : '(无标题)') : e.title)
           .fontSize(15)
-          .fontColor(isNow ? '#FF3B30' : $r('app.color.text_primary'))
+          .fontColor(isNow ? '#FF3B30' : (e.kind === 'todo' && e.completed ? $r('app.color.text_hint') : $r('app.color.text_primary')))
+          .decoration({ type: (e.kind === 'todo' && e.completed) ? TextDecorationType.LineThrough : TextDecorationType.None })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
-          Text((this.topRangeMode === '3days' || this.topRangeMode === '7days' ? this.fmtEventDatePrefix(e) : '') +
-            (e.isAllDay || this.spansDays(e) ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`))
-            .fontSize(12)
-            .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
-          if (e.recurring) {
-            Text('↻ 重复')
-              .fontSize(10)
-              .fontColor($r('app.color.text_hint'))
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor($r('app.color.chip_off_bg'))
-          }
-          if (isNow) {
-            Text('● 进行中')
-              .fontSize(10)
-              .fontColor('#FF3B30')
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor('#FFECEA')
+          if (e.kind === 'todo') {
+            Text('待办 · ' + (e.isAllDay ? '全天截止' : (e.startTime > 0 ? `截止 ${this.fmtTime(e.startTime)}` : '无截止时间')))
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+          } else {
+            Text((this.topRangeMode === '3days' || this.topRangeMode === '7days' ? this.fmtEventDatePrefix(e) : '') +
+              (e.isAllDay || this.spansDays(e) ? '全天' : `${this.fmtTime(e.startTime)} - ${this.fmtTime(e.endTime)}`))
+              .fontSize(12)
+              .fontColor(isNow ? '#FF3B30' : $r('app.color.text_secondary'))
+            if (e.recurring) {
+              Text('↻ 重复')
+                .fontSize(10)
+                .fontColor($r('app.color.text_hint'))
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .borderRadius(4)
+                .backgroundColor($r('app.color.chip_off_bg'))
+            }
+            if (isNow) {
+              Text('● 进行中')
+                .fontSize(10)
+                .fontColor('#FF3B30')
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .borderRadius(4)
+                .backgroundColor('#FFECEA')
+            }
           }
         }
         if (e.location !== '') {
@@ -3346,7 +3409,7 @@ struct Index {
             builder: () => { this.todoSwipeAction(t) }
           }
         })
-      }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+      }, (t: DisplayEvent) => `${this.dataVersion}_t${t.id}_${t.completed}_${t.startTime}_${t.title}`)
 
       if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
         ListItem() {
@@ -3368,7 +3431,7 @@ struct Index {
               builder: () => { this.todoSwipeAction(t) }
             }
           })
-        }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+        }, (t: DisplayEvent) => `${this.dataVersion}_t${t.id}_${t.completed}_${t.startTime}_${t.title}`)
       }
 
       if (this.todos.length === 0 && !this.loading) {
@@ -3539,6 +3602,7 @@ struct Index {
         copy.completed = nextCompleted;
         copy.recurring = item.recurring;
         copy.writable = item.writable;
+        copy.kind = item.kind;
         return copy;
       }
       return item;

@@ -33,8 +33,7 @@ struct Widget4x2Card {
   /** 右侧最多渲染 2 条（数据侧已裁剪，这里再兜底截断） */
   private parseOngoing(): CardItem2x4[] {
     try {
-      const all: CardItem2x4[] = JSON.parse(this.ongoingJson) as CardItem2x4[];
-      return all.slice(0, 2);
+      return JSON.parse(this.ongoingJson) as CardItem2x4[];
     } catch (err) {
       return [];
     }
@@ -225,19 +224,22 @@ struct Widget4x2Card {
         .strokeWidth(0.5)
         .color('#E5E5E5')
 
-      // ===== 右半：当前时间之后最近的两条日程（不滚动）=====
+      // ===== 右半：当前时间之后日程（支持向下滑动查看）=====
       Column() {
         if (this.parseOngoing().length === 0) {
           this.emptyHint()
         } else {
-          Column({ space: 6 }) {
+          List({ space: 6 }) {
             ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
-              this.ongoingRow(item)
+              ListItem() {
+                this.ongoingRow(item)
+              }
             }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}_${item.dateTag}`)
           }
           .width('100%')
           .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
+          .scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring)
         }
       }
       .layoutWeight(1)
