@@ -56,9 +56,9 @@ export class AppSettings {
   //     ⇒ 若将来真要用实时定位，必须同时改 module.json5、本注释、upa.html 与 AGC 隐私标签。
   // 四份文档均在设置页通过内置浏览器（DocViewer）打开，内容在线更新、无需重新发版。
   /** 隐私政策网址 */
-  static readonly PRIVACY_URL: string = 'https://synccalendar.yangyq.net/upa.html';
+  static readonly PRIVACY_URL: string = 'https://cwxsss.github.io/SyncCalendar/privacy.html';
   /** 用户服务协议网址 */
-  static readonly AGREEMENT_URL: string = 'https://synccalendar.yangyq.net/usa.html';
+  static readonly AGREEMENT_URL: string = 'https://cwxsss.github.io/SyncCalendar/user_agreement.html';
   /** 软件特性网址 */
   static readonly FEATURES_URL: string = 'https://synccalendar.yangyq.net/sf.html';
   /** 使用帮助网址 */

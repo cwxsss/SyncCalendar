@@ -1,3 +1,4 @@
+import { DemoDataLoader } from '../common/DemoDataLoader';
 // entry/src/main/ets/pages/AddAccountPage.ets
 // 添加账号第一页：URL / 用户名 / 密码 → 连接（凭据经 AppStorage 传给日历本选择页）
 import { http } from '@kit.NetworkKit';
@@ -301,6 +302,22 @@ struct AddAccountPage {
       .onClick(() => {
         this.onConnectAndSave();
       })
+
+      Button('没有服务器？一键载入演示账号直接体验')
+        .fontSize(14)
+        .fontColor($r('app.color.brand'))
+        .backgroundColor(Color.Transparent)
+        .margin({ top: 12 })
+        .onClick(async () => {
+          const ctx = this.getUIContext().getHostContext();
+          if (ctx !== undefined) {
+            await DemoDataLoader.installDemoData(ctx);
+            this.getUIContext().getPromptAction().showToast({
+              message: '演示数据已就绪，可直接体验全部功能！'
+            });
+            router.back();
+          }
+        })
 
       if (this.statusMsg) {
         Row({ space: 6 }) {

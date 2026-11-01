@@ -16,3 +16,7 @@ if exist "%BUILD_DIR%\entry\build\default\outputs\default\app\entry-default.hap"
     copy /y "%BUILD_DIR%\entry\build\default\outputs\default\app\entry-default.hap" "%SRC_DIR%entry-default.hap"
     echo Build HAP successfully: %SRC_DIR%entry-default.hap
 )
+if exist "%BUILD_DIR%\build\outputs\default\SyncCalendar_Project-default-unsigned.app" (
+    copy /y "%BUILD_DIR%\build\outputs\default\SyncCalendar_Project-default-unsigned.app" "%SRC_DIR%entry-default.app"
+    echo Build APP successfully: %SRC_DIR%entry-default.app
+)

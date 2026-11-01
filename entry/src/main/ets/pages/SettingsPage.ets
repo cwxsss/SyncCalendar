@@ -43,7 +43,7 @@ struct SettingsPage {
   // 内置文档浏览器（《隐私政策》/《用户服务协议》/《软件特性》/《使用帮助》）：整页 Web 覆盖层
   @State showDoc: boolean = false;
   @State docTitle: string = '';
-  @State docUrl: string = '';
+  @State docUrl: ResourceStr = '';
   @State defaultView: string = 'month';  // 打开 App 默认视图：month | week | agenda
   @State displayStyle: string = 'timeline'; // 日程显示方式：timeline（时间轴）| list（列表）
   @State cardDaysRange: number = 1;         // 桌面卡片日程显示天数：1（当天）| 3（未来3天）| 7（未来7天）
@@ -963,7 +963,7 @@ struct SettingsPage {
     if (context === undefined) {
       return;
     }
-    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+    if (typeof url === 'string' && !url.startsWith('https://') && !url.startsWith('http://')) {
       this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
       return;
     }
@@ -978,8 +978,8 @@ struct SettingsPage {
    * 用内置浏览器（整页 Web 覆盖层）打开法律文档 —— 不跳出应用、随时可关闭。
    * 先收起"隐私政策与用户协议"弹层，再显示覆盖层，避免两层叠在一起看不清。
    */
-  private openDoc(title: string, url: string): void {
-    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+  private openDoc(title: string, url: ResourceStr): void {
+    if (typeof url === 'string' && !url.startsWith('https://') && !url.startsWith('http://')) {
       this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
       return;
     }
@@ -1972,14 +1972,14 @@ struct SettingsPage {
           .fontSize(15)
           .backgroundColor($r('app.color.brand'))
           .onClick(() => {
-            this.openDoc(AppSettings.PRIVACY_TITLE, AppSettings.PRIVACY_URL);
+            this.openDoc(AppSettings.PRIVACY_TITLE, $rawfile('privacy.html'));
           })
         Button('查看《用户服务协议》')
           .width('100%')
           .fontSize(15)
           .backgroundColor($r('app.color.brand'))
           .onClick(() => {
-            this.openDoc(AppSettings.AGREEMENT_TITLE, AppSettings.AGREEMENT_URL);
+            this.openDoc(AppSettings.AGREEMENT_TITLE, $rawfile('user_agreement.html'));
           })
         Text('《隐私政策》说明本应用如何收集、使用与保护你的信息（日历、位置等）；《用户服务协议》说明使用本应用的权利与义务。两份文件随功能调整更新，最新版本以上述链接为准。')
           .fontSize(12)

@@ -11,8 +11,8 @@ import { webview } from '@kit.ArkWeb';
 export struct DocViewer {
   /** 标题栏文案（如"隐私政策"） */
   title: string = '';
-  /** 文档地址（http / https） */
-  url: string = '';
+  /** 文档地址（http / https 或 $rawfile） */
+  url: ResourceStr = '';
   /** 点击"关闭"时回调 —— 由宿主把 showDoc 置回 false */
   onClose: () => void = () => {};
 

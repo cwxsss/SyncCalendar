@@ -116,7 +116,7 @@ struct Index {
   // ---- 内置文档浏览器（《隐私政策》/《用户服务协议》，整页 Web 覆盖层，不跳出应用） ----
   @State showDoc: boolean = false;
   @State docTitle: string = '';
-  @State docUrl: string = '';
+  @State docUrl: ResourceStr = '';
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
@@ -386,8 +386,8 @@ struct Index {
    * 用内置浏览器（整页 Web 覆盖层）打开法律文档 —— 不跳出应用、随时可关闭。
    * 仅放行 http(s)：避免 URL 被误传为 file://、自定义 scheme 等而拉起本地文件或任意第三方应用。
    */
-  private openDoc(title: string, url: string): void {
-    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+  private openDoc(title: string, url: ResourceStr): void {
+    if (typeof url === 'string' && !url.startsWith('https://') && !url.startsWith('http://')) {
       this.getUIContext().getPromptAction().showToast({ message: '仅支持打开 http(s) 链接' });
       return;
     }
@@ -1678,7 +1678,7 @@ struct Index {
         .backgroundColor($r('app.color.card_bg'))
         .fontColor($r('app.color.brand'))
         .onClick(() => {
-          this.openDoc(AppSettings.PRIVACY_TITLE, AppSettings.PRIVACY_URL);
+          this.openDoc(AppSettings.PRIVACY_TITLE, $rawfile('privacy.html'));
         })
       Button('《用户服务协议》')
         .width('100%')
@@ -1686,7 +1686,7 @@ struct Index {
         .backgroundColor($r('app.color.card_bg'))
         .fontColor($r('app.color.brand'))
         .onClick(() => {
-          this.openDoc(AppSettings.AGREEMENT_TITLE, AppSettings.AGREEMENT_URL);
+          this.openDoc(AppSettings.AGREEMENT_TITLE, $rawfile('user_agreement.html'));
         })
       Blank()
       Text('点击“同意并继续”，即表示你已阅读并同意上述两份文件。')
