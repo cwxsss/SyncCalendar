@@ -25,6 +25,7 @@ import { MirrorInbound } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
 import { HolidayUtil, HolidayInfo } from '../common/HolidayUtil';
+import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
 
 /** 月视图单元格 */
 class MonthCell {
@@ -61,6 +62,10 @@ struct Index {
   @State searchLoading: boolean = false;
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
+  @State quickTodoText: string = ''; // 待办快速输入框文本
+  @State todoModalOpen: boolean = false; // 新建待办半模态弹窗
+  @State modalTodoDueDays: number = 0; // 0: 无, 1: 今天, 2: 明天, 3: 本周末
+  @State modalTodoDesc: string = '';
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
@@ -1511,6 +1516,109 @@ struct Index {
     router.pushUrl({ url: 'pages/EventEditPage' });
   }
 
+  /** 新建待办半模态浮层 */
+  @Builder
+  todoModal() {
+    if (this.todoModalOpen) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        // 半透明背景
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#80000000')
+          .onClick(() => {
+            this.todoModalOpen = false;
+          })
+
+        // 弹窗卡片
+        Column({ space: 14 }) {
+          Row() {
+            Text('新建待办事项')
+              .fontSize(17)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_primary'))
+            Blank()
+            Text('✕')
+              .fontSize(16)
+              .fontColor($r('app.color.text_secondary'))
+              .width(28)
+              .height(28)
+              .textAlign(TextAlign.Center)
+              .onClick(() => {
+                this.todoModalOpen = false;
+              })
+          }
+          .width('100%')
+
+          TextInput({ text: this.quickTodoText, placeholder: '待办事项内容（如：下周三前提交报销）' })
+            .width('100%')
+            .height(44)
+            .fontSize(15)
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .borderRadius(10)
+            .padding({ left: 12, right: 12 })
+            .onChange((v: string) => {
+              this.quickTodoText = v;
+            })
+
+          Row({ space: 8 }) {
+            Text('截止时间：')
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+            Button('无截止')
+              .fontSize(12)
+              .height(28)
+              .backgroundColor(this.modalTodoDueDays === 0 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.modalTodoDueDays === 0 ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .borderRadius(14)
+              .onClick(() => { this.modalTodoDueDays = 0; })
+            Button('今天')
+              .fontSize(12)
+              .height(28)
+              .backgroundColor(this.modalTodoDueDays === 1 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.modalTodoDueDays === 1 ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .borderRadius(14)
+              .onClick(() => { this.modalTodoDueDays = 1; })
+            Button('明天')
+              .fontSize(12)
+              .height(28)
+              .backgroundColor(this.modalTodoDueDays === 2 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.modalTodoDueDays === 2 ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .borderRadius(14)
+              .onClick(() => { this.modalTodoDueDays = 2; })
+          }
+          .width('100%')
+
+          Button('确定保存并同步')
+            .width('100%')
+            .height(44)
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .backgroundColor($r('app.color.brand'))
+            .borderRadius(22)
+            .onClick(() => {
+              // 计算截止时间
+              if (this.modalTodoDueDays === 1) {
+                const now = new Date();
+                now.setHours(23, 59, 59, 0);
+                this.quickTodoText = this.quickTodoText.trim() + ' 今天';
+              } else if (this.modalTodoDueDays === 2) {
+                this.quickTodoText = this.quickTodoText.trim() + ' 明天';
+              }
+              this.todoModalOpen = false;
+              this.createQuickTodo();
+            })
+        }
+        .width('100%')
+        .padding(20)
+        .backgroundColor($r('app.color.card_bg'))
+        .borderRadius({ topLeft: 20, topRight: 20 })
+      }
+      .width('100%')
+      .height('100%')
+    }
+  }
+
   // ---------- UI ----------
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
@@ -1541,6 +1649,9 @@ struct Index {
       // 全局日程搜索覆盖层
       this.searchModal()
 
+      // 新建待办半模态浮层
+      this.todoModal()
+
       Button() {
         Text('＋')
           .fontSize(26)
@@ -1554,7 +1665,12 @@ struct Index {
       .shadow({ radius: 8, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 2 })
       .margin(24)
       .onClick(() => {
-        this.addEvent();
+        if (this.mode === 'todo') {
+          // 待办模式下弹出新建待办弹层
+          this.todoModalOpen = true;
+        } else {
+          this.addEvent();
+        }
       })
 
       // 未同意《隐私政策》与《用户协议》：整页门禁盖在最上层（不申请权限、不加载数据）
@@ -1956,52 +2072,56 @@ struct Index {
 
   @Builder
   header() {
-    Row({ space: 10 }) {
+    Row({ space: 8 }) {
       Image($r('app.media.app_icon'))
-        .width(32)
-        .height(32)
+        .width(30)
+        .height(30)
         .borderRadius(8)
         .objectFit(ImageFit.Cover)
       Text('小褚日历')
-        .fontSize(20)
+        .fontSize(19)
         .fontWeight(FontWeight.Bold)
         .fontColor($r('app.color.text_primary'))
       Blank()
       this.topRangeSelector()
-      // 🔍 搜索按钮
-      Button() {
-        Text('🔍')
-          .fontSize(14)
-      }
-      .width(36)
-      .height(36)
-      .borderRadius(18)
-      .backgroundColor($r('app.color.card_bg'))
-      .border({ width: 1, color: $r('app.color.shadow_color') })
-      .margin({ right: 6 })
-      .onClick(() => {
-        this.searchOpen = true;
-      })
-      // ≡ 菜单按钮
-      Button() {
-        Column({ space: 4 }) {
-          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
-          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
-          Row().width(16).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+      // 右侧操作按钮组（内收留白防贴边，远离曲面返回手势热区）
+      Row({ space: 8 }) {
+        // 🔍 搜索按钮
+        Button() {
+          Text('🔍')
+            .fontSize(13)
         }
-        .alignItems(HorizontalAlign.Center)
+        .width(34)
+        .height(34)
+        .borderRadius(17)
+        .backgroundColor($r('app.color.card_bg'))
+        .border({ width: 1, color: $r('app.color.shadow_color') })
+        .onClick(() => {
+          this.searchOpen = true;
+        })
+
+        // ≡ 菜单按钮
+        Button() {
+          Column({ space: 3.5 }) {
+            Row().width(14).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+            Row().width(14).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+            Row().width(14).height(1.5).backgroundColor($r('app.color.brand')).borderRadius(1)
+          }
+          .alignItems(HorizontalAlign.Center)
+        }
+        .width(34)
+        .height(34)
+        .borderRadius(17)
+        .backgroundColor($r('app.color.card_bg'))
+        .border({ width: 1, color: $r('app.color.shadow_color') })
+        .onClick(() => {
+          this.menuOpen = !this.menuOpen;
+        })
       }
-      .width(36)
-      .height(36)
-      .borderRadius(18)
-      .backgroundColor($r('app.color.card_bg'))
-      .border({ width: 1, color: $r('app.color.shadow_color') })
-      .onClick(() => {
-        this.menuOpen = !this.menuOpen;
-      })
+      .margin({ right: 6 })
     }
     .width('100%')
-    .padding({ left: 20, right: 20, top: 12, bottom: 8 })
+    .padding({ left: 16, right: 24, top: 10, bottom: 8 })
   }
 
   /** 顶部 ≡ 下拉菜单（全屏遮罩 + 右上角菜单卡片） */
@@ -2088,7 +2208,7 @@ struct Index {
       .backgroundColor($r('app.color.card_bg'))
       .border({ width: 1, color: $r('app.color.shadow_color') })
       .shadow({ radius: 12, color: $r('app.color.shadow_color'), offsetY: 4 })
-      .margin({ top: 56, right: 20 })
+      .margin({ top: 54, right: 26 })
     }
     .width('100%')
     .height('100%')
@@ -2101,8 +2221,13 @@ struct Index {
       this.modeTab('month_expanded', '全月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
+      this.modeTab('todo', '待办')
       Blank()
-      if (this.mode === 'month' || this.mode === 'month_expanded') {
+      if (this.mode === 'todo') {
+        Text(this.todos.filter((t: DisplayEvent): boolean => !t.completed).length + ' 项未完成')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+      } else if (this.mode === 'month' || this.mode === 'month_expanded') {
         Text(this.fmtMonthTitle())
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
@@ -3356,6 +3481,107 @@ struct Index {
     .align(Alignment.Top)
   }
 
+  /** 快速添加待办事项（支持智能自然语言解析并自动同步 CalDAV） */
+  private async createQuickTodo(): Promise<void> {
+    const trimmed = this.quickTodoText.trim();
+    if (trimmed === '') {
+      return;
+    }
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+
+    // 智能提取时间与标题
+    const parsed = SmartDateParser.parse(trimmed);
+    const todoTitle = parsed.title !== '' ? parsed.title : trimmed;
+    const dueTime = (parsed.confidence && parsed.startTime > 0) ? parsed.startTime : 0;
+
+    // 查找可写的 CalDAV 日历本集合
+    let targetKey = '';
+    let targetHref = '';
+    for (const acc of this.accounts) {
+      for (let i = 0; i < acc.calendarHrefs.length; i++) {
+        const writable = i < acc.calendarWritable.length ? acc.calendarWritable[i] : '1';
+        if (writable !== '0') {
+          targetKey = acc.id + '_' + i;
+          targetHref = acc.calendarHrefs[i];
+          break;
+        }
+      }
+      if (targetKey !== '') {
+        break;
+      }
+    }
+
+    const uid = 'syncal-todo-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+    const e = new LocalEvent();
+    e.uid = uid;
+    e.calKey = targetKey;
+    e.href = targetHref;
+    e.remotePath = encodeURIComponent(uid) + '.ics';
+    e.title = todoTitle;
+    e.startTime = dueTime;
+    e.endTime = dueTime;
+    e.kind = 'todo';
+    e.completed = false;
+    e.dirty = true;
+
+    try {
+      const newId = await EventDb.insertLocal(ctx, e);
+      e.id = newId;
+      this.quickTodoText = '';
+      this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+      this.dataVersion++;
+      const toastMsg = dueTime > 0 ? ('待办已添加（截止 ' + this.fmtDue(dueTime) + '）并同步') : '待办已添加并同步到云端';
+      this.getUIContext().getPromptAction().showToast({ message: toastMsg });
+
+      // 后台触发实时推送
+      this.syncAll(false).catch((err: Error) => {
+        LogUtil.write('后台推送新建待办失败: ' + err.message);
+      });
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '添加待办失败: ' + (err as Error).message });
+    }
+  }
+
+  /** 询问是否删除待办 */
+  private askDeleteTodo(t: DisplayEvent): void {
+    const label = t.title === '' ? '待办事项' : '「' + t.title + '」';
+    this.getUIContext().showAlertDialog({
+      title: '删除待办',
+      message: '确定要删除' + label + '吗？\n删除后将从本地和 CalDAV 服务器彻底移除。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '删除',
+        fontColor: '#E64545',
+        action: () => {
+          this.deleteTodo(t);
+        }
+      }
+    });
+  }
+
+  /** 执行删除待办并推送到服务器 */
+  private async deleteTodo(t: DisplayEvent): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    await EventDb.markDeleted(ctx, t.id);
+    this.todos = this.todos.filter((item: DisplayEvent): boolean => item.id !== t.id);
+    this.dataVersion++;
+    this.getUIContext().getPromptAction().showToast({ message: '待办已删除' });
+    this.syncAll(false).catch((err: Error) => {
+      LogUtil.write('同步删除待办失败: ' + err.message);
+    });
+  }
+
   /** 点击待办：打勾完成/取消完成，本地落库并后台双向推送到 CalDAV */
   private async toggleTodo(t: DisplayEvent): Promise<void> {
     const nextCompleted: boolean = !t.completed;
@@ -3434,6 +3660,19 @@ struct Index {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+
+      // 删除按钮
+      Text('✕')
+        .fontSize(14)
+        .fontColor($r('app.color.text_hint'))
+        .width(28)
+        .height(28)
+        .textAlign(TextAlign.Center)
+        .borderRadius(14)
+        .backgroundColor(Color.Transparent)
+        .onClick(() => {
+          this.askDeleteTodo(t);
+        })
     }
     .width('100%')
     .padding(10)
