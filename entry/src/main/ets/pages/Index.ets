@@ -3521,6 +3521,29 @@ struct Index {
     }
   }
 
+  /** 待办事项左滑出现的删除按钮 */
+  @Builder
+  todoSwipeAction(t: DisplayEvent) {
+    Row() {
+      Button({ type: ButtonType.Normal }) {
+        Text('删除')
+          .fontSize(14)
+          .fontColor('#FFFFFF')
+          .fontWeight(FontWeight.Medium)
+      }
+      .width(72)
+      .height('100%')
+      .backgroundColor('#E64545')
+      .borderRadius(12)
+      .onClick(() => {
+        this.askDeleteTodo(t);
+      })
+    }
+    .padding({ left: 6 })
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+  }
+
   @Builder
   todoRow(t: DisplayEvent) {
     Row({ space: 10 }) {
@@ -3566,18 +3589,7 @@ struct Index {
         router.pushUrl({ url: 'pages/TodoEditPage' });
       })
 
-      // 删除按钮
-      Text('✕')
-        .fontSize(14)
-        .fontColor($r('app.color.text_hint'))
-        .width(28)
-        .height(28)
-        .textAlign(TextAlign.Center)
-        .borderRadius(14)
-        .backgroundColor(Color.Transparent)
-        .onClick(() => {
-          this.askDeleteTodo(t);
-        })
+
     }
     .width('100%')
     .padding(10)

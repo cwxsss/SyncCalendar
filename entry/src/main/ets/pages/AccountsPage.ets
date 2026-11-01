@@ -6,7 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, TYPE_KEYS, TYPE_CALDAV, TYPE_CARDDAV } from '../common/AccountStore';
 import { SyncEngine, SyncBusyError } from '../common/SyncEngine';
 import { EditNavParams } from './EditAccountPage';
-import { EventDb } from '../common/EventDb';
+import { EventDb, LocalEvent } from '../common/EventDb';
 import { LogUtil } from '../common/LogUtil';
 import { AppSettings } from '../common/AppSettings';
 import { ScreenKeeper } from '../common/ScreenKeeper';
@@ -286,6 +286,86 @@ struct AccountsPage {
       .opacity(0);
   }
 
+
+  /** 一键载入全套演示数据（方便华为应用市场审核或新手体验） */
+  private async installDemoData(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+
+    const demoAcc = new DavAccount();
+    demoAcc.id = 'demo_acc_' + Date.now();
+    demoAcc.name = '演示日历账号 (Demo)';
+    demoAcc.type = TYPE_CALDAV;
+    demoAcc.serverUrl = 'https://demo.synccalendar.local';
+    demoAcc.username = 'demo_user';
+    demoAcc.calendarHrefs = ['/demo/calendar/'];
+    demoAcc.calendarNames = ['工作与生活演示日历'];
+    demoAcc.calendarColors = ['#007DFF'];
+    demoAcc.calendarWritable = ['1'];
+    demoAcc.lastSyncTime = '刚刚';
+
+    this.accounts.push(demoAcc);
+    await AccountStore.saveAll(ctx, this.accounts);
+
+    const now = new Date();
+    const todayZero = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+    // 1. 今日日程
+    const e1 = new LocalEvent();
+    e1.uid = 'demo-event-1';
+    e1.calKey = demoAcc.id + '_0';
+    e1.href = '/demo/calendar/';
+    e1.title = '团队每周例会与技术分享';
+    e1.location = '总部第一会议室';
+    e1.startTime = todayZero + 9 * 3600000 + 30 * 60000;
+    e1.endTime = todayZero + 10 * 3600000 + 30 * 60000;
+    e1.kind = 'event';
+    await EventDb.insertLocal(ctx, e1);
+
+    // 2. 明日日程
+    const e2 = new LocalEvent();
+    e2.uid = 'demo-event-2';
+    e2.calKey = demoAcc.id + '_0';
+    e2.href = '/demo/calendar/';
+    e2.title = '鸿蒙 NEXT 应用特性评审会';
+    e2.location = '线上会议室';
+    e2.startTime = todayZero + 86400000 + 14 * 3600000;
+    e2.endTime = todayZero + 86400000 + 15 * 3600000 + 30 * 60000;
+    e2.kind = 'event';
+    await EventDb.insertLocal(ctx, e2);
+
+    // 3. 示例待办 1
+    const t1 = new LocalEvent();
+    t1.uid = 'demo-todo-1';
+    t1.calKey = demoAcc.id + '_0';
+    t1.href = '/demo/calendar/';
+    t1.title = '提交 10 月度报销发票与项目单据';
+    t1.startTime = todayZero + 18 * 3600000;
+    t1.endTime = todayZero + 18 * 3600000;
+    t1.kind = 'todo';
+    t1.completed = false;
+    await EventDb.insertLocal(ctx, t1);
+
+    // 4. 示例待办 2
+    const t2 = new LocalEvent();
+    t2.uid = 'demo-todo-2';
+    t2.calKey = demoAcc.id + '_0';
+    t2.href = '/demo/calendar/';
+    t2.title = '准备产品新版本功能演示文稿';
+    t2.startTime = todayZero + 86400000 + 12 * 3600000;
+    t2.endTime = todayZero + 86400000 + 12 * 3600000;
+    t2.kind = 'todo';
+    t2.completed = false;
+    await EventDb.insertLocal(ctx, t2);
+
+    this.getUIContext().getPromptAction().showToast({
+      message: '演示数据已就绪，可直接体验全部功能！'
+    });
+
+    router.back();
+  }
 
   @Builder
   emptyState() {
