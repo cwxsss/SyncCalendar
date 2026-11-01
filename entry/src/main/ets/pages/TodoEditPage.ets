@@ -32,6 +32,9 @@ struct TodoEditPage {
   @State dueHour: number = 18;
   @State dueMinute: number = 0;
   @State reminderList: number[] = []; // 提醒提前分钟数：空=不提醒，-1=到期时，5/15/30/60/1440
+  @State customReminderMinutes: number = 10;
+  @State customReminderInput: string = '10';
+  @State customSheetShow: boolean = false;
   @State repeatMode: string = 'none'; // none | daily | workday | weekly | monthly | yearly | custom
   @State rrule: string = '';
   @State books: TodoBookChoice[] = [];
@@ -75,6 +78,11 @@ struct TodoEditPage {
         }
 
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders : (loaded.reminder !== 0 ? [loaded.reminder] : []);
+        const customFound = this.reminderList.find((m: number): boolean => m > 0 && m !== 5 && m !== 1440);
+        if (customFound !== undefined) {
+          this.customReminderMinutes = customFound;
+          this.customReminderInput = String(customFound);
+        }
         this.rrule = loaded.rrule;
         this.repeatMode = this.modeFromRrule(loaded.rrule);
       }
@@ -602,9 +610,7 @@ struct TodoEditPage {
               this.reminderChip(0, '不提醒')
               this.reminderChip(-1, '到期时')
               this.reminderChip(5, '提前5分钟')
-              this.reminderChip(15, '提前15分钟')
-              this.reminderChip(30, '提前30分钟')
-              this.reminderChip(60, '提前1小时')
+              this.customReminderChip()
               this.reminderChip(1440, '提前1天')
             }
             .width('100%')
@@ -753,6 +759,12 @@ struct TodoEditPage {
     .justifyContent(FlexAlign.Start)
     .alignItems(HorizontalAlign.Start)
     .backgroundColor($r('app.color.page_bg'))
+    .bindSheet($$this.customSheetShow, this.customReminderSheet(), {
+      height: 360,
+      showClose: false,
+      dragBar: true,
+      backgroundColor: $r('app.color.card_bg')
+    })
   }
 
   @Builder
@@ -860,4 +872,184 @@ struct TodoEditPage {
       })
   }
 
+  @Builder
+  customReminderChip() {
+    Row({ space: 4 }) {
+      Text(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
+        ? `提前${this.customReminderMinutes}分钟 ✎` : '提前X分钟')
+        .fontSize(12)
+        .fontWeight(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
+          ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
+          ? $r('app.color.button_text') : $r('app.color.text_primary'))
+    }
+    .backgroundColor(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
+      ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+    .borderRadius(14)
+    .height(28)
+    .padding({ left: 10, right: 10 })
+    .onClick(() => {
+      this.customSheetShow = true;
+    })
+  }
+
+  @Builder
+  customReminderSheet() {
+    Column({ space: 14 }) {
+      Text('自定义提前提醒')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+
+      Text('设置在待办截止前多少分钟发出提醒')
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+
+      // 步进调节与输入框
+      Row({ space: 10 }) {
+        Button('-5')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .backgroundColor($r('app.color.chip_off_bg'))
+          .width(44)
+          .height(40)
+          .borderRadius(8)
+          .onClick(() => {
+            const cur = Math.max(1, (parseInt(this.customReminderInput, 10) || 10) - 5);
+            this.customReminderInput = String(cur);
+          })
+
+        Row() {
+          TextInput({ text: this.customReminderInput })
+            .type(InputType.Number)
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .textAlign(TextAlign.Center)
+            .width(90)
+            .height(40)
+            .backgroundColor(Color.Transparent)
+            .onChange((val: string) => {
+              this.customReminderInput = val;
+            })
+          Text('分钟')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .margin({ right: 8 })
+        }
+        .padding({ left: 4, right: 4 })
+        .borderRadius(8)
+        .backgroundColor($r('app.color.chip_off_bg'))
+        .border({ width: 1, color: $r('app.color.shadow_color') })
+
+        Button('+5')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .backgroundColor($r('app.color.chip_off_bg'))
+          .width(44)
+          .height(40)
+          .borderRadius(8)
+          .onClick(() => {
+            const cur = Math.min(10080, (parseInt(this.customReminderInput, 10) || 10) + 5);
+            this.customReminderInput = String(cur);
+          })
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+
+      // 快捷预设胶囊
+      Column({ space: 6 }) {
+        Text('常用预设')
+          .fontSize(12)
+          .fontColor($r('app.color.text_hint'))
+          .width('100%')
+        Flex({ wrap: FlexWrap.Wrap, space: { main: { value: 6, unit: 1 }, cross: { value: 6, unit: 1 } } }) {
+          this.quickPresetChip(10, '10分钟')
+          this.quickPresetChip(15, '15分钟')
+          this.quickPresetChip(20, '20分钟')
+          this.quickPresetChip(30, '30分钟')
+          this.quickPresetChip(45, '45分钟')
+          this.quickPresetChip(120, '2小时')
+        }
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16 })
+
+      Blank()
+
+      // 底部按钮栏
+      Row({ space: 12 }) {
+        if (this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)) {
+          Button('移除此项')
+            .fontSize(14)
+            .fontColor('#E64545')
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .layoutWeight(1)
+            .height(38)
+            .borderRadius(19)
+            .onClick(() => {
+              this.reminderList = this.reminderList.filter((m: number): boolean => m === -1 || m === 5 || m === 1440);
+              this.customSheetShow = false;
+            })
+        } else {
+          Button('取消')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .layoutWeight(1)
+            .height(38)
+            .borderRadius(19)
+            .onClick(() => {
+              this.customSheetShow = false;
+            })
+        }
+
+        Button('确定')
+          .fontSize(14)
+          .fontColor($r('app.color.button_text'))
+          .backgroundColor($r('app.color.brand'))
+          .layoutWeight(1)
+          .height(38)
+          .borderRadius(19)
+          .onClick(() => {
+            const val = parseInt(this.customReminderInput.trim(), 10);
+            if (Number.isNaN(val) || val <= 0 || val > 10080) {
+              this.getUIContext().getPromptAction().showToast({ message: '请输入1至10080之间的分钟数' });
+              return;
+            }
+            const list: number[] = this.reminderList.filter((m: number): boolean => m === -1 || m === 5 || m === 1440);
+            list.push(val);
+            this.reminderList = list;
+            this.customReminderMinutes = val;
+            this.customSheetShow = false;
+            this.getUIContext().getPromptAction().showToast({ message: `已设置提前 ${val} 分钟提醒` });
+          })
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, bottom: 12 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  quickPresetChip(minutes: number, label: string) {
+    Text(label)
+      .fontSize(12)
+      .fontColor((parseInt(this.customReminderInput, 10) === minutes) ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .backgroundColor((parseInt(this.customReminderInput, 10) === minutes) ? $r('app.color.chip_off_bg') : Color.Transparent)
+      .border({ width: 1, color: (parseInt(this.customReminderInput, 10) === minutes) ? $r('app.color.brand') : $r('app.color.shadow_color') })
+      .borderRadius(12)
+      .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+      .onClick(() => {
+        this.customReminderInput = String(minutes);
+      })
+  }
 }
