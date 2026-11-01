@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "xiao.chu.Calendar",
     "vendor": "xiaochu",
-    "versionCode": 10008,
-    "versionName": "0.1.8",
+    "versionCode": 10009,
+    "versionName": "0.1.9",
     "buildVersion": "1",
     "icon": "$media:layered_image",
     "label": "$string:app_name"

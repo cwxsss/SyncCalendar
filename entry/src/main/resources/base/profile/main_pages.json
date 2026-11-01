@@ -6,6 +6,7 @@
     "pages/CalendarListPage",
     "pages/EditAccountPage",
     "pages/EventEditPage",
-    "pages/SettingsPage"
+    "pages/SettingsPage",
+    "pages/TodoEditPage"
   ]
 }

@@ -63,9 +63,6 @@ struct Index {
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State quickTodoText: string = ''; // 待办快速输入框文本
-  @State todoModalOpen: boolean = false; // 新建待办半模态弹窗
-  @State modalTodoDueDays: number = 0; // 0: 无, 1: 今天, 2: 明天, 3: 本周末
-  @State modalTodoDesc: string = '';
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
@@ -1516,110 +1513,7 @@ struct Index {
     router.pushUrl({ url: 'pages/EventEditPage' });
   }
 
-  /** 新建待办半模态浮层 */
-  @Builder
-  todoModal() {
-    if (this.todoModalOpen) {
-      Stack({ alignContent: Alignment.Bottom }) {
-        // 半透明背景
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#80000000')
-          .onClick(() => {
-            this.todoModalOpen = false;
-          })
-
-        // 弹窗卡片
-        Column({ space: 14 }) {
-          Row() {
-            Text('新建待办事项')
-              .fontSize(17)
-              .fontWeight(FontWeight.Bold)
-              .fontColor($r('app.color.text_primary'))
-            Blank()
-            Text('✕')
-              .fontSize(16)
-              .fontColor($r('app.color.text_secondary'))
-              .width(28)
-              .height(28)
-              .textAlign(TextAlign.Center)
-              .onClick(() => {
-                this.todoModalOpen = false;
-              })
-          }
-          .width('100%')
-
-          TextInput({ text: this.quickTodoText, placeholder: '待办事项内容（如：下周三前提交报销）' })
-            .width('100%')
-            .height(44)
-            .fontSize(15)
-            .backgroundColor($r('app.color.chip_off_bg'))
-            .borderRadius(10)
-            .padding({ left: 12, right: 12 })
-            .onChange((v: string) => {
-              this.quickTodoText = v;
-            })
-
-          Row({ space: 8 }) {
-            Text('截止时间：')
-              .fontSize(13)
-              .fontColor($r('app.color.text_secondary'))
-            Button('无截止')
-              .fontSize(12)
-              .height(28)
-              .backgroundColor(this.modalTodoDueDays === 0 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
-              .fontColor(this.modalTodoDueDays === 0 ? $r('app.color.button_text') : $r('app.color.text_primary'))
-              .borderRadius(14)
-              .onClick(() => { this.modalTodoDueDays = 0; })
-            Button('今天')
-              .fontSize(12)
-              .height(28)
-              .backgroundColor(this.modalTodoDueDays === 1 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
-              .fontColor(this.modalTodoDueDays === 1 ? $r('app.color.button_text') : $r('app.color.text_primary'))
-              .borderRadius(14)
-              .onClick(() => { this.modalTodoDueDays = 1; })
-            Button('明天')
-              .fontSize(12)
-              .height(28)
-              .backgroundColor(this.modalTodoDueDays === 2 ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
-              .fontColor(this.modalTodoDueDays === 2 ? $r('app.color.button_text') : $r('app.color.text_primary'))
-              .borderRadius(14)
-              .onClick(() => { this.modalTodoDueDays = 2; })
-          }
-          .width('100%')
-
-          Button('确定保存并同步')
-            .width('100%')
-            .height(44)
-            .fontSize(16)
-            .fontWeight(FontWeight.Medium)
-            .backgroundColor($r('app.color.brand'))
-            .borderRadius(22)
-            .onClick(() => {
-              // 计算截止时间
-              if (this.modalTodoDueDays === 1) {
-                const now = new Date();
-                now.setHours(23, 59, 59, 0);
-                this.quickTodoText = this.quickTodoText.trim() + ' 今天';
-              } else if (this.modalTodoDueDays === 2) {
-                this.quickTodoText = this.quickTodoText.trim() + ' 明天';
-              }
-              this.todoModalOpen = false;
-              this.createQuickTodo();
-            })
-        }
-        .width('100%')
-        .padding(20)
-        .backgroundColor($r('app.color.card_bg'))
-        .borderRadius({ topLeft: 20, topRight: 20 })
-      }
-      .width('100%')
-      .height('100%')
-    }
-  }
-
-  // ---------- UI ----------
+    // ---------- UI ----------
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
       Column() {
@@ -1649,8 +1543,6 @@ struct Index {
       // 全局日程搜索覆盖层
       this.searchModal()
 
-      // 新建待办半模态浮层
-      this.todoModal()
 
       Button() {
         Text('＋')
@@ -1666,9 +1558,11 @@ struct Index {
       .margin(24)
       .onClick(() => {
         if (this.mode === 'todo') {
-          // 待办模式下弹出新建待办弹层
-          this.todoModalOpen = true;
+          // 待办模式下：新建待办事项
+          AppStorage.setOrCreate<number>('pendingTodoId', 0);
+          router.pushUrl({ url: 'pages/TodoEditPage' });
         } else {
+          // 日程模式下：新建日程
           this.addEvent();
         }
       })
@@ -3630,23 +3524,30 @@ struct Index {
   @Builder
   todoRow(t: DisplayEvent) {
     Row({ space: 10 }) {
-      // 勾选框（颜色跟随日历本）
-      if (t.completed) {
-        Text('✓')
-          .fontSize(13)
-          .fontColor($r('app.color.button_text'))
-          .width(22)
-          .height(22)
-          .textAlign(TextAlign.Center)
-          .borderRadius(11)
-          .backgroundColor(this.colorOfCal(t.calKey))
-      } else {
-        Text('')
-          .width(22)
-          .height(22)
-          .borderRadius(11)
-          .border({ width: 2, color: this.colorOfCal(t.calKey) })
+      // 勾选框（点击切换完成/未完成）
+      Row() {
+        if (t.completed) {
+          Text('✓')
+            .fontSize(13)
+            .fontColor($r('app.color.button_text'))
+            .width(22)
+            .height(22)
+            .textAlign(TextAlign.Center)
+            .borderRadius(11)
+            .backgroundColor(this.colorOfCal(t.calKey))
+        } else {
+          Text('')
+            .width(22)
+            .height(22)
+            .borderRadius(11)
+            .border({ width: 2, color: this.colorOfCal(t.calKey) })
+        }
       }
+      .onClick(() => {
+        this.toggleTodo(t);
+      })
+
+      // 中间文本内容（点击进入编辑页面，修改时间、描述、提醒等）
       Column({ space: 3 }) {
         Text(t.title === '' ? '(无标题待办)' : t.title)
           .fontSize(15)
@@ -3660,6 +3561,10 @@ struct Index {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+      .onClick(() => {
+        AppStorage.setOrCreate<number>('pendingTodoId', t.id);
+        router.pushUrl({ url: 'pages/TodoEditPage' });
+      })
 
       // 删除按钮
       Text('✕')
@@ -3680,9 +3585,6 @@ struct Index {
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
-    .onClick(() => {
-      this.toggleTodo(t);
-    })
   }
 
   /** 是否跨天（结束日期晚于开始日期） */
