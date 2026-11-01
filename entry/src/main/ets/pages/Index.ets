@@ -3327,28 +3327,52 @@ struct Index {
   /** 待办页：与日历视图完全分开，只读展示服务器端 VTODO */
   @Builder
   todoBody() {
-    Scroll() {
-      Column({ space: 8 }) {
+    List({ space: 8 }) {
+      ListItem() {
         Text('未完成')
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
-        ForEach(this.todos.filter((t: DisplayEvent): boolean => !t.completed), (t: DisplayEvent) => {
+          .padding({ top: 4, bottom: 2 })
+      }
+
+      ForEach(this.todos.filter((t: DisplayEvent): boolean => !t.completed), (t: DisplayEvent) => {
+        ListItem() {
           this.todoRow(t)
-        }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
-        if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+        }
+        .swipeAction({
+          end: {
+            builder: () => { this.todoSwipeAction(t) }
+          }
+        })
+      }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+
+      if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+        ListItem() {
           Text('已完成')
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.text_secondary'))
             .width('100%')
             .margin({ top: 10 })
-          ForEach(this.todos.filter((t: DisplayEvent): boolean => t.completed), (t: DisplayEvent) => {
-            this.todoRow(t)
-          }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+            .padding({ top: 4, bottom: 2 })
         }
-        if (this.todos.length === 0 && !this.loading) {
+
+        ForEach(this.todos.filter((t: DisplayEvent): boolean => t.completed), (t: DisplayEvent) => {
+          ListItem() {
+            this.todoRow(t)
+          }
+          .swipeAction({
+            end: {
+              builder: () => { this.todoSwipeAction(t) }
+            }
+          })
+        }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+      }
+
+      if (this.todos.length === 0 && !this.loading) {
+        ListItem() {
           Column({ space: 8 }) {
             Text('☑')
               .fontSize(34)
@@ -3365,17 +3389,16 @@ struct Index {
           .padding(32)
         }
       }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 8, bottom: 24 })
-      .constraintSize({ minHeight: '100%' })
     }
     .layoutWeight(1)
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 8, bottom: 24 })
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
     .align(Alignment.Top)
   }
 
-  /** 快速添加待办事项（支持智能自然语言解析并自动同步 CalDAV） */
+    /** 快速添加待办事项（支持智能自然语言解析并自动同步 CalDAV） */
   private async createQuickTodo(): Promise<void> {
     const trimmed = this.quickTodoText.trim();
     if (trimmed === '') {
@@ -3391,20 +3414,39 @@ struct Index {
     const todoTitle = parsed.title !== '' ? parsed.title : trimmed;
     const dueTime = (parsed.confidence && parsed.startTime > 0) ? parsed.startTime : 0;
 
-    // 查找可写的 CalDAV 日历本集合
+    // 查找可写的 CalDAV 日历本集合（优先默认选择 inbox / 收件箱）
     let targetKey = '';
     let targetHref = '';
     for (const acc of this.accounts) {
       for (let i = 0; i < acc.calendarHrefs.length; i++) {
         const writable = i < acc.calendarWritable.length ? acc.calendarWritable[i] : '1';
         if (writable !== '0') {
-          targetKey = acc.id + '_' + i;
-          targetHref = acc.calendarHrefs[i];
-          break;
+          const cName = i < acc.calendarNames.length ? acc.calendarNames[i].toLowerCase() : '';
+          const cHref = acc.calendarHrefs[i].toLowerCase();
+          if (cName.includes('inbox') || cHref.includes('inbox') || cName.includes('收件箱')) {
+            targetKey = acc.id + '_' + i;
+            targetHref = acc.calendarHrefs[i];
+            break;
+          }
         }
       }
       if (targetKey !== '') {
         break;
+      }
+    }
+    if (targetKey === '') {
+      for (const acc of this.accounts) {
+        for (let i = 0; i < acc.calendarHrefs.length; i++) {
+          const writable = i < acc.calendarWritable.length ? acc.calendarWritable[i] : '1';
+          if (writable !== '0') {
+            targetKey = acc.id + '_' + i;
+            targetHref = acc.calendarHrefs[i];
+            break;
+          }
+        }
+        if (targetKey !== '') {
+          break;
+        }
       }
     }
 
@@ -3476,11 +3518,39 @@ struct Index {
     });
   }
 
-  /** 点击待办：打勾完成/取消完成，本地落库并后台双向推送到 CalDAV */
+  /** 点击待办：打勾完成/取消完成，0ms 瞬间响应渲染，本地落库并后台双向推送到 CalDAV */
   private async toggleTodo(t: DisplayEvent): Promise<void> {
     const nextCompleted: boolean = !t.completed;
-    t.completed = nextCompleted;
+    // 立即不可变替换 todos 数组，0ms 瞬间局部渲染触发 ArkUI 状态更新！
+    this.todos = this.todos.map((item: DisplayEvent): DisplayEvent => {
+      if (item.id === t.id) {
+        const copy = new DisplayEvent();
+        copy.id = item.id;
+        copy.isSystem = item.isSystem;
+        copy.title = item.title;
+        copy.description = item.description;
+        copy.location = item.location;
+        copy.startTime = item.startTime;
+        copy.endTime = item.endTime;
+        copy.isAllDay = item.isAllDay;
+        copy.calKey = item.calKey;
+        copy.calName = item.calName;
+        copy.color = item.color;
+        copy.completed = nextCompleted;
+        copy.recurring = item.recurring;
+        copy.writable = item.writable;
+        return copy;
+      }
+      return item;
+    });
     this.dataVersion++;
+
+    // 立即弹 Toast 反馈
+    this.getUIContext().getPromptAction().showToast({
+      message: nextCompleted ? '已标记为完成' : '已取消完成'
+    });
+
+    // 异步更新数据库与后台同步
     const ctx = this.getUIContext().getHostContext();
     if (ctx !== undefined) {
       await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
@@ -3488,10 +3558,9 @@ struct Index {
         LogUtil.write('待办后台同步失败: ' + err.message);
       });
     }
-    this.getUIContext().getPromptAction().showToast({
-      message: nextCompleted ? '已标记为完成' : '已取消完成'
-    });
   }
+
+  
 
   /** 一键复制标准 iCal (.ics) 日程到剪贴板，支持跨软件分享与导入 */
   private async shareEventIcs(): Promise<void> {
@@ -3547,7 +3616,7 @@ struct Index {
   @Builder
   todoRow(t: DisplayEvent) {
     Row({ space: 10 }) {
-      // 勾选框（点击切换完成/未完成）
+      // 勾选框（大触控热区 36x36，点击即时切换完成/未完成）
       Row() {
         if (t.completed) {
           Text('✓')
@@ -3566,6 +3635,9 @@ struct Index {
             .border({ width: 2, color: this.colorOfCal(t.calKey) })
         }
       }
+      .width(36)
+      .height(36)
+      .justifyContent(FlexAlign.Center)
       .onClick(() => {
         this.toggleTodo(t);
       })

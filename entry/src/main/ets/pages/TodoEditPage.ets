@@ -97,7 +97,17 @@ struct TodoEditPage {
     }
     this.books = list;
     if (this.chosenKey === '' && list.length > 0) {
-      this.chosenKey = list[0].calKey;
+      // 优先匹配 CalDAV 的 inbox / 收件箱 作为默认日历本
+      const inboxBook = list.find((b: TodoBookChoice): boolean => {
+        const n = b.name.toLowerCase();
+        const h = b.href.toLowerCase();
+        return n.includes('inbox') || h.includes('inbox') || b.name.includes('收件箱');
+      });
+      if (inboxBook !== undefined) {
+        this.chosenKey = inboxBook.calKey;
+      } else {
+        this.chosenKey = list[0].calKey;
+      }
     }
   }
 
@@ -661,13 +671,20 @@ struct TodoEditPage {
           }
         }
         .width('100%')
+        .justifyContent(FlexAlign.Start)
+        .alignItems(HorizontalAlign.Start)
         .padding({ left: 16, right: 16, top: 4, bottom: 40 })
       }
       .layoutWeight(1)
+      .width('100%')
+      .align(Alignment.Top)
       .scrollBar(BarState.Auto)
+      .edgeEffect(EdgeEffect.Spring)
     }
     .width('100%')
     .height('100%')
+    .justifyContent(FlexAlign.Start)
+    .alignItems(HorizontalAlign.Start)
     .backgroundColor($r('app.color.page_bg'))
   }
 
