@@ -3311,20 +3311,26 @@ struct Index {
    */
   @Builder
   dayCellCircle(cell: MonthCell, showWeekLabel: boolean = false) {
-    Stack() {
+    // 显式 Center：Stack 默认虽也居中，但内容高于圆时对齐行为容易偏，
+    // 写死更可控（周条曾是"上露星期、下漏圆点"）。
+    Stack({ alignContent: Alignment.Center }) {
       // ⭐ TODAY_RING 底层圆：选中用实蓝，今天用淡蓝，尺寸一致。
       //    原来今天只在日期数字上贴了个 24×24 的小圈，选中却是 46vp 大圆，
       //    同一天"选不选中"看起来像两种东西。现在两者尺寸统一。
+      // ⭐ RING_FIT 圆径必须**按内容高度**取，不能一刀切。
+      //    周条比月历多一行"星期标签"，内容约 147px；圆固定 46vp(138px) 时
+      //    就会上露"一"、下漏事件点。周条用 54vp(≈162px) 才包得住。
+      //    月视图没有星期标签、内容约 118px，46vp 刚好。
       if (cell.dateMs === this.selectedDate) {
         Column()
-          .width(this.wideLayout ? 40 : 46)
-          .height(this.wideLayout ? 40 : 46)
+          .width(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
+          .height(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
           .borderRadius('50%')
           .backgroundColor($r('app.color.selected_bg'))
       } else if (cell.isToday) {
         Column()
-          .width(this.wideLayout ? 40 : 46)
-          .height(this.wideLayout ? 40 : 46)
+          .width(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
+          .height(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
           .borderRadius('50%')
           .backgroundColor($r('app.color.today_bg'))
       }
