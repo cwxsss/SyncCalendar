@@ -173,6 +173,36 @@ export class SyncEngine {
         throw err as Error;
       }
       LogUtil.write(`日历本[${i}]「${calName}」REPORT 返回 ${items.length} 个资源`);
+      // ⭐ SYNC_TODOS 同步该本里的待办（VTODO）。
+      //    原来整个同步流程只处理 VEVENT，`DavClient.reportTodos` 写了却没人调用，
+      //    导致待办数据从来不会从服务器拉下来 ——
+      //    用户取消勾选本（触发 pruneStaleHrefs 清行）后再勾回来，待办就永久消失了。
+      //    放在这里（VEVENT 处理之前）单独走一遍，不影响原有日程逻辑。
+      try {
+        const todoItems: RemoteItem[] = await DavClient.reportTodos(href, auth);
+        if (todoItems.length > 0) {
+          const todoRemote: RemoteEvent[] = [];
+          for (const ti of todoItems) {
+            try {
+              const raw: string = await DavClient.getRawStrict(ti.href, auth);
+              const parsed: RemoteEvent[] = IcsUtil.parseTodos(raw);
+              for (const pr of parsed) {
+                pr.etag = ti.etag;
+                todoRemote.push(pr);
+              }
+            } catch (e) {
+              LogUtil.write(`待办 GET 失败(跳过) ${ti.href}`);
+            }
+          }
+          if (todoRemote.length > 0) {
+            await EventDb.applyRemote(context, calKey, href, todoRemote, true);
+            LogUtil.write(`日历本[${i}]「${calName}」待办同步：${todoRemote.length} 条`);
+          }
+        }
+      } catch (e) {
+        // 待办同步失败不能影响日程同步（很多服务器对 VTODO 查询返回 403/不支持）
+        LogUtil.write(`日历本[${i}]「${calName}」待办同步失败(忽略)：${(e as BusinessError).message ?? ''}`);
+      }
       // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
       const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
       const byUid: Map<string, LocalEvent[]> = new Map();
