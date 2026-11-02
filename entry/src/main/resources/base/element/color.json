@@ -19,6 +19,7 @@
     { "name": "grid_line", "value": "#14000000" },
     { "name": "today_bg", "value": "#14007DFF" },
     { "name": "selected_bg", "value": "#007DFF" },
-    { "name": "chip_off_bg", "value": "#0D000000" }
+    { "name": "chip_off_bg", "value": "#0D000000" },
+    { "name": "event_mark", "value": "#D93025" }
   ]
 }

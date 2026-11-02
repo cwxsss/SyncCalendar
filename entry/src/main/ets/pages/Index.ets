@@ -1698,7 +1698,7 @@ struct Index {
             .fontSize(8)
             .fontColor(cell.dateMs === this.selectedDate
               ? (cell.hasEvent ? $r('app.color.button_text') : $r('app.color.text_secondary'))
-              : (cell.hasEvent ? $r('app.color.brand') : $r('app.color.text_hint')))
+              : (cell.hasEvent ? $r('app.color.event_mark') : $r('app.color.text_hint')))
             .fontWeight(cell.hasEvent ? FontWeight.Medium : FontWeight.Normal)
             .maxLines(1)
         }
@@ -3265,13 +3265,13 @@ struct Index {
           .fontSize(8)
           .fontColor(cell.dateMs === this.selectedDate
             ? (cell.hasEvent ? $r('app.color.button_text') : $r('app.color.text_secondary'))
-            : (cell.hasEvent ? $r('app.color.brand') : $r('app.color.text_hint')))
+            : (cell.hasEvent ? $r('app.color.event_mark') : $r('app.color.text_hint')))
           .fontWeight(cell.hasEvent ? FontWeight.Medium : FontWeight.Normal)
           .maxLines(1)
       } else {
         // 宽屏：农历被省略，用一个小圆点表示（此时格子窄，圆点就在正中，不会有位置问题）
         Circle({ width: 4, height: 4 })
-          .fill(cell.hasEvent ? $r('app.color.brand') : Color.Transparent)
+          .fill(cell.hasEvent ? $r('app.color.event_mark') : Color.Transparent)
           .opacity(cell.hasEvent ? 1 : 0)
       }
     }
