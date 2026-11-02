@@ -89,6 +89,10 @@ struct Index {
    *  连 itemGenerator 都不重新执行 ⇒ 内层永远拿到旧的 cells（hasEvent 全 false）。
    *  只改内层 key 是没用的，必须让外层 key 变。 */
   @State monthDataVersion: number = 0;
+  /** ⭐ 用户**主动选中**的日号（1~31）。翻月时用它算目标日，
+   *  避免"1/31 → 2/28 → 3/28"这种日号被永久钳死的问题：
+   *  有了它，2 月显示 28 号，翻到 3 月能回到 31 号。 */
+  @State preferredDay: number = new Date().getDate();
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
@@ -633,6 +637,14 @@ struct Index {
     const nm = this.addMonths(this.displayYear, this.displayMonth, delta);
     this.displayYear = nm[0];
     this.displayMonth = nm[1];
+    // ⭐ KEEP_SELECTED_DAY 翻月后必须把选中日**迁到新月份的同一天**。
+    //    原来这里只改 displayMonth、不动 selectedDate，
+    //    导致 selectedDate 还停在上个月 ⇒ 新月份所有格子都匹配不上，
+    //    整个月没有任何一天是选中态（用户看到的"乱跳/没有选中"）。
+    // ⭐ 用 preferredDay（用户原本选的日号）而不是 selectedDate 的日号：
+    //    否则 1/31 → 2/28 之后，再翻月就一直是 28 号，回不到 31。
+    const lastDay: number = new Date(nm[0], nm[1] + 1, 0).getDate();
+    this.selectedDate = new Date(nm[0], nm[1], Math.min(this.preferredDay, lastDay)).getTime();
     this.reloadEvents();
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
@@ -3389,6 +3401,8 @@ struct Index {
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.selectedDate = cell.dateMs;
+      // 用户主动点了某天 ⇒ 记住这个日号，作为后续翻月的基准
+      this.preferredDay = new Date(cell.dateMs).getDate();
       if (!cell.inMonth) {
         const d = new Date(cell.dateMs);
         this.displayYear = d.getFullYear();
