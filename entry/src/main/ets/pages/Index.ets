@@ -1706,7 +1706,8 @@ struct Index {
         .onClick(() => {
           this.selectedDate = cell.dateMs;
         })
-      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvent}`)
+      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`
+        + `_he${cell.hasEvent ? 1 : 0}_td${cell.isToday ? 1 : 0}`)
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -1808,13 +1809,20 @@ struct Index {
         Column({ space: 2 }) {
           ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
             Row({ space: 2 }) {
+              // ⭐ key 必须包含影响渲染的**全部**状态：hasEvent / isToday /
+              //    是否选中。只放 dateMs+选中态时，数据加载完成后 hasEvent 从
+              //    false 变 true 但 key 没变 ⇒ ArkUI 复用旧组件、跳过重绘，
+              //    表现为"首屏农历不变红，切一次视图才正常"。
               ForEach(week, (cell: MonthCell) => {
                 this.dayCell(cell)
-              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+              }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`
+                + `_he${cell.hasEvent ? 1 : 0}_td${cell.isToday ? 1 : 0}`)
             }
             .width('100%')
             .layoutWeight(this.wideLayout ? 1 : 0)
-          }, (week: MonthCell[], idx: number) => String(idx))
+          // 用"这一周首日的 dateMs"当 key，而不是序号：跨月翻页时序号会重复，
+          // 会让 ArkUI 误以为是同一周而复用旧节点。
+          }, (week: MonthCell[], idx: number) => `wk${week.length > 0 ? week[0].dateMs : idx}`)
         }
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
