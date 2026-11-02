@@ -56,6 +56,15 @@ export class RemoteEvent {
   recurrenceId: number = 0;   // 原始 RECURRENCE-ID（毫秒；0 = 无）
   reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
   reminders: number[] = [];   // 全部提醒提前分钟数（多选）
+  /**
+   * ⭐ REMOTE_PATH 服务器上的真实资源文件名（REPORT 返回的 href 末段，已含 URL 编码）。
+   *
+   * 为什么不能用 uid 拼：服务器不保证「资源文件名 = ICS 里的 UID」。
+   * 家书 CalDav.php 用 `preg_replace('/[^A-Za-z0-9._-]/', '_', $uid)` 生成文件名，
+   * UID `movie-188@familybook` 的真实资源是 `movie-188_familybook.ics`。
+   * 猜错 ⇒ DELETE/PUT 打到不存在的路径 ⇒ 404，服务器上删不掉、或写出重复资源。
+   */
+  remotePath: string = '';
 }
 
 export class EventDb {
@@ -524,14 +533,29 @@ export class EventDb {
     //    原先对每条都 `existing.find(...)` ⇒ O(n·m)（工作本 735 行 → 54 万次比较，
     //    每次还要现拼 `uid_startTime_recId` 字符串），2184 行全库累计近 100 万次。
     //    卡片后台同步的时间预算只有 9 秒，这笔开销吃不起 → 预先建 Map，改成 O(1) 查。
-    //    语义与 `existing.find(x => !x.dirty && x.uid===r.uid && x.startTime===r.startTime
-    //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
+    //    dirty 行不入 `keyed`、同键取**最先**出现的那行。
+    //    ⭐ 但仅排除出 keyed不够（见下方 REVIVE_GUARD）：还需单独索引 dirty 行并主动拦截，
+    //       否则远端数据查不到 key 会走新增分支，反而插出重复行。
     const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    // ⭐ REVIVE_GUARD dirty 行**单独**建索引，而不是只从 keyed 里排除。
+    //    只排除不够：远端数据 keyed 查不到 → 走"新增"分支 → 又插一行，
+    //    本地就出现两行（用户改的 + 远端旧版），表现为"改完又变回去/出现两条"。
+    const dirtyKeyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    // ⭐ 本地已标记删除、还没推给服务器的 uid 集合。
+    //    按 uid 而非 key：删重复系列时本地只留主事件标 deleted，
+    //    但远端还有一串 RECURRENCE-ID 实例行，key 各不相同，只有 uid 能整族挡住。
+    const dirtyDeletedUids: Set<string> = new Set<string>();
     for (const e of existing) {
+      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
+      if (e.dirty && e.deleted) {
+        dirtyDeletedUids.add(e.uid);
+      }
       if (e.dirty) {
+        if (!dirtyKeyed.has(k)) {
+          dirtyKeyed.set(k, e);
+        }
         continue;
       }
-      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
       if (!keyed.has(k)) {
         keyed.set(k, e);
       }
@@ -548,6 +572,14 @@ export class EventDb {
         continue; // 同一资源内的重复条目 → 只保留一条
       }
       seenKeys.add(key);
+      // ⭐ REVIVE_GUARD 本地已删待推送 → 远端旧版本一律忽略，防止死灰复燃
+      if (dirtyDeletedUids.has(r.uid)) {
+        continue;
+      }
+      // ⭐ 本地有未推送的修改 → 保留本地版本，绝不能让远端旧版覆盖或重复插入
+      if (dirtyKeyed.has(key)) {
+        continue;
+      }
       const found: LocalEvent | undefined = keyed.get(key);
       if (found === undefined) {
         // 新增
@@ -555,7 +587,8 @@ export class EventDb {
         e.uid = r.uid;
         e.calKey = calKey;
         e.href = href;
-        e.remotePath = encodeURIComponent(r.uid) + '.ics';
+        // ⭐ REMOTE_PATH 优先用服务器真实文件名；为空时才退回按 uid 猜（本地新建等场景）
+        e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
         e.title = r.title;
         e.description = r.description;
         e.location = r.location;
@@ -584,6 +617,10 @@ export class EventDb {
         // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
         // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
         found.href = href;
+        // 服务器上资源被改名时同步更新，否则后续 DELETE/PUT 会打到旧路径
+        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+          found.remotePath = r.remotePath;
+        }
         found.title = r.title;
         found.description = r.description;
         found.location = r.location;

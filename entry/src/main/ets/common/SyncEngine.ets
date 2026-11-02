@@ -244,8 +244,9 @@ export class SyncEngine {
         if (!fullRefetch && group !== undefined && group.length > 0 && !group[0].dirty
           && group[0].etag === it.etag) {
           // etag 未变：直接用本地行还原远端数据（含 reminder 等完整字段）
+          const rp: string = it.href.substring(it.href.lastIndexOf('/') + 1);
           for (const row of group) {
-            remote.push(SyncEngine.rowToRemote(row, it.etag));
+            remote.push(SyncEngine.rowToRemote(row, it.etag, rp));
           }
           continue;
         }
@@ -264,6 +265,12 @@ export class SyncEngine {
               return [];
             }
             const resUid: string = SyncEngine.resUidFromHref(it.href);
+            // ⭐ REMOTE_PATH 服务器真实资源文件名（href 末段，已含 URL 编码）。
+            //    绝不能用 `encodeURIComponent(uid) + '.ics'` 去猜：
+            //    家书 CalDav.php 用 preg_replace('/[^A-Za-z0-9._-]/','_',uid) 生成文件名，
+            //    UID `movie-188@familybook` 的真实资源是 `movie-188_familybook.ics`。
+            //    猜错 ⇒ DELETE/PUT 打到不存在的路径 ⇒ 404，服务器上删不掉、或写出重复资源。
+            const fileName: string = it.href.substring(it.href.lastIndexOf('/') + 1);
             const parsed: RemoteEvent[] = IcsUtil.parse(raw);
             const out: RemoteEvent[] = [];
             for (const r of parsed) {
@@ -273,6 +280,7 @@ export class SyncEngine {
               if (r.uid === '') {
                 r.uid = resUid;
               }
+              r.remotePath = fileName;
               r.etag = it.etag;
               out.push(r);
             }
@@ -506,10 +514,18 @@ export class SyncEngine {
   }
 
   /** 本地行 → 远端事件（etag 未变的资源复用本地完整数据，含 reminder） */
-  private static rowToRemote(e: LocalEvent, etag: string): RemoteEvent {
+  /**
+   * ⭐ REMOTE_PATH 第三个参数是当前 REPORT 返回的真实资源文件名（href 末段）。
+   *
+   * 为什么必须从外面传进来：本地行的 remotePath 可能是历史数据用 uid 猜出来的，
+   * 也可能是空的（本地新建后还没同步成功）。而 REPORT 的 href 反映的是
+   * **此刻服务器上的真实文件名**，比本地任何值都可靠。
+   */
+  private static rowToRemote(e: LocalEvent, etag: string, remotePath: string): RemoteEvent {
     const r = new RemoteEvent();
     r.uid = e.uid;
     r.etag = etag;
+    r.remotePath = remotePath !== '' ? remotePath : e.remotePath;
     r.title = e.title;
     r.description = e.description;
     r.location = e.location;
@@ -564,7 +580,27 @@ export class SyncEngine {
       const url: string = e.href.endsWith('/') ? e.href + e.remotePath : `${e.href}/${e.remotePath}`;
       try {
         if (e.deleted) {
-          await DavClient.deleteRemote(url, auth);
+          // ⭐ DELETE_404_PURGE 单条路径：deleteRemote 内部已把 404 视作成功，
+          //    这里再显式兜一层 410（Gone），并保证无论哪种"远端已无"都清本地。
+          let gone: boolean = false;
+          try {
+            await DavClient.deleteRemote(url, auth);
+            gone = true;
+          } catch (delErr) {
+            if (delErr instanceof DavHttpError) {
+              const st: number = (delErr as DavHttpError).status;
+              if (st === 401) {
+                throw delErr as Error;
+              }
+              if (st === 404 || st === 410) {
+                gone = true;
+                LogUtil.write(`单条资源在服务器上已不存在(${st})，直接清理本地：uid=${e.uid}`);
+              }
+            }
+            if (!gone) {
+              throw delErr as Error;
+            }
+          }
           await EventDb.purge(context, e.id);
           LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
         } else {
@@ -616,14 +652,29 @@ export class SyncEngine {
     const url: string = href.endsWith('/') ? href + path : `${href}/${path}`;
     // 整个系列被删除（主事件行 deleted）→ DELETE 资源 + 清掉该 uid 全部本地行
     if (master.deleted) {
+      // ⭐ DELETE_404_PURGE 404/410 = 服务器上本就没有这个资源。
+      //    必须当成"删除成功"继续往下清本地，不能 return ——
+      //    否则本地行永远留着，用户看到"删不掉的日程"，且每次同步都重复失败。
+      //    典型诱因：remotePath 用 uid 猜错（服务器真实文件名不同）⇒ DELETE 打到不存在的路径。
+      let remoteGone: boolean = false;
       try {
         await DavClient.deleteRemote(url, auth);
+        remoteGone = true;
       } catch (err) {
-        if (err instanceof DavHttpError && (err as DavHttpError).status === 401) {
-          throw err as Error;
+        if (err instanceof DavHttpError) {
+          const st: number = (err as DavHttpError).status;
+          if (st === 401) {
+            throw err as Error;
+          }
+          if (st === 404 || st === 410) {
+            remoteGone = true;
+            LogUtil.write(`重复系列资源在服务器上已不存在(${st})，直接清理本地：uid=${uid}`);
+          }
         }
-        LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
-        return;
+        if (!remoteGone) {
+          LogUtil.write(`推送删除重复系列失败(保留待推送)：uid=${uid} → ${(err as Error).message}`);
+          return;
+        }
       }
       await EventDb.purgeByUid(context, calKey, uid);
       LogUtil.write(`推送删除重复系列（标题已脱敏）uid=${uid} → ${url}`);
