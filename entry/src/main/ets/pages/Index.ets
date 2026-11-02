@@ -1697,16 +1697,20 @@ struct Index {
         //    原来这里选中只有 30×30 的小圈，跟月视图 46vp 的大圆不一致，
         //    同一个"选中"在两个视图里长得不一样，会让人以为是不同状态。
         Stack() {
+          // ⭐ WEEK_BIGGER 圆必须够大：实测周条每列 133×192px，
+          //    原来只给 36vp(≈113px)，比月视图的 138px 还小，看着空。
+          //    但**列宽 133px ≈ 44vp 是硬上限**，给 52 会横向溢出被裁切，
+          //    所以取 42vp(≈126px)，留 7px 余量。
           if (cell.dateMs === this.selectedDate) {
             Column()
-              .width(36)
-              .height(36)
+              .width(42)
+              .height(42)
               .borderRadius('50%')
               .backgroundColor($r('app.color.selected_bg'))
           } else if (cell.isToday) {
             Column()
-              .width(36)
-              .height(36)
+              .width(42)
+              .height(42)
               .borderRadius('50%')
               .backgroundColor($r('app.color.today_bg'))
           }
@@ -1720,22 +1724,22 @@ struct Index {
               .fontColor(cell.dateMs === this.selectedDate
                 ? $r('app.color.brand_text') : $r('app.color.text_hint'))
             Text(String(cell.day))
-              .fontSize(14)
+              .fontSize(16)
               .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
                 ? FontWeight.Bold : FontWeight.Normal)
               .fontColor(cell.dateMs === this.selectedDate
                 ? $r('app.color.button_text') : $r('app.color.text_primary'))
-              .width(30)
-              .height(30)
+              .width(34)
+              .height(34)
               .textAlign(TextAlign.Center)
               // 背景交给底层圆（否则会出现"大圆套小圈"）
               .backgroundColor(Color.Transparent)
             Text(cell.lunar)
-              .fontSize(8)
+              .fontSize(9)
               .fontColor(cell.dateMs === this.selectedDate
                 ? $r('app.color.button_text') : $r('app.color.text_hint'))
               .maxLines(1)
-            Circle({ width: 3.5, height: 3.5 })
+            Circle({ width: 4, height: 4 })
               .fill(cell.dateMs === this.selectedDate
                 ? $r('app.color.button_text') : $r('app.color.soft_red'))
               .opacity(cell.hasEvent ? 1 : 0)
