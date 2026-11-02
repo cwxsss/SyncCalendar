@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 待办本图标：与 ic_event_book 同一套笔触，用"清单+勾"表达待办 -->
+  <rect x="3" y="4" width="18" height="17" rx="3" fill="none" stroke="#00B34A" stroke-width="2"/>
+  <!-- 三条清单项 -->
+  <path d="M7 9 H17" fill="none" stroke="#00B34A" stroke-width="2" stroke-linecap="round"/>
+  <path d="M7 13.5 H14" fill="none" stroke="#00B34A" stroke-width="2" stroke-linecap="round"/>
+  <path d="M7 18 H12" fill="none" stroke="#00B34A" stroke-width="2" stroke-linecap="round"/>
+  <!-- 右下角一个勾，强调"待办"语义 -->
+  <path d="M15 17 L17 19 L21 14.5" fill="none" stroke="#00B34A" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

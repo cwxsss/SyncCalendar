@@ -544,30 +544,22 @@ struct EditCalendarRow {
 
   build() {
     Row({ space: 12 }) {
-      // ⭐ COMPS_ICON 类型图标：放在颜色圆点**前面**，
+      // ⭐ SVG_ICON 类型图标：放在颜色圆点**前面**，
       //    让用户先看清"这本是日历还是待办"，再看它是什么颜色。
-      //    混合本两个图标都显示（服务器同时支持 VEVENT 和 VTODO）。
-      if (this.item.comps === 'todo') {
-        Text('✓')
-          .fontSize(13)
-          .fontColor($r('app.color.success'))
-          .width(16)
-          .textAlign(TextAlign.Center)
-      } else if (this.item.comps === 'both') {
-        Text('▦✓')
-          .fontSize(13)
-          .fontColor($r('app.color.text_secondary'))
-          .width(16)
-          .textAlign(TextAlign.Center)
-      } else {
-        // 'event' 或 'unknown'：一律显示日历图标
-        // （unknown 是服务器未声明，按日历对待，不要凭空标成待办）
-        Text('▦')
-          .fontSize(13)
-          .fontColor($r('app.color.text_secondary'))
-          .width(16)
-          .textAlign(TextAlign.Center)
-      }
+      //
+      //    用 SVG 而不是字符：字符图标（▦ / ✓）依赖系统字体字形，
+      //    笔画粗细与视觉重量不统一，跨设备还可能缺字形变成方框。
+      //    这两个 SVG 共用同一套笔触（stroke 2、round 端点、24×24），
+      //    渲染成 16vp 时重量一致。
+      //
+      //    混合本（both）：显示待办图标（它确实能存待办），
+      //    但用户看名字/颜色仍能分辨，不必塞两个图标挤在一行。
+      Image(this.item.comps === 'todo' || this.item.comps === 'both'
+        ? $r('app.media.ic_todo_book')
+        : $r('app.media.ic_event_book'))
+        .width(16)
+        .height(16)
+        .objectFit(ImageFit.Contain)
       if (this.item.color !== '') {
         Circle()
           .width(12)
