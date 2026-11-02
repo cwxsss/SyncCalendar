@@ -2072,33 +2072,24 @@ struct Index {
   }
 
   /**
-   * ⭐ HAS_TODO_BOOK 是否勾选了"待办本"。
+   * ⭐ TODO_TAB_FACT 待办标签是否显示 —— 只看**事实**，不看声明。
    *
-   * 判定：该账号的 calendarComps 里，**被选中**的日历本中存在 'todo' 或 'both'。
-   * 一个都没选 ⇒ 必然没有待办，待办标签直接不显示。
+   * 判定：`this.todos` 里是否有数据。
    *
-   * 兼容：calendarComps 为空（旧账号数据没这个字段）或值 'unknown'
-   *      时不判定为待办本，退回由"待办条数>0"来决定，避免误隐藏。
+   * 为什么不再判断"有没有勾选待办本"：
+   *   那个判定依赖 CalendarDataService.loadTodos 之外的 comps 字段，
+   *   而 comps 来自服务器的 supported-calendar-component-set —— 实测本环境
+   *   **拿不到这个属性**，字段恒为空 ⇒ 判定恒 false ⇒ 明明有待办也不显示标签。
+   *   （这个 bug 就是这样产生的：数据同步成功了，标签却被前面的判定挡掉。）
+   *
+   * 而 `loadTodos` 内部已经按 `visibleKeys`（用户勾选的日历本）过滤过，
+   * 所以 `todos.length > 0` 本身就等价于"用户勾选的范围内确实有待办"，
+   * 用户没勾任何待办本时这个值必然是 0 —— 原本想防的场景天然被覆盖。
+   *
+   * 结论：功能判定必须挂在**数据事实**上，不能挂在可能缺失的元数据上。
    */
-  private hasTodoBook(): boolean {
-    for (const acc of this.accounts) {
-      const comps: string[] = acc.calendarComps;
-      if (comps === undefined || comps.length === 0) {
-        continue; // 旧数据：交给条数判定
-      }
-      for (let i = 0; i < acc.calendarHrefs.length && i < comps.length; i++) {
-        const c: string = comps[i];
-        if (c === 'todo' || c === 'both') {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /** 待办标签是否该显示：必须"选了待办本" **且** "确实有待办数据" */
   private shouldShowTodoTab(): boolean {
-    return this.hasTodoBook() && this.todos.length > 0;
+    return this.todos.length > 0;
   }
 
   /** 当前选中日是否就是今天（用于「今天」按钮的视觉状态） */
