@@ -1347,10 +1347,15 @@ struct Index {
         .fontWeight(FontWeight.Bold)
         .fontColor($r('app.color.text_primary'))
       Blank()
+      // ⭐ 「今天」按钮要能看出"当前在不在今天"：
+      //   · 已在今天 → 透明底 + 蓝框蓝字（表示无需跳转）
+      //   · 不在今天 → 蓝底白字（表示可点，点了回今天）
       Button('今天')
         .fontSize(12)
-        .fontColor($r('app.color.brand'))
-        .backgroundColor(Color.Transparent)
+        .fontColor(this.isOnToday()
+          ? $r('app.color.brand') : $r('app.color.button_text'))
+        .backgroundColor(this.isOnToday()
+          ? Color.Transparent : $r('app.color.brand'))
         .border({ width: 1, color: $r('app.color.brand'), radius: 14 })
         .height(28)
         .padding({ left: 12, right: 12 })
@@ -1476,8 +1481,12 @@ struct Index {
       this.modeTab('month', '月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
-      // ⭐ TODO_TAB 待办页签：与列表同一套布局（未完成在前、已完成在后），点击可勾选完成
-      this.modeTab('todo', '待办')
+      // ⭐ 待办页签按需显示：**没有待办就不显示**。
+      //    否则用户点进去一片空白，会以为功能坏了。
+      //    todos 已按"可见日历本"过滤，所以这里判定 = 用户实际能看到的待办数。
+      if (this.todos.length > 0) {
+        this.modeTab('todo', '待办')
+      }
       Blank()
       if (this.mode === 'month') {
         Text(this.fmtMonthTitle())
@@ -1684,37 +1693,54 @@ struct Index {
   weekStrip() {
     Row({ space: 4 }) {
       ForEach(this.weekStripDays(), (cell: MonthCell) => {
-        Column({ space: 2 }) {
-          Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
-            .fontSize(11)
-            // ⚠️ 这里原来用 button_text（纯白），但该标签**没有背景**、坐在页面底色上，
-            //    浅色模式下是"白字压浅灰底"→ 对比度仅 1.11:1（应用市场 UX 检测被判不合格）。
-            //    改用 brand_text（品牌色文字版）：浅 #0057C2 → 6.01:1，深 #4DA3FF → 8.0:1，
-            //    既保留"选中"的强调含义，又满足对比度要求。
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.brand_text') : $r('app.color.text_hint'))
-          Text(String(cell.day))
-            .fontSize(14)
-            .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
-              ? FontWeight.Bold : FontWeight.Normal)
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.text_primary'))
-            .width(30)
-            .height(30)
-            .textAlign(TextAlign.Center)
-            .borderRadius(15)
-            .backgroundColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.selected_bg')
-              : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-          // ⭐ WEEK_DOT_BELOW 与月视图统一：农历保持原色，下方一个浅红小点。
-          //    （两套标记会让人以为是不同含义，上次已踩过。）
-          Text(cell.lunar)
-            .fontSize(8)
-            .fontColor($r('app.color.text_hint'))
-            .maxLines(1)
-          Circle({ width: 3.5, height: 3.5 })
-            .fill($r('app.color.soft_red'))
-            .opacity(cell.hasEvent ? 1 : 0)
+        // ⭐ WEEK_CIRCLE 与月视图统一：选中/今天都是正圆底。
+        //    原来这里选中只有 30×30 的小圈，跟月视图 46vp 的大圆不一致，
+        //    同一个"选中"在两个视图里长得不一样，会让人以为是不同状态。
+        Stack() {
+          if (cell.dateMs === this.selectedDate) {
+            Column()
+              .width(36)
+              .height(36)
+              .borderRadius('50%')
+              .backgroundColor($r('app.color.selected_bg'))
+          } else if (cell.isToday) {
+            Column()
+              .width(36)
+              .height(36)
+              .borderRadius('50%')
+              .backgroundColor($r('app.color.today_bg'))
+          }
+          Column({ space: 2 }) {
+            Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
+              .fontSize(11)
+              // ⚠️ 这里原来用 button_text（纯白），但该标签**没有背景**、坐在页面底色上，
+              //    浅色模式下是"白字压浅灰底"→ 对比度仅 1.11:1（应用市场 UX 检测被判不合格）。
+              //    改用 brand_text（品牌色文字版）：浅 #0057C2 → 6.01:1，深 #4DA3FF → 8.0:1，
+              //    既保留"选中"的强调含义，又满足对比度要求。
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.brand_text') : $r('app.color.text_hint'))
+            Text(String(cell.day))
+              .fontSize(14)
+              .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
+                ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .width(30)
+              .height(30)
+              .textAlign(TextAlign.Center)
+              // 背景交给底层圆（否则会出现"大圆套小圈"）
+              .backgroundColor(Color.Transparent)
+            Text(cell.lunar)
+              .fontSize(8)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_hint'))
+              .maxLines(1)
+            Circle({ width: 3.5, height: 3.5 })
+              .fill(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.soft_red'))
+              .opacity(cell.hasEvent ? 1 : 0)
+          }
+          .justifyContent(FlexAlign.Center)
         }
         .layoutWeight(1)
         .onClick(() => {
@@ -2051,6 +2077,11 @@ struct Index {
       this.displayMonth = d.getMonth();
       this.reloadEvents();
     }
+  }
+
+  /** 当前选中日是否就是今天（用于「今天」按钮的视觉状态） */
+  private isOnToday(): boolean {
+    return this.selectedDate === this.startOfDay(Date.now());
   }
 
   /** 回到本周（含今天） */
@@ -3323,13 +3354,21 @@ struct Index {
   @Builder
   dayCellCircle(cell: MonthCell) {
     Stack() {
-      // 底层：选中时显示的正圆
+      // ⭐ TODAY_RING 底层圆：选中用实蓝，今天用淡蓝，尺寸一致。
+      //    原来今天只在日期数字上贴了个 24×24 的小圈，选中却是 46vp 大圆，
+      //    同一天"选不选中"看起来像两种东西。现在两者尺寸统一。
       if (cell.dateMs === this.selectedDate) {
         Column()
           .width(this.wideLayout ? 40 : 46)
           .height(this.wideLayout ? 40 : 46)
           .borderRadius('50%')
           .backgroundColor($r('app.color.selected_bg'))
+      } else if (cell.isToday) {
+        Column()
+          .width(this.wideLayout ? 40 : 46)
+          .height(this.wideLayout ? 40 : 46)
+          .borderRadius('50%')
+          .backgroundColor($r('app.color.today_bg'))
       }
       // 上层：原有内容（日期数字 / 农历 / 事件点）
       Column({ space: 1 }) {
@@ -3345,10 +3384,8 @@ struct Index {
           .height(this.wideLayout ? 22 : 24)
           .textAlign(TextAlign.Center)
           .borderRadius(this.wideLayout ? 11 : 12)
-          // 选中时背景由底层的圆负责，这里透明
-          .backgroundColor(cell.dateMs === this.selectedDate
-            ? Color.Transparent
-            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+          // 背景一律交给底层圆，这里保持透明（否则会出现"大圆里套小圈"）
+          .backgroundColor(Color.Transparent)
         if (!this.wideLayout) {
           Text(cell.lunar)
             .fontSize(8)
