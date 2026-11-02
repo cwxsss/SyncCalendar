@@ -23,6 +23,7 @@ import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
 import { MirrorInbound } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
+import { TodoService } from '../common/TodoService';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
 
 /** 月视图单元格 */
@@ -32,12 +33,16 @@ class MonthCell {
   inMonth: boolean = false;
   isToday: boolean = false;
   lunar: string = ''; // 农历（初一时显示月名）
+  /** ⭐ 该日期是否有任意事件 → 决定是否画一个小圆点。
+   *  **只用一个布尔**：早先按"每个日历本一个点"渲染，3 个本就有 3 个点，
+   *  15 个本时整个月视图全是点，所以那个实现被整体砍掉了。 */
+  hasEvent: boolean = false;
 }
 
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
-const VIEW_ORDER: string[] = ['month', 'week', 'agenda'];
+const VIEW_ORDER: string[] = ['month', 'week', 'agenda', 'todo'];
 
 @Entry
 @Component
@@ -48,6 +53,7 @@ struct Index {
   @Watch('onSelectedDateChange') @State selectedDate: number = 0; // 当天 0 点毫秒
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
+  @State todoBusy: boolean = false;  // 正在写回待办状态（防连点）
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
@@ -449,12 +455,42 @@ struct Index {
   }
 
   /** 构建某年某月的 42 格 */
+  /**
+   * ⭐ 预先算出"有事件的日期"集合（按 dayStart 归一化）。
+   *
+   * 为什么要预计算：月视图一次渲染 42 个格子，若每格都去 filter 一遍全部事件，
+   * 就是 O(42 × 事件数)；本机 15 个本、近 3000 条数据，翻月会明显卡顿。
+   * 这里只遍历事件一次，把区间相交的每一天都塞进 Set，之后每格 O(1) 查询。
+   *
+   * 与 `eventsOfDate()` 用**完全相同**的区间相交口径
+   * （`startOfDay(start) <= day && end >= day`），
+   * 因此跨天/多天事件覆盖的每一天都会有点，不会出现"点进去有日程、格子上却没点"的不一致。
+   * 另：待办（isTodo）不计入 —— 待办没有时间点语义，混进月视图会让点失去意义。
+   */
+  private buildEventDaySet(): Set<number> {
+    const set: Set<number> = new Set<number>();
+    for (const e of this.events) {
+      const s: number = this.startOfDay(e.startTime);
+      const end: number = e.endTime > 0 ? e.endTime : s;
+      // 兜底：异常数据（end < start）或跨度大得离谱（>1 年）不入集合，避免循环失控
+      if (end < s || end - s > 366 * 86400000) {
+        set.add(s);
+        continue;
+      }
+      for (let t = s; t <= end; t += 86400000) {
+        set.add(this.startOfDay(t));
+      }
+    }
+    return set;
+  }
+
   private buildMonthCells(year: number, month: number): MonthCell[] {
     const first: number = new Date(year, month, 1).getTime();
     const firstDay = new Date(first).getDay();
     const offset: number = (firstDay + 6) % 7; // 周一为一周开始
     const gridStart: number = first - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
+    const eventDays: Set<number> = this.buildEventDaySet();
     const cells: MonthCell[] = [];
     for (let i = 0; i < 42; i++) {
       const dateMs: number = gridStart + i * 86400000;
@@ -465,6 +501,7 @@ struct Index {
       cell.inMonth = d.getMonth() === month;
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.hasEvent = eventDays.has(this.startOfDay(dateMs));
       cells.push(cell);
     }
     return cells;
@@ -1387,9 +1424,17 @@ struct Index {
       this.modeTab('month', '月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
+      // ⭐ TODO_TAB 待办页签：与列表同一套布局（未完成在前、已完成在后），点击可勾选完成
+      this.modeTab('todo', '待办')
       Blank()
       if (this.mode === 'month') {
         Text(this.fmtMonthTitle())
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+      } else if (this.mode === 'todo') {
+        // 待办与具体日期无关，显示剩余未完成数量更有用
+        Text(`${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length} 项待办`)
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
@@ -2509,6 +2554,11 @@ struct Index {
               .fontSize(12)
               .fontColor($r('app.color.text_hint'))
               .textAlign(TextAlign.Center)
+            Text('提示：系统日历未开放待办接口，这里的待办不会出现在系统「待办」页签中')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+              .textAlign(TextAlign.Center)
+              .margin({ top: 6 })
           }
           .width('100%')
           .padding(32)
@@ -2565,9 +2615,37 @@ struct Index {
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
     .onClick(() => {
-      this.getUIContext().getPromptAction()
-        .showToast({ message: '待办来自服务器，请在群晖日历等源端修改' });
+      this.toggleTodo(t);
     })
+  }
+
+  /** 待办完成状态切换：写回服务器成功后刷新列表；失败保持原状并提示。
+   *  ⚠️ 不做"先改界面再回滚"：待办写回要走网络，若先改后失败，
+   *  用户会看到状态闪一下又跳回去，容易误以为操作没生效。这里直接等结果。 */
+  private async toggleTodo(t: DisplayEvent): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy) {
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const ok: boolean = await TodoService.setCompleted(ctx, t.id, !t.completed);
+      if (ok) {
+        this.getUIContext().getPromptAction().showToast({
+          message: t.completed ? '已标记为未完成' : '已完成'
+        });
+        // 重新读库刷新列表（服务层已更新 completed）
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '更新失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '更新失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
   }
 
   /** 是否跨天（结束日期晚于开始日期） */
@@ -2599,9 +2677,22 @@ struct Index {
             ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
           .maxLines(1)
       }
+      // ⭐ EVENT_DOT 有事件的日期标记：**每个日期最多一个**圆点。
+      //    只表达"这天有安排"，不区分是哪个日历本、有几条。
+      //    （旧实现按日历本逐个画，3 个本 3 个点，15 个本满屏都是点，故被废弃。）
+      //    无事件时用等高的透明占位，避免有/无点导致格子高度跳动、整月行高不一致。
+      Row()
+        .width(this.wideLayout ? 4 : 5)
+        .height(this.wideLayout ? 4 : 5)
+        .borderRadius(this.wideLayout ? 2 : 2.5)
+        .backgroundColor(cell.hasEvent
+          ? (cell.dateMs === this.selectedDate
+            ? $r('app.color.button_text')   // 选中日深底 → 用白点保证对比度
+            : $r('app.color.brand'))        // 其余用主题色，比纯红柔和
+          : Color.Transparent)
     }
     .layoutWeight(1)
-    .padding({ top: 4, bottom: 4 })
+    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 3 })
     .borderRadius(8)
     .onClick(() => {
       this.selectedDate = cell.dateMs;

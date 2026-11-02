@@ -250,6 +250,37 @@ export class DavClient {
     return 'Basic ' + buffer.from(`${username}:${password}`).toString('base64');
   }
 
+  /**
+   * GET 拉取单个资源原文，**失败抛错**（与 getRaw 相反）。
+   *
+   * 为什么需要严格版：待办写回要"先 GET 原文、改字段、再 PUT"。
+   * 若 GET 失败却拿到一个 `"HTTP 404"` 之类的字符串并当 ICS 内容 PUT 回去，
+   * 会把服务器上那条待办**覆盖成一句错误信息**（数据破坏）。
+   * 原 getRaw 保留原行为不动（诊断用，已有调用方）。
+   */
+  static async getRawStrict(url: string, auth: string): Promise<string> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'text/calendar; charset=utf-8',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        connectTimeout: 10000,
+        readTimeout: 20000,
+        expectDataType: http.HttpDataType.STRING
+      });
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `拉取待办原文失败，服务器返回 ${resp.responseCode}`);
+      }
+      return resp.result as string;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
   /** GET 拉取单个资源的原始 ICS（调试诊断用） */
   static async getRaw(url: string, auth: string): Promise<string> {
     const httpRequest = http.createHttp();

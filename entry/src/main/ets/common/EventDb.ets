@@ -336,6 +336,36 @@ export class EventDb {
   }
 
   /** 全部未删除的待办（VTODO），未完成在前、按截止时间升序 */
+  /** 按本地行 id 查一行（待办完成时用来取 uid / href / remotePath / etag） */
+  /** 更新待办的完成状态与 etag（推送成功后调用，保证本地与服务器一致） */
+  static async setTodoCompleted(context: common.Context, id: number, completed: boolean,
+    etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'completed': completed ? 1 : 0,
+      'dirty': 0,
+      'etag': etag
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  static async queryById(context: common.Context, id: number): Promise<LocalEvent | null> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    const rs = await store.query(predicates);
+    try {
+      if (rs.goToNextRow()) {
+        return EventDb.fromRow(rs);
+      }
+      return null;
+    } finally {
+      rs.close();
+    }
+  }
+
   static async queryTodos(context: common.Context): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');

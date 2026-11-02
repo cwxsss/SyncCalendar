@@ -170,6 +170,163 @@ export class IcsUtil {
     return 0;
   }
 
+  /**
+   * ⭐ 在**服务器原文**上改写某个 VTODO 的完成状态，返回新的整份 ICS。
+   *
+   * 为什么不从本地字段重建：VTODO 上还有 SUMMARY / DESCRIPTION / DUE / PRIORITY /
+   * CATEGORIES / X-* 等大量字段，本地库只保存了其中少数几个。
+   * 若按本地字段重新拼一份 VTODO 再 PUT，等于**把没保存的字段全部删掉**（丢用户数据）。
+   * 因此这里只做"在原文上精确改那几行"，其余内容原样保留。
+   *
+   * 改动范围（按 RFC 5545，三者要一起维护，否则各客户端显示不一致）：
+   *   - `STATUS:COMPLETED` ⇄ `STATUS:NEEDS-ACTION`
+   *   - `COMPLETED:<UTC时间>`（完成时写入，取消完成时删除）
+   *   - `PERCENT-COMPLETE:100` ⇄ `PERCENT-COMPLETE:0`
+   *
+   * @param ics      服务器上的原始 .ics 全文
+   * @param uid      目标待办的 UID（一个资源里理论上只有一个 VTODO，但仍按 uid 定位更稳）
+   * @param done     true=标记完成；false=取消完成
+   * @returns        改写后的完整 ICS（调用方直接 PUT）
+   */
+  static rewriteTodoCompletion(ics: string, uid: string, done: boolean): string {
+    const crlf: string = '\r\n';
+    // 折行还原（RFC 5545 允许续行，续行以空格/Tab 开头）
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+    const nowUtc: string = IcsUtil.fmtUtcNow();
+
+    // ---------- 第 1 遍：找出"含目标 uid 的 VTODO"的 [begin, end] 行号区间 ----------
+    // 必须两遍：RFC 5545 不规定字段顺序，UID 可能出现在 STATUS 之后。
+    // 单遍实现会漏改（实测风险：STATUS 在前时 matched 仍为 false → 用户点了没反应）。
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let targetOrdinal: number = -1; // 目标 VTODO 是第几个块（0 基），供插入段按结构定位
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    let blockIdx: number = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        blockIdx++;
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+          targetOrdinal = blockIdx;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      // 找不到目标 uid：原样返回（调用方会 PUT 回去，内容未变，等于无操作）
+      return ics;
+    }
+
+    // ---------- 第 2 遍：在区间内改写状态字段 ----------
+    const out: string[] = [];
+    let sawStatus: boolean = false;
+    let sawPercent: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('STATUS:')) {
+        sawStatus = true;
+        out.push(done ? 'STATUS:COMPLETED' : 'STATUS:NEEDS-ACTION');
+        continue;
+      }
+      if (u.startsWith('COMPLETED')) {
+        continue; // 丢弃旧的，完成时下面统一补
+      }
+      if (u.startsWith('PERCENT-COMPLETE')) {
+        sawPercent = true;
+        out.push(done ? 'PERCENT-COMPLETE:100' : 'PERCENT-COMPLETE:0');
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺字段则在目标 VTODO 的 END 之前补齐（有的客户端缺 STATUS 就不显示完成态）
+    const extra: string[] = [];
+    if (!sawStatus) {
+      extra.push(done ? 'STATUS:COMPLETED' : 'STATUS:NEEDS-ACTION');
+    }
+    if (done) {
+      extra.push('COMPLETED:' + nowUtc);
+    }
+    if (!sawPercent) {
+      extra.push(done ? 'PERCENT-COMPLETE:100' : 'PERCENT-COMPLETE:0');
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // ⭐ 插入点必须按"结构"定位，不能按行号：
+    //    改动可能删掉了旧的 COMPLETED 行，out 与第一遍的 lines 行号已不对齐，
+    //    用行号定位会把字段写到 END:VTODO 之外（实测会落到 END:VCALENDAR 之后，
+    //    结构非法，部分服务端直接 400）。
+    //    这里重新数 VTODO 块，找到"第 targetOrdinal 个"块的 END 行插进去。
+    const result: string[] = [];
+    let vtodoIdx: number = -1;   // 当前处于第几个 VTODO 块内（-1=不在块内）
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        // 走到目标块的 END 之前先补字段
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
+        vtodoIdx = -1;
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      // 兜底（理论上不会发生）：退回到"整份文本末尾 END:VCALENDAR 之前"插入
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const head: string = tail0.substring(0, idxVc);
+        const tail: string = tail0.substring(idxVc);
+        const merged: string = head + extra.join(crlf) + crlf + tail;
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
   /** 解析 VCALENDAR 中的 VTODO 待办列表（待办为只读展示，不参与推送） */
   static parseTodos(ics: string): RemoteEvent[] {
     const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
