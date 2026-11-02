@@ -1828,7 +1828,7 @@ struct Index {
               //    false 变 true 但 key 没变 ⇒ ArkUI 复用旧组件、跳过重绘，
               //    表现为"首屏农历不变红，切一次视图才正常"。
               ForEach(week, (cell: MonthCell) => {
-                this.dayCell(cell)
+                this.dayCellCircle(cell)
               }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`
                 + `_he${cell.hasEvent ? 1 : 0}_td${cell.isToday ? 1 : 0}`)
             }
@@ -3258,8 +3258,10 @@ struct Index {
 
   @Builder
   dayCell(cell: MonthCell) {
-    // space 从 2 收到 1、日期框 26→24：格子高度原本已被"日期+农历"占满，
-    // 不收一点空间，新加的圆点会被顶出格子（实测 175px 全用尽）。
+    // ⭐ SEL_BLOCK 选中态：蓝底扩到整块
+    //    未选中 → 日期数字单独一个小蓝圈，农历灰、圆点浅红
+    //    选中   → 蓝底移到 Column，把农历和圆点一起圈进来，三者统一转白
+    //             （用户要求：底变大、把农历和点包进去、颜色和日期一样）
     Column({ space: 1 }) {
       Text(String(cell.day))
         .fontSize(this.wideLayout ? 12 : 13)
@@ -3271,35 +3273,98 @@ struct Index {
         .height(this.wideLayout ? 22 : 24)
         .textAlign(TextAlign.Center)
         .borderRadius(this.wideLayout ? 11 : 12)
+        // 选中时背景交给外层 Column，这里必须透明，否则会出现"蓝底里套一个蓝圈"
         .backgroundColor(cell.dateMs === this.selectedDate
-          ? $r('app.color.selected_bg')
+          ? Color.Transparent
           : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-      // ⭐ DOT_BELOW 有事件的标记 = 农历**下方**一个浅红小圆点。
-      //
-      // 视觉取舍：
-      //   · 农历文字保持原色（灰/白），不染红 —— 整月染红不好看，用户否掉了
-      //   · 圆点用 soft_red（浅红），不用 event_mark(#D93025) 那种警示红，
-      //     因为"这天有安排"是中性信息，不该有告警感
-      //   · 点很小（3.5vp），存在感低，不抢日期数字
-      //
-      // ⚠️ 位置：放在 Column 里**独立一行**，居中。
-      //    上一版把点放在农历同一行的 Row 里，农历 layoutWeight(1) 撑满整行，
-      //    点被挤到行尾 ⇒ 贴着下一个日期，很怪。独立成行就不会跑偏。
       if (!this.wideLayout) {
         Text(cell.lunar)
           .fontSize(8)
+          // 选中 → 与日期同色（白），保证在同块蓝底上都看得清
           .fontColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+            ? $r('app.color.button_text') : $r('app.color.text_hint'))
           .maxLines(1)
       }
       // 无事件时圆点透明但仍占位：保证有/无事件的行高完全一致，整月不会跳
+      // 选中时圆点也转白（与日期同色），否则浅红压在蓝底上会发灰
       Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
-        .fill($r('app.color.soft_red'))
+        .fill(cell.dateMs === this.selectedDate
+          ? $r('app.color.button_text') : $r('app.color.soft_red'))
         .opacity(cell.hasEvent ? 1 : 0)
     }
     .layoutWeight(1)
-    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 3 })
-    .borderRadius(8)
+    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 1 })
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.selectedDate = cell.dateMs;
+      if (!cell.inMonth) {
+        const d = new Date(cell.dateMs);
+        this.displayYear = d.getFullYear();
+        this.displayMonth = d.getMonth();
+        this.rebuildPages();
+        this.swiperGuard = true;
+        this.swiperController.changeIndex(1, false);
+      }
+    })
+  }
+
+  /**
+   * 月视图日期格（带选中正圆背景）。
+   *
+   * ⭐ SEL_CIRCLE 为什么套一层 Stack：
+   *   Column 是 layoutWeight(1) 撑满格子的**矩形**，无论圆角给多大
+   *   都只能是"方块"或"胶囊"，变不成正圆。只有独立的正方形容器
+   *   取 50% 圆角才是真正的圆。Stack 居中叠放，圆在格子正中，内容压在上面。
+   *
+   *   ⚠️ 改过两轮才定下来：
+   *     第一版把蓝底铺在 Column 上 → 得到 149×133 的圆角方块（用户不满意）
+   *     这一版用 46vp 正方形 → 真正的圆
+   */
+  @Builder
+  dayCellCircle(cell: MonthCell) {
+    Stack() {
+      // 底层：选中时显示的正圆
+      if (cell.dateMs === this.selectedDate) {
+        Column()
+          .width(this.wideLayout ? 40 : 46)
+          .height(this.wideLayout ? 40 : 46)
+          .borderRadius('50%')
+          .backgroundColor($r('app.color.selected_bg'))
+      }
+      // 上层：原有内容（日期数字 / 农历 / 事件点）
+      Column({ space: 1 }) {
+        Text(String(cell.day))
+          .fontSize(this.wideLayout ? 12 : 13)
+          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate
+            ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(!cell.inMonth
+            ? $r('app.color.text_hint')
+            : (cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text') : $r('app.color.text_primary')))
+          .width(this.wideLayout ? 22 : 24)
+          .height(this.wideLayout ? 22 : 24)
+          .textAlign(TextAlign.Center)
+          .borderRadius(this.wideLayout ? 11 : 12)
+          // 选中时背景由底层的圆负责，这里透明
+          .backgroundColor(cell.dateMs === this.selectedDate
+            ? Color.Transparent
+            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+        if (!this.wideLayout) {
+          Text(cell.lunar)
+            .fontSize(8)
+            .fontColor(cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text') : $r('app.color.text_hint'))
+            .maxLines(1)
+        }
+        Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
+          .fill(cell.dateMs === this.selectedDate
+            ? $r('app.color.button_text') : $r('app.color.soft_red'))
+          .opacity(cell.hasEvent ? 1 : 0)
+      }
+      .justifyContent(FlexAlign.Center)
+    }
+    .layoutWeight(1)
+    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 1 })
     .onClick(() => {
       this.selectedDate = cell.dateMs;
       if (!cell.inMonth) {
