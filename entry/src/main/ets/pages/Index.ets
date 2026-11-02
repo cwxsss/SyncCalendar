@@ -83,6 +83,12 @@ struct Index {
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
+  /** ⭐ 月视图数据版本号：每次 rebuildPages 后自增，拼进外层 ForEach 的 key。
+   *  为什么需要它：外层 key 原本用"这页第一天"（cells[0].dateMs），
+   *  数据重载前后这个值完全相同，ArkUI 会判定"同一项"而**复用整棵子树**，
+   *  连 itemGenerator 都不重新执行 ⇒ 内层永远拿到旧的 cells（hasEvent 全 false）。
+   *  只改内层 key 是没用的，必须让外层 key 变。 */
+  @State monthDataVersion: number = 0;
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
@@ -517,10 +523,8 @@ struct Index {
     const gridStart: number = first - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
     const eventDays: Set<number> = this.buildEventDaySet();
-    // DOT_DEBUG 临时：确认集合算出来了没有
-    if (month >= 0) {
-      LogUtil.write(`月格点标记 ${year}-${month + 1}：事件 ${this.events.length} 条，有事件的日期 ${eventDays.size} 天`);
-    }
+    // 诊断：本次构建里 hasEvent=true 的格子数（用于排查"首屏不变色"）
+    let flagTrue: number = 0;
     const cells: MonthCell[] = [];
     for (let i = 0; i < 42; i++) {
       const dateMs: number = gridStart + i * 86400000;
@@ -532,7 +536,15 @@ struct Index {
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
       cell.hasEvent = eventDays.has(this.startOfDay(dateMs));
+      if (cell.hasEvent) {
+        flagTrue++;
+      }
       cells.push(cell);
+    }
+    if (month >= 0) {
+      LogUtil.write(`月视图构建 ${year}-${month + 1}：事件 ${this.events.length} 条，`
+        + `有事件的日期 ${eventDays.size} 天，本页命中 ${flagTrue} 格，`
+        + `版本 v${this.monthDataVersion}`);
     }
     return cells;
   }
@@ -546,6 +558,8 @@ struct Index {
       this.buildMonthCells(this.displayYear, this.displayMonth),
       this.buildMonthCells(next[0], next[1])
     ];
+    // 自增版本号，强制外层 ForEach 重建（见字段注释）
+    this.monthDataVersion = this.monthDataVersion + 1;
     this.rebuildDayTimeline();
   }
 
@@ -1827,7 +1841,9 @@ struct Index {
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
         // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
-      }, (cells: MonthCell[]) => String(cells[0].dateMs))
+      // ⚠️ 必须带版本号：只按"这页第一天"做 key 时，数据重载前后 key 不变，
+      //    ArkUI 会复用整棵子树、不重跑 itemGenerator，内层就拿不到新数据。
+      }, (cells: MonthCell[]) => `${cells.length > 0 ? cells[0].dateMs : 0}_v${this.monthDataVersion}`)
     }
     .index(1)
     .loop(false)
