@@ -18,6 +18,15 @@ export class DavColorEntry {
   color: string = '';  // 规范化后的 #RRGGBB，可能为空
   writable: boolean = true; // current-user-privilege 是否含 write 权限（默认可写）
   privilegeKnown: boolean = false; // 服务器是否返回了 current-user-privilege-set（未返回时需要写探测）
+  /**
+   * ⭐ COMP_SET 该集合支持的组件类型（来自 supported-calendar-component-set）。
+   *   'event'   = 纯日历本（只有 VEVENT）
+   *   'todo'    = 纯待办本（只有 VTODO）
+   *   'both'    = 混合本（两者都有）
+   *   'unknown' = 服务器未声明该属性（老实现常见）→ 按日历对待，保持兼容
+   */
+  comps: string = 'unknown';
+
 }
 
 /** 日历本集合条目（"添加/编辑账号"页列日历本用） */
@@ -25,6 +34,8 @@ export class DavCalendarEntry {
   href: string = '';        // 完整 URL（已补全域名）
   displayName: string = ''; // 显示名（服务器未给 displayname 时回退为路径末段）
   color: string = '';       // 规范化后的 #RRGGBB，可能为空
+  /** ⭐ COMP_SET 'event' 纯日历 / 'todo' 纯待办 / 'both' 混合 / 'unknown' 服务器未声明 */
+  comps: string = 'unknown';
 }
 
 /**
@@ -61,6 +72,8 @@ export class DavClient {
       'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
       '<d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
       '<d:current-user-privilege-set/>' +
+      // ⭐ COMP_SET 让服务器告诉我们这本是日历还是待办
+      '<c:supported-calendar-component-set xmlns:c="urn:ietf:params:xml:ns:caldav"/>' +
       '</d:prop></d:propfind>';
     const httpRequest = http.createHttp();
     try {
@@ -104,6 +117,7 @@ export class DavClient {
           color = DavClient.normalizeHex(DavClient.extractTag(block, 'calendar-color'));
         }
         entry.color = color;
+        entry.comps = DavClient.parseComps(block);
         // 写权限：current-user-privilege-set 存在且不含任何 write 权限 → 只读
         const privSet: string = DavClient.extractTag(block, 'current-user-privilege-set');
         if (privSet !== '') {
@@ -124,6 +138,33 @@ export class DavClient {
   }
 
   /**
+   * ⭐ COMP_SET 解析 supported-calendar-component-set，归一成四类：
+   *   event / todo / both / unknown
+   *
+   * 为什么 unknown 要单独存在：很多服务器（含自研实现）压根不返回这个属性。
+   * 这时不能武断判成"不是待办本"，否则用户原本能用的日历会被当成待办、
+   * 或者反过来把纯日历标成待办 —— 保守按"日历"对待，不破坏既有行为。
+   */
+  static parseComps(block: string): string {
+    const seg: string = DavClient.extractTag(block, 'supported-calendar-component-set');
+    if (seg === '') {
+      return 'unknown';
+    }
+    const event: boolean = /name\s*=\s*["']VEVENT["']/i.test(seg);
+    const todo: boolean = /name\s*=\s*["']VTODO["']/i.test(seg);
+    if (event && todo) {
+      return 'both';
+    }
+    if (todo) {
+      return 'todo';
+    }
+    if (event) {
+      return 'event';
+    }
+    return 'unknown';
+  }
+
+  /**
    * PROPFIND 列出某账号下所有「日历集合」（resourcetype 含 calendar）。
    *
    * 供「添加账号 / 编辑账号」两页复用，取代它们各自维护的一份同逻辑拷贝 ——
@@ -136,6 +177,7 @@ export class DavClient {
       '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
       'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
       '<d:displayname/><d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
+      '<c:supported-calendar-component-set xmlns:c="urn:ietf:params:xml:ns:caldav"/>' +
       '</d:prop></d:propfind>';
     const httpRequest = http.createHttp();
     const out = new DavCalendarDiscovery();
@@ -197,6 +239,9 @@ export class DavClient {
         entry.href = href.startsWith('http') ? href : origin + href;
         entry.displayName = name;
         entry.color = color;
+        entry.comps = DavClient.parseComps(block);
+        // COMPS_LOG 诊断：确认服务器有没有声明组件类型
+        LogUtil.write(`日历本组件类型 ${entry.displayName} → ${entry.comps}`);
         out.entries.push(entry);
       }
       return out;

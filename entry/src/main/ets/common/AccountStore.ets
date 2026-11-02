@@ -57,6 +57,14 @@ export class DavAccount {
   calendarColors: string[] = [];
   /** 各日历本写权限（'1'=可写 '0'=只读），与 calendarHrefs 一一对应；空数组表示未知（按可写处理） */
   calendarWritable: string[] = [];
+  /**
+   * ⭐ COMP_SET 各日历本支持的组件类型，与 calendarHrefs 一一对应：
+   *   'event'   纯日历本（只有 VEVENT）
+   *   'todo'    纯待办本（只有 VTODO）
+   *   'both'    混合本
+   *   'unknown' 服务器未声明 → 按日历对待（旧数据也走这里，保持兼容）
+   */
+  calendarComps: string[] = [];
   itemCount: number = 0;
   lastSyncTime: string = '';
 }
@@ -474,6 +482,9 @@ export class AccountStore {
     if (parts.length >= 12) {
       acc.calendarWritable = parts[11] === '' ? [] : parts[11].split(';');
     }
+    if (parts.length >= 13) {
+      acc.calendarComps = parts[12] === '' ? [] : parts[12].split(';');
+    }
     return acc;
   }
 
@@ -565,6 +576,7 @@ export class AccountStore {
             a.calendarNames = o['calendarNames'] !== undefined ? o['calendarNames'] as string[] : [];
             a.calendarColors = o['calendarColors'] !== undefined ? o['calendarColors'] as string[] : [];
             a.calendarWritable = o['calendarWritable'] !== undefined ? o['calendarWritable'] as string[] : [];
+            a.calendarComps = o['calendarComps'] !== undefined ? o['calendarComps'] as string[] : [];
             a.itemCount = o['itemCount'] !== undefined ? o['itemCount'] as number : 0;
             a.lastSyncTime = o['lastSyncTime'] !== undefined ? o['lastSyncTime'] as string : '';
             if (a.id === '') {

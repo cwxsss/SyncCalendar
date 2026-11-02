@@ -1514,10 +1514,11 @@ struct Index {
       this.modeTab('month', '月')
       this.modeTab('week', '周')
       this.modeTab('agenda', '列表')
-      // ⭐ 待办页签按需显示：**没有待办就不显示**。
+      // ⭐ 待办页签两级判定（用户要求）：
+      //    ① 没勾选任何待办本（VTODO）→ 必然没待办，直接不显示
+      //    ② 选了待办本，但实际待办数为 0 → 也不显示
       //    否则用户点进去一片空白，会以为功能坏了。
-      //    todos 已按"可见日历本"过滤，所以这里判定 = 用户实际能看到的待办数。
-      if (this.todos.length > 0) {
+      if (this.shouldShowTodoTab()) {
         this.modeTab('todo', '待办')
       }
       Blank()
@@ -2068,6 +2069,36 @@ struct Index {
       this.displayMonth = d.getMonth();
       this.reloadEvents();
     }
+  }
+
+  /**
+   * ⭐ HAS_TODO_BOOK 是否勾选了"待办本"。
+   *
+   * 判定：该账号的 calendarComps 里，**被选中**的日历本中存在 'todo' 或 'both'。
+   * 一个都没选 ⇒ 必然没有待办，待办标签直接不显示。
+   *
+   * 兼容：calendarComps 为空（旧账号数据没这个字段）或值 'unknown'
+   *      时不判定为待办本，退回由"待办条数>0"来决定，避免误隐藏。
+   */
+  private hasTodoBook(): boolean {
+    for (const acc of this.accounts) {
+      const comps: string[] = acc.calendarComps;
+      if (comps === undefined || comps.length === 0) {
+        continue; // 旧数据：交给条数判定
+      }
+      for (let i = 0; i < acc.calendarHrefs.length && i < comps.length; i++) {
+        const c: string = comps[i];
+        if (c === 'todo' || c === 'both') {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** 待办标签是否该显示：必须"选了待办本" **且** "确实有待办数据" */
+  private shouldShowTodoTab(): boolean {
+    return this.hasTodoBook() && this.todos.length > 0;
   }
 
   /** 当前选中日是否就是今天（用于「今天」按钮的视觉状态） */

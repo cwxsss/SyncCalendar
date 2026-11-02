@@ -24,13 +24,26 @@ export class EditCalendarItem {
   href: string;
   name: string;
   color: string; // 服务器定义的颜色（calendar-color），可能为空
+  /** ⭐ COMP_SET 'event' / 'todo' / 'both' / 'unknown'（见 DavCalendarEntry.comps） */
+  comps: string;
   selected: boolean;
 
-  constructor(href: string, name: string, color: string) {
+  constructor(href: string, name: string, color: string, comps: string = 'unknown') {
     this.href = href;
     this.name = name;
     this.color = color;
+    this.comps = comps;
     this.selected = false;
+  }
+
+  /** 是否待办本（纯待办或混合） */
+  isTodoBook(): boolean {
+    return this.comps === 'todo' || this.comps === 'both';
+  }
+
+  /** 是否日历本（纯日历、混合、或服务器未声明） */
+  isEventBook(): boolean {
+    return this.comps === 'event' || this.comps === 'both' || this.comps === 'unknown';
   }
 }
 
@@ -179,7 +192,7 @@ struct EditAccountPage {
         return;
       }
       const list: EditCalendarItem[] = disc.entries.map((e: DavCalendarEntry): EditCalendarItem =>
-        new EditCalendarItem(e.href, e.displayName, e.color));
+        new EditCalendarItem(e.href, e.displayName, e.color, e.comps));
       if (list.length === 0) {
         LogUtil.write('编辑账号：未发现任何日历本');
         this.statusMsg = DavDiscovery.emptyHint(this.acc.serverUrl, this.acc.username);
@@ -246,6 +259,7 @@ struct EditAccountPage {
       target.calendarHrefs = newHrefs;
       target.calendarNames = selectedItems.map((c: EditCalendarItem): string => c.name);
       target.calendarColors = selectedItems.map((c: EditCalendarItem): string => c.color);
+      target.calendarComps = selectedItems.map((c: EditCalendarItem): string => c.comps);
       LogUtil.write(`编辑账号保存：id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
       // 按 href 求出「旧序号 → 新序号」，迁移已落库日程到正确的 calKey
       // ⭐ 迁移前必须先删掉被取消勾选日历本的行（按 href）：
@@ -530,6 +544,30 @@ struct EditCalendarRow {
 
   build() {
     Row({ space: 12 }) {
+      // ⭐ COMPS_ICON 类型图标：放在颜色圆点**前面**，
+      //    让用户先看清"这本是日历还是待办"，再看它是什么颜色。
+      //    混合本两个图标都显示（服务器同时支持 VEVENT 和 VTODO）。
+      if (this.item.comps === 'todo') {
+        Text('✓')
+          .fontSize(13)
+          .fontColor($r('app.color.success'))
+          .width(16)
+          .textAlign(TextAlign.Center)
+      } else if (this.item.comps === 'both') {
+        Text('▦✓')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+          .width(16)
+          .textAlign(TextAlign.Center)
+      } else {
+        // 'event' 或 'unknown'：一律显示日历图标
+        // （unknown 是服务器未声明，按日历对待，不要凭空标成待办）
+        Text('▦')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+          .width(16)
+          .textAlign(TextAlign.Center)
+      }
       if (this.item.color !== '') {
         Circle()
           .width(12)
