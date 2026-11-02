@@ -112,6 +112,8 @@ struct EventEditPage {
   @State sheetMode: string = 'picker';
   @State pickerIsEnd: boolean = false;
   @State pickDate: Date = new Date();
+  /** 新建"非今天"日程时的默认开始小时（24 小时制） */
+  private static readonly DEFAULT_START_HOUR: number = 9;
   @State pickHour: number = 9;
   @State pickMin: number = 0;
   /** ⭐ 重复日程编辑范围：'one' 仅此次 / 'future' 此次及以后 / 'all' 全部 */
@@ -271,12 +273,23 @@ struct EventEditPage {
         return;
       }
     }
-    // 新建：日期取所选日（未选则今天），时间取当前时刻；结束 = 开始 + 1 小时
+    // 新建：日期取所选日（未选则今天）。默认开始时刻分两种情况：
+    //   ① 今天  → 取当前时刻（"现在就记一笔"最自然；而且今天的 09:00 往往已经过了）
+    //   ② 非今天 → 固定 09:00（"现在几点"对别的日子毫无参考价值，09:00 才是通用默认）
+    // 结束时间统一 = 开始 + 1 小时。
     const base: number = AppStorage.get<number>('pendingEventDate') ?? Date.now();
-    const dayStart = new Date(new Date(base).getFullYear(), new Date(base).getMonth(),
-      new Date(base).getDate()).getTime();
+    const pickedDay = new Date(base);
+    const dayStart = new Date(pickedDay.getFullYear(), pickedDay.getMonth(),
+      pickedDay.getDate()).getTime();
     const now = new Date();
-    this.startMs = dayStart + now.getHours() * 3600000 + now.getMinutes() * 60000;
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if (dayStart === todayStart) {
+      // ① 今天：当前时刻
+      this.startMs = dayStart + now.getHours() * 3600000 + now.getMinutes() * 60000;
+    } else {
+      // ② 非今天：09:00
+      this.startMs = dayStart + EventEditPage.DEFAULT_START_HOUR * 3600000;
+    }
     this.endMs = this.startMs + 3600000;
     if (choices.length > 0) {
       this.chosenKey = choices[0].calKey;
@@ -686,7 +699,8 @@ struct EventEditPage {
       this.endMs = dayStart + 86399999;
     } else {
       const s = new Date(this.startMs);
-      this.startMs = s.getTime() + 9 * 3600000;
+      this.startMs = new Date(s.getFullYear(), s.getMonth(), s.getDate()).getTime()
+        + EventEditPage.DEFAULT_START_HOUR * 3600000;
       this.endMs = this.startMs + 3600000;
     }
   }
