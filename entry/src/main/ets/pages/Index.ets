@@ -482,7 +482,7 @@ struct Index {
     this.events = await CalendarDataService.loadEvents(context, rangeStart, rangeEnd, this.sources);
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
-    this.rebuildPages();
+    this.rebuildPagesFor(this.displayYear, this.displayMonth);
     // 当前正处于列表视图时立即重载，避免同步后列表空白
     if (this.mode === 'agenda') {
       await this.ensureAgendaData();
@@ -555,11 +555,25 @@ struct Index {
 
   /** 重建三页（上月/本月/下月） */
   private rebuildPages(): void {
-    const prev = this.addMonths(this.displayYear, this.displayMonth, -1);
-    const next = this.addMonths(this.displayYear, this.displayMonth, 1);
+    this.rebuildPagesFor(this.displayYear, this.displayMonth);
+  }
+
+  /**
+   * 按**显式传入的年月**重建三页。
+   *
+   * ⭐ 为什么需要这个版本：ArkUI 的 @State 赋值在同一个同步调用栈内
+   *    **不一定立即反映到后续读取**（实测：先 `this.displayMonth = 12`
+   *    再 `rebuildPages()`，里面读到的仍是 11）。
+   *    翻月这种"改状态 + 立刻据此重建"的场景，必须把值用参数传下去，
+   *    不能依赖 `this.displayMonth` 的可读时机 —— 否则中间页会停留在旧月份，
+   *    表现为"闪回上个月再跳回来"。
+   */
+  private rebuildPagesFor(year: number, month: number): void {
+    const prev = this.addMonths(year, month, -1);
+    const next = this.addMonths(year, month, 1);
     this.monthPages = [
       this.buildMonthCells(prev[0], prev[1]),
-      this.buildMonthCells(this.displayYear, this.displayMonth),
+      this.buildMonthCells(year, month),
       this.buildMonthCells(next[0], next[1])
     ];
     // 自增版本号，强制外层 ForEach 重建（见字段注释）
@@ -645,9 +659,16 @@ struct Index {
     //    否则 1/31 → 2/28 之后，再翻月就一直是 28 号，回不到 31。
     const lastDay: number = new Date(nm[0], nm[1] + 1, 0).getDate();
     this.selectedDate = new Date(nm[0], nm[1], Math.min(this.preferredDay, lastDay)).getTime();
-    this.reloadEvents();
+    // ⭐ SYNC_REBUILD_FIRST 必须先**同步**重建，再回弹。
+    //    原来 reloadEvents() 在前，但它是 async（内部 await 读库），
+    //    调用只是启动；紧接着 changeIndex(1) 回弹时 monthPages 还是旧数据，
+    //    中间页仍是上个月 ⇒ 界面闪回旧月份，等数据到了才跳到新月份。
+    //    先同步 rebuildPages，回弹时中间页已经是新月份，就没有闪跳了。
+    // ⭐ 用 rebuildPagesFor 显式传 nm，不依赖 this.displayMonth 的即时可读性
+    this.rebuildPagesFor(nm[0], nm[1]);
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
+    this.reloadEvents();
   }
 
   // ---------- 同步 ----------
