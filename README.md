@@ -108,7 +108,10 @@
 - **卡片**：FormExtensionAbility + FormBindingData，JSON 数据驱动渲染
 - **农历**：`LunarUtil`，1901–2099 压缩表推算
 - **提醒**：`ReminderService` 基于 `reminderAgentManager` 代理提醒
-- **权限**：INTERNET / READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（仅镜像）/ PUBLISH_AGENT_REMINDER / LOCATION（仅地点导航时）
+- **权限**：INTERNET / READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（仅镜像）/ PUBLISH_AGENT_REMINDER
+  - ⚠️ **LOCATION 已于 0.1.0 移除**：`geoLocationManager.getAddressesFromLocationName`（地址→坐标）无 @permission 标注，地理编码不需要定位权限；应用也从不调用 `getCurrentLocation`。
+    隐私政策/隐私标签里**不得**再声称读取位置。
+  - ⚠️ **READ_WHOLE_CALENDAR 是受限权限**：用于读取系统日历中非本应用创建的日程以实现混合展示。上架时需在 AGC 单独申请 ACL 并说明用途，否则审核不通过。
 
 ### 目录结构
 
