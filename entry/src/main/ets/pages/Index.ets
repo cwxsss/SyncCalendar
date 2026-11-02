@@ -3309,76 +3309,84 @@ struct Index {
    *     第一版把蓝底铺在 Column 上 → 得到 149×133 的圆角方块（用户不满意）
    *     这一版用 46vp 正方形 → 真正的圆
    */
+  // RING_CLEANUP
+  /**
+   * 月/周视图的日期格。
+   *
+   * 层级设计（改过好几轮，这里定稿）：
+   *   Column                       ← 整格，承接点击
+   *     ├ Text(星期)               ← 仅周条有，**在圆外面**
+   *     └ Stack
+   *         ├ 圆底（选中=实蓝 / 今天=淡蓝，46vp）
+   *         └ Column               ← 日期数字 / 农历 / 事件点，圆只包这三个
+   *
+   * ⚠️ 为什么星期放在 Stack 外面：
+   *    放进圆里的话，为了让圆包住它就得把圆撑到 54vp，结果星期也被圈进圆内，
+   *    视觉上很怪（用户明确否掉了）。
+   *    放外面后圆只包 日期(72)+农历(27)+点(11)+间隙 ≈ 116px，46vp(138px) 够用，
+   *    且与月视图完全一致。
+   */
   @Builder
   dayCellCircle(cell: MonthCell, showWeekLabel: boolean = false) {
-    // 显式 Center：Stack 默认虽也居中，但内容高于圆时对齐行为容易偏，
-    // 写死更可控（周条曾是"上露星期、下漏圆点"）。
-    Stack({ alignContent: Alignment.Center }) {
-      // ⭐ TODAY_RING 底层圆：选中用实蓝，今天用淡蓝，尺寸一致。
-      //    原来今天只在日期数字上贴了个 24×24 的小圈，选中却是 46vp 大圆，
-      //    同一天"选不选中"看起来像两种东西。现在两者尺寸统一。
-      // ⭐ RING_FIT 圆径必须**按内容高度**取，不能一刀切。
-      //    周条比月历多一行"星期标签"，内容约 147px；圆固定 46vp(138px) 时
-      //    就会上露"一"、下漏事件点。周条用 54vp(≈162px) 才包得住。
-      //    月视图没有星期标签、内容约 118px，46vp 刚好。
-      if (cell.dateMs === this.selectedDate) {
-        Column()
-          .width(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
-          .height(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
-          .borderRadius('50%')
-          .backgroundColor($r('app.color.selected_bg'))
-      } else if (cell.isToday) {
-        Column()
-          .width(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
-          .height(showWeekLabel ? 54 : (this.wideLayout ? 40 : 46))
-          .borderRadius('50%')
-          .backgroundColor($r('app.color.today_bg'))
+    Column({ space: 1 }) {
+      // 星期标签：圆外，仅周条显示（月视图的星期在表头单独一行）
+      if (showWeekLabel) {
+        Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
+          .fontSize(10)
+          .fontColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.brand_text') : $r('app.color.text_secondary'))
       }
-      // 上层：原有内容（星期标签 / 日期数字 / 农历 / 事件点）
-      Column({ space: 1 }) {
-        // ⭐ 周条需要星期标签（一/二/三…），月视图的星期在表头单独一行、
-        //    不在这里，所以用参数控制，默认不显示以免破坏月视图布局。
-        if (showWeekLabel) {
-          Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
-            .fontSize(10)
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.text_secondary'))
+      Stack({ alignContent: Alignment.Center }) {
+        // 圆底：选中实蓝、今天淡蓝，尺寸一致
+        if (cell.dateMs === this.selectedDate) {
+          Column()
+            .width(this.wideLayout ? 40 : 46)
+            .height(this.wideLayout ? 40 : 46)
+            .borderRadius('50%')
+            .backgroundColor($r('app.color.selected_bg'))
+        } else if (cell.isToday) {
+          Column()
+            .width(this.wideLayout ? 40 : 46)
+            .height(this.wideLayout ? 40 : 46)
+            .borderRadius('50%')
+            .backgroundColor($r('app.color.today_bg'))
         }
-        Text(String(cell.day))
-          .fontSize(this.wideLayout ? 12 : 13)
-          .fontWeight(cell.isToday || cell.dateMs === this.selectedDate
-            ? FontWeight.Bold : FontWeight.Normal)
-          .fontColor(!cell.inMonth
-            ? $r('app.color.text_hint')
-            : (cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.text_primary')))
-          .width(this.wideLayout ? 22 : 24)
-          .height(this.wideLayout ? 22 : 24)
-          .textAlign(TextAlign.Center)
-          .borderRadius(this.wideLayout ? 11 : 12)
-          // 背景一律交给底层圆，这里保持透明（否则会出现"大圆里套小圈"）
-          .backgroundColor(Color.Transparent)
-        if (!this.wideLayout) {
-          // ⭐ WEEK_LUNAR_BRIGHT 周条的农历提亮一档：
-          //    周条是"一周概览"，农历紧挨日期数字，用 text_hint(#4D000000)
-          //    会显得比日期淡太多（实测 rgb≈178 vs 日期 rgb≈40）。
-          //    周条用 text_secondary，月历保持 text_hint（不破坏已有观感）。
-          Text(cell.lunar)
-            .fontSize(showWeekLabel ? 9 : 8)
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text')
-              : (showWeekLabel ? $r('app.color.text_secondary') : $r('app.color.text_hint')))
-            .maxLines(1)
+        Column({ space: 1 }) {
+          Text(String(cell.day))
+            .fontSize(this.wideLayout ? 12 : 13)
+            .fontWeight(cell.isToday || cell.dateMs === this.selectedDate
+              ? FontWeight.Bold : FontWeight.Normal)
+            .fontColor(!cell.inMonth
+              ? $r('app.color.text_hint')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_primary')))
+            .width(this.wideLayout ? 22 : 24)
+            .height(this.wideLayout ? 22 : 24)
+            .textAlign(TextAlign.Center)
+            .borderRadius(this.wideLayout ? 11 : 12)
+            // 背景一律交给底层圆，这里透明（否则"大圆里套小圈"）
+            .backgroundColor(Color.Transparent)
+          if (!this.wideLayout) {
+            // 周条的农历提亮一档（text_secondary），月历保持 text_hint
+            Text(cell.lunar)
+              .fontSize(showWeekLabel ? 9 : 8)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text')
+                : (showWeekLabel ? $r('app.color.text_secondary') : $r('app.color.text_hint')))
+              .maxLines(1)
+          }
+          // 事件点：无事件时透明但仍占位，保证行高一致、整月不跳
+          Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
+            .fill(cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text') : $r('app.color.soft_red'))
+            .opacity(cell.hasEvent ? 1 : 0)
         }
-        Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
-          .fill(cell.dateMs === this.selectedDate
-            ? $r('app.color.button_text') : $r('app.color.soft_red'))
-          .opacity(cell.hasEvent ? 1 : 0)
+        .justifyContent(FlexAlign.Center)
       }
-      .justifyContent(FlexAlign.Center)
     }
     .layoutWeight(1)
     .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 1 })
+    .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.selectedDate = cell.dateMs;
       if (!cell.inMonth) {
@@ -3391,7 +3399,6 @@ struct Index {
       }
     })
   }
-
   /** 把 42 个格子按每周 7 个分组 */
   private chunkCells(cells: MonthCell[]): MonthCell[][] {
     const weeks: MonthCell[][] = [];
