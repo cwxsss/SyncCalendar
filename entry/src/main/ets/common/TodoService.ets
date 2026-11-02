@@ -141,6 +141,122 @@ export class TodoService {
     return null;
   }
 
+  /**
+   * 设置或取消待办的循环规则。
+   *
+   * @param rrule 规则原文（如 `FREQ=WEEKLY`）；空串 = 取消循环
+   * @param dtstartMs 重复基准；<=0 时用当前 DUE 兜底
+   * @returns 成功 true
+   *
+   * ⚠️ 写回时**同时**给 DTSTART 和 DUE：
+   *    RFC 5545 里 VTODO 的 DTSTART 是 OPTIONAL，但没有它时
+   *    不同客户端对 RRULE 基准的理解不一致（有的按 DUE 算），
+   *    显式给 DTSTART 能消除歧义。
+   */
+  static async setRecurrence(context: common.Context, localId: number,
+    rrule: string, dtstartMs: number): Promise<boolean> {
+    const row: LocalEvent | null = await EventDb.queryById(context, localId);
+    if (row === null || row.kind !== 'todo') {
+      LogUtil.write(`待办循环设置失败：行不存在或不是待办 id=${localId}`);
+      return false;
+    }
+    if (row.href === '' || row.remotePath === '') {
+      LogUtil.write(`待办循环设置失败：缺少服务器路径 id=${localId}`);
+      return false;
+    }
+    const acc: DavAccount | null = await TodoService.findAccount(context, row.href);
+    if (acc === null) {
+      LogUtil.write(`待办循环设置失败：找不到所属账号`);
+      return false;
+    }
+    const idx: number = acc.calendarHrefs.indexOf(row.href);
+    if (idx >= 0 && acc.calendarWritable.length > idx && acc.calendarWritable[idx] === '0') {
+      LogUtil.write(`待办循环设置失败：该日历本只读 id=${localId}`);
+      return false;
+    }
+    const auth: string = DavClient.authHeader(acc.username, acc.password);
+    const url: string = row.href.endsWith('/') ? row.href + row.remotePath
+      : `${row.href}/${row.remotePath}`;
+    const dueMs: number = row.startTime > 0 ? row.startTime : 0;
+    const base: number = dtstartMs > 0 ? dtstartMs : (dueMs > 0 ? dueMs : Date.now());
+    try {
+      const original: string = await DavClient.getRawStrict(url, auth);
+      if (!original.toUpperCase().includes('BEGIN:VTODO')) {
+        LogUtil.write(`待办循环设置失败：服务器内容不是 VTODO id=${localId}`);
+        return false;
+      }
+      const updated: string = IcsUtil.rewriteTodoRecurrence(
+        original, row.uid, rrule, base, dueMs);
+      const newEtag: string = await DavClient.putEvent(url, auth, updated);
+      await EventDb.updateTodoRecurrence(context, localId, rrule.trim(), base, newEtag);
+      LogUtil.write(`待办循环设置成功 id=${localId} rule=${rrule === '' ? '(取消)' : rrule}`);
+      return true;
+    } catch (err) {
+      if (err instanceof DavHttpError) {
+        LogUtil.write(`待办循环设置失败 HTTP ${(err as DavHttpError).status} id=${localId}`);
+      } else {
+        LogUtil.write(`待办循环设置失败 id=${localId} ${(err as BusinessError).message ?? ''}`);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * 循环任务"完成一轮"：把 DUE 推进到下一个周期，并保持未完成。
+   *
+   * 与 setCompleted 的区别：
+   *   · 非循环 → 走 setCompleted（置 COMPLETED，永久结束）
+   *   · 循环   → 走这里（DUE += 一个周期，STATUS 保持 NEEDS-ACTION）
+   *
+   * @returns 推进后的新 DUE（毫秒）；失败返回 0
+   */
+  static async completeRecurringRound(context: common.Context, localId: number): Promise<number> {
+    const row: LocalEvent | null = await EventDb.queryById(context, localId);
+    if (row === null || row.kind !== 'todo' || row.rrule.trim() === '') {
+      return 0;
+    }
+    if (row.href === '' || row.remotePath === '') {
+      return 0;
+    }
+    const acc: DavAccount | null = await TodoService.findAccount(context, row.href);
+    if (acc === null) {
+      return 0;
+    }
+    const idx: number = acc.calendarHrefs.indexOf(row.href);
+    if (idx >= 0 && acc.calendarWritable.length > idx && acc.calendarWritable[idx] === '0') {
+      return 0;
+    }
+    // 从 FREQ 取周期，推下一个基准
+    const freq: string = IcsUtil.freqOfRrule(row.rrule);
+    // 基准优先用 DTSTART（真正的重复基准），没有则用当前 DUE
+    const base: number = row.dtstart > 0 ? row.dtstart : row.startTime;
+    const nextBase: number = IcsUtil.incForFreq(freq, base);
+    // 保留"截止 = 基准 + N"的偏移（原任务若是 09:00 截止，下一次还是 09:00）
+    const offset: number = row.startTime > 0 && row.dtstart > 0 ? row.startTime - row.dtstart : 0;
+    const nextDue: number = nextBase + offset;
+
+    const auth: string = DavClient.authHeader(acc.username, acc.password);
+    const url: string = row.href.endsWith('/') ? row.href + row.remotePath
+      : `${row.href}/${row.remotePath}`;
+    try {
+      const original: string = await DavClient.getRawStrict(url, auth);
+      // 先把状态复位成未完成，再把基准与截止推到下一轮
+      let updated: string = IcsUtil.rewriteTodoCompletion(original, row.uid, false);
+      updated = IcsUtil.rewriteTodoRecurrence(updated, row.uid, row.rrule, nextBase, nextDue);
+      const newEtag: string = await DavClient.putEvent(url, auth, updated);
+      await EventDb.updateTodoAfterRound(context, localId, nextBase, nextDue, newEtag);
+      LogUtil.write(`循环待办推进到下一轮 id=${localId}（标题已脱敏）`);
+      return nextDue > 0 ? nextDue : nextBase;
+    } catch (err) {
+      if (err instanceof DavHttpError) {
+        LogUtil.write(`循环待办推进失败 HTTP ${(err as DavHttpError).status} id=${localId}`);
+      } else {
+        LogUtil.write(`循环待办推进失败 id=${localId} ${(err as BusinessError).message ?? ''}`);
+      }
+      return 0;
+    }
+  }
+
   static async setCompleted(context: common.Context, localId: number, done: boolean): Promise<boolean> {
     const row: LocalEvent | null = await EventDb.queryById(context, localId);
     if (row === null) {

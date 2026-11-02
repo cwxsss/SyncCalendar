@@ -302,7 +302,8 @@ export class IcsUtil {
           }
           inserted = true;
         }
-        vtodoIdx = -1;
+        // ⚠️ 不要重置 vtodoIdx：它是全局块序号，重置会让下一块从 0 重新数，
+        //    多 VTODO 文件里永远匹配不到 targetOrdinal（静默失败）。
         result.push(out[i]);
         continue;
       }
@@ -474,7 +475,236 @@ export class IcsUtil {
           }
           inserted = true;
         }
-        vtodoIdx = -1;
+        // ⚠️ 不要重置 vtodoIdx：它是全局块序号，重置会让下一块从 0 重新数，
+        //    多 VTODO 文件里永远匹配不到 targetOrdinal（静默失败）。
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const merged: string = tail0.substring(0, idxVc) + extra.join(crlf) + crlf
+          + tail0.substring(idxVc);
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
+  /**
+   * 按 FREQ 把时间往后推一个周期（用于"完成一个循环任务 → 生成下一次"）。
+   *
+   * ⚠️ 月份/年份推进要处理"月末溢出"：
+   *    1 月 31 日 + 1 个月 在 JS 里会得到 3 月 3 日（2 月没有 31 日）。
+   *    RFC 5545 规定这类"不存在的日期"应当**跳过**而非顺延，
+   *    但对家务类待办来说"顺延到 3 号"比"跳过整个月"更符合直觉，
+   *    这里采用**钳制到当月最后一天**（1/31 → 2/28），并注释说明取舍。
+   *
+   * @param freq  DAILY / WEEKLY / MONTHLY / YEARLY
+   * @param fromMs 基准时间
+   * @returns 下一周期的时间（同一天内时分秒保持不变）
+   */
+  /** 从 RRULE 原文取出 FREQ 值（DAILY / WEEKLY / MONTHLY / YEARLY）；取不到返回 DAILY */
+  static freqOfRrule(rrule: string): string {
+    const parts: string[] = rrule.split(';');
+    for (const part of parts) {
+      const idx: number = part.indexOf('=');
+      if (idx <= 0) {
+        continue;
+      }
+      const key: string = part.substring(0, idx).trim().toUpperCase();
+      if (key === 'FREQ') {
+        return part.substring(idx + 1).trim().toUpperCase();
+      }
+    }
+    return 'DAILY';
+  }
+
+  static incForFreq(freq: string, fromMs: number): number {
+    const d: Date = new Date(fromMs);
+    const f: string = freq.toUpperCase();
+    if (f === 'DAILY') {
+      return fromMs + 86400000;
+    }
+    if (f === 'WEEKLY') {
+      return fromMs + 7 * 86400000;
+    }
+    if (f === 'MONTHLY') {
+      const y: number = d.getFullYear();
+      const m: number = d.getMonth() + 1;
+      const day: number = d.getDate();
+      const lastDayOfNext: number = new Date(y, m + 1, 0).getDate();
+      return new Date(y, m, Math.min(day, lastDayOfNext),
+        d.getHours(), d.getMinutes(), d.getSeconds()).getTime();
+    }
+    if (f === 'YEARLY') {
+      const y: number = d.getFullYear() + 1;
+      const m: number = d.getMonth();
+      const day: number = d.getDate();
+      // 2/29 → 次年 2/28（闰年才有 29）
+      const lastDay: number = new Date(y, m + 1, 0).getDate();
+      return new Date(y, m, Math.min(day, lastDay),
+        d.getHours(), d.getMinutes(), d.getSeconds()).getTime();
+    }
+    return fromMs + 86400000;
+  }
+
+  /**
+   * 在**服务器原文**上写入循环规则（RRULE + DTSTART + DUE）。
+   *
+   * 只在这三处动，其余字段（SUMMARY/DESCRIPTION/PRIORITY/X-* …）原样保留。
+   *
+   * @param rrule   规则原文，如 `FREQ=WEEKLY`；空串 = 取消循环（删除 RRULE/DTSTART，保留 DUE）
+   * @param dtstart 重复基准（毫秒）；<=0 时用 dueMs 兜底
+   * @param dueMs   本轮的截止时间（毫秒）；<=0 表示无截止
+   */
+  static rewriteTodoRecurrence(ics: string, uid: string, rrule: string,
+    dtstart: number, dueMs: number): string {
+    const crlf: string = '\r\n';
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+    const hasRule: boolean = rrule.trim() !== '';
+
+    // ---- 第 1 遍：定位目标 VTODO 块（RFC 5545 不规定字段顺序，必须两遍）----
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      return ics;
+    }
+
+    // ---- 第 2 遍：块内替换/删除 RRULE、DTSTART、DUE ----
+    const out: string[] = [];
+    let sawRule: boolean = false;
+    let sawStart: boolean = false;
+    let sawDue: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('RRULE')) {
+        sawRule = true;
+        if (hasRule) {
+          out.push('RRULE:' + rrule.trim());
+        }
+        continue; // 取消循环时整行丢掉
+      }
+      if (u.startsWith('DTSTART')) {
+        sawStart = true;
+        if (hasRule && dtstart > 0) {
+          out.push('DTSTART:' + IcsUtil.fmtIcsTime(dtstart, false));
+        }
+        continue;
+      }
+      if (u.startsWith('DUE')) {
+        sawDue = true;
+        if (dueMs > 0) {
+          out.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+        }
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺字段补齐
+    const extra: string[] = [];
+    if (hasRule) {
+      if (!sawRule) {
+        extra.push('RRULE:' + rrule.trim());
+      }
+      if (!sawStart && dtstart > 0) {
+        extra.push('DTSTART:' + IcsUtil.fmtIcsTime(dtstart, false));
+      }
+      if (!sawDue && dueMs > 0) {
+        extra.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+      }
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // 按**结构**定位插入点（改动会删行，行号已不对齐）
+    let targetOrdinal: number = -1;
+    {
+      let n: number = -1;
+      let inBlk: boolean = false;
+      let has: boolean = false;
+      for (let i = 0; i < out.length; i++) {
+        const u: string = upperOf(out[i]);
+        if (u.startsWith('BEGIN:VTODO')) {
+          n++;
+          inBlk = true;
+          has = false;
+          continue;
+        }
+        if (u.startsWith('UID:') && inBlk && out[i].substring(4).trim() === uid) {
+          has = true;
+          continue;
+        }
+        if (u.startsWith('END:VTODO') && inBlk) {
+          if (has && targetOrdinal < 0) {
+            targetOrdinal = n;
+          }
+          inBlk = false;
+        }
+      }
+    }
+    // ⭐ RRULE_IDX_FIX vtodoIdx 是**全局块序号**，只在 BEGIN:VTODO 自增。
+    //    之前在这里的 END:VTODO 分支把它重置成 -1，导致每块都从 0 重新数，
+    //    多 VTODO 文件里永远匹配不到 targetOrdinal（第 2 块应为 1）⇒ RRULE 加不上。
+    const result: string[] = [];
+    let vtodoIdx: number = -1;
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
         result.push(out[i]);
         continue;
       }
@@ -536,7 +766,18 @@ export class IcsUtil {
         current.location = IcsUtil.unescape(value);
       } else if (propName === 'RRULE') {
         current.recurring = true;
-      } else if (propName === 'DUE' || propName === 'DTSTART') {
+        // ⭐ 保存规则原文：原来只置了 recurring 标志，规则本身被丢掉，
+        //    导致「知道它重复，但不知道多久重复一次」。
+        current.rrule = value.trim();
+      } else if (propName === 'DTSTART') {
+        // ⭐ DTSTART 单独存：它是 RRULE 的重复基准，**不是**截止时间。
+        //    原来与 DUE 共用 startTime，谁后出现谁覆盖 ⇒ 循环任务基准错乱。
+        const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
+        const t = IcsUtil.parseTime(value, isDateOnly);
+        if (t !== null) {
+          current.dtstart = t.time;
+        }
+      } else if (propName === 'DUE') {
         const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
         const t = IcsUtil.parseTime(value, isDateOnly);
         if (t !== null) {

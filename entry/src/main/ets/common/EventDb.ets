@@ -24,6 +24,10 @@ export class LocalEvent {
   kind: string = 'event';   // 'event' 日程 | 'todo' 待办（VTODO，只读展示）
   completed: boolean = false; // 待办是否已完成（STATUS:COMPLETED）
   rrule: string = '';       // 原始 RRULE（空 = 非重复）；显示时按规则展开多次发生
+  /** ⭐ 待办的 DTSTART（重复规则的基准日，毫秒；0 = 该条没有 DTSTART）。
+   *  与 startTime 必须分开：startTime 对 VTODO 是**截止时间 DUE**，
+   *  而 DTSTART 是 RRULE 的起点，两者语义不同、不能互相覆盖。 */
+  dtstart: number = 0;
   exdate: string = '';      // 原始 EXDATE 排除日期，分号分隔
   /** ⭐ RECURRENCE-ID：本行"覆盖"的是主事件的哪一次发生（毫秒，0 = 无/旧数据未回填）。
    *  只改标题时它等于 startTime；**把某次发生改期**时它才是原始时刻——
@@ -47,6 +51,7 @@ export class RemoteEvent {
   isTodo: boolean = false;    // VTODO 待办
   completed: boolean = false; // VTODO STATUS:COMPLETED
   rrule: string = '';         // 原始 RRULE
+  dtstart: number = 0;        // ⭐ VTODO 的 DTSTART（RRULE 基准），与 startTime(DUE) 分开
   exdate: string = '';        // 原始 EXDATE（分号分隔）
   recurrenceId: number = 0;   // 原始 RECURRENCE-ID（毫秒；0 = 无）
   reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
@@ -125,6 +130,11 @@ export class EventDb {
       // 列已存在
     }
     try {
+      await store.executeSql('ALTER TABLE events ADD COLUMN dtstart INTEGER DEFAULT 0');
+    } catch (err) {
+      // 列已存在
+    }
+    try {
       await store.executeSql("ALTER TABLE events ADD COLUMN exdate TEXT DEFAULT ''");
     } catch (err) {
       // 列已存在
@@ -181,6 +191,7 @@ export class EventDb {
     const e = new LocalEvent();
     e.id = rs.getLong(rs.getColumnIndex('id'));
     e.uid = rs.getString(rs.getColumnIndex('uid'));
+    e.dtstart = rs.getLong(rs.getColumnIndex('dtstart'));
     e.calKey = rs.getString(rs.getColumnIndex('cal_key'));
     e.href = rs.getString(rs.getColumnIndex('href'));
     e.remotePath = rs.getString(rs.getColumnIndex('remote_path'));
@@ -338,6 +349,44 @@ export class EventDb {
   /** 全部未删除的待办（VTODO），未完成在前、按截止时间升序 */
   /** 按本地行 id 查一行（待办完成时用来取 uid / href / remotePath / etag） */
   /** 更新待办的完成状态与 etag（推送成功后调用，保证本地与服务器一致） */
+  /** 保存循环规则与基准（设置/取消循环后调用） */
+  static async updateTodoRecurrence(context: common.Context, id: number,
+    rrule: string, dtstart: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'rrule': rrule,
+      'dtstart': dtstart,
+      'recurring': rrule !== '' ? 1 : 0,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  /**
+   * 循环待办"完成一轮"后更新本地：推后的基准/截止 + 清除完成态。
+   *
+   * ⚠️ 必须同时把 completed 置 0、dirty 清掉：
+   *    否则界面会显示成"已完成"，而服务器上其实是"下一轮未完成"，两边不一致。
+   */
+  static async updateTodoAfterRound(context: common.Context, id: number,
+    dtstart: number, dueMs: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'dtstart': dtstart,
+      'start_time': dueMs,
+      'end_time': dueMs,
+      'completed': 0,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
   /** 更新待办内容字段（标题 / 备注 / 截止时间）与 etag */
   static async updateTodoFields(context: common.Context, id: number, title: string,
     desc: string, dueMs: number, etag: string): Promise<void> {

@@ -74,6 +74,7 @@ struct Index {
   @State todoEditDueMs: number = 0;      // 0 = 无截止时间
   @State todoEditBook: string = '';      // 所属本名（只读展示）
   @State todoEditWritable: boolean = true;
+  @State todoEditRecur: string = '';   // 当前循环（'' = 不循环），存 FREQ 值如 WEEKLY
   @State todoEditHasDue: boolean = false;
   @State todoEditPickShow: boolean = false;  // 截止时间选择器
   @State todoEditPickDate: Date = new Date();
@@ -772,6 +773,9 @@ struct Index {
       this.getUIContext().getPromptAction()
         .showToast({ message: `同步完成（${ok} 个账号）` });
     }
+    // 同步完成后重新读库并重建月格。
+    // ⚠️ reloadAll() 内部已包含 reloadEvents()，这里不要重复调用 ——
+    //    只在"同步确实拉到了新数据"时再刷一次，避免多余的重建开销。
     await this.reloadAll();
     // 同步后刷新服务卡片 + 重建提醒
     try {
@@ -2756,6 +2760,51 @@ struct Index {
           this.openTodoDuePicker();
         })
 
+        // ⭐ 循环设置
+        Row({ space: 8 }) {
+          Text('重复')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          Text(this.todoEditRecur === '' ? '不重复' : this.recurLabel(`FREQ=${this.todoEditRecur}`))
+            .fontSize(14)
+            .fontColor(this.todoEditRecur === ''
+              ? $r('app.color.text_hint') : $r('app.color.brand_text'))
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+
+        // 四个循环选项（点同一个取消）
+        Row({ space: 8 }) {
+          ForEach([
+            { v: 'DAILY', label: '每天' },
+            { v: 'WEEKLY', label: '每周' },
+            { v: 'MONTHLY', label: '每月' },
+            { v: 'YEARLY', label: '每年' }
+          ], (opt: Record<string, string>): void => {
+            Text(opt.label)
+              .fontSize(13)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor(this.todoEditRecur === opt.v
+                ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.todoEditRecur === opt.v
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .onClick(() => {
+                // 再点一次 = 取消循环
+                this.todoEditRecur = this.todoEditRecur === opt.v ? '' : opt.v;
+              })
+          }, (opt: Record<string, string>): string => `rr_${opt.v}`)
+        }
+        .width('100%')
+
+        if (this.todoEditRecur !== '' && !this.todoEditHasDue) {
+          Text('提示：循环任务需要有截止时间，才能算出下一次')
+            .fontSize(11)
+            .fontColor($r('app.color.error'))
+            .width('100%')
+        }
+
         // 备注
         TextArea({ text: this.todoEditDesc, placeholder: '备注（可选）' })
           .fontSize(14)
@@ -2998,6 +3047,7 @@ struct Index {
     this.todoEditHasDue = t.startTime > 0;
     this.todoEditBook = t.calName;
     this.todoEditWritable = t.writable;
+    this.todoEditRecur = t.recurRule !== '' ? IcsUtil.freqOfRrule(t.recurRule) : '';
     // 默认值给"明天 09:00"，与新建日程的口径一致（非今天用 9 点）
     const base: Date = new Date();
     this.todoEditPickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
@@ -3042,6 +3092,13 @@ struct Index {
         this.todoEditTitle, this.todoEditDesc,
         this.todoEditHasDue ? this.todoEditDueMs : 0);
       if (ok) {
+        // ⭐ 循环规则单独写：它与"改内容"是两回事，
+        //    而且要先有截止时间才有意义（没有 DUE 的循环任务无法算下一次）
+        const wantRule: string = this.todoEditRecur !== '' ? `FREQ=${this.todoEditRecur}` : '';
+        const dueForRecur: number = this.todoEditHasDue ? this.todoEditDueMs : 0;
+        if (dueForRecur > 0) {
+          await TodoService.setRecurrence(ctx, this.todoEditId, wantRule, dueForRecur);
+        }
         this.todoEditShow = false;
         this.getUIContext().getPromptAction().showToast({ message: '已保存' });
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
@@ -3106,7 +3163,29 @@ struct Index {
   private todoSubtitle(t: DisplayEvent): string {
     const due: string = t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间';
     const book: string = t.calName !== '' ? ` · ${t.calName}` : '';
-    return due + book;
+    // ⭐ TODO_RECUR_UI 循环标记：让用户一眼看出"这条会重复"
+    //    没有这个标记，循环任务看起来和普通待办完全一样，
+    //    用户勾完成后发现"又冒出新的"会很困惑。
+    const rec: string = t.recurRule !== '' ? ` ↻ ${this.recurLabel(t.recurRule)}` : '';
+    return due + rec + book;
+  }
+
+  /** RRULE → 中文标签（只处理 FREQ 四种，够用且不会误导） */
+  private recurLabel(rrule: string): string {
+    const f: string = IcsUtil.freqOfRrule(rrule);
+    if (f === 'DAILY') {
+      return '每天';
+    }
+    if (f === 'WEEKLY') {
+      return '每周';
+    }
+    if (f === 'MONTHLY') {
+      return '每月';
+    }
+    if (f === 'YEARLY') {
+      return '每年';
+    }
+    return '循环';
   }
 
   /** 待办完成状态切换：写回服务器成功后刷新列表；失败保持原状并提示。
@@ -3119,11 +3198,27 @@ struct Index {
     }
     this.todoBusy = true;
     try {
-      const ok: boolean = await TodoService.setCompleted(ctx, t.id, !t.completed);
+      // ⭐ 循环待办勾"完成" = 这一轮做完了，推进到下一个周期（不结束）
+      //    非循环 / 取消完成 → 走原来的 setCompleted
+      const isRecurring: boolean = t.recurRule !== '';
+      let ok: boolean = false;
+      let nextDue: number = 0;
+      if (isRecurring && !t.completed) {
+        nextDue = await TodoService.completeRecurringRound(ctx, t.id);
+        ok = nextDue > 0;
+      } else {
+        ok = await TodoService.setCompleted(ctx, t.id, !t.completed);
+      }
       if (ok) {
-        this.getUIContext().getPromptAction().showToast({
-          message: t.completed ? '已标记为未完成' : '已完成'
-        });
+        if (isRecurring && !t.completed) {
+          this.getUIContext().getPromptAction().showToast({
+            message: nextDue > 0 ? `这一轮完成，下次 ${this.fmtDue(nextDue)}` : '这一轮已完成'
+          });
+        } else {
+          this.getUIContext().getPromptAction().showToast({
+            message: t.completed ? '已标记为未完成' : '已完成'
+          });
+        }
         // 重新读库刷新列表（服务层已更新 completed）
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
       } else {

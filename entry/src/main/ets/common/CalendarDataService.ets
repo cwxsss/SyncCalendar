@@ -25,6 +25,11 @@ export class DisplayEvent {
   color: string = '#007DFF';
   completed: boolean = false; // 仅待办使用
   recurring: boolean = false; // 是否为重复日程展开出的发生
+  /** ⭐ 待办的 RRULE 原文（空 = 非循环）。与 recurring 不同：
+   *  recurring 只说"重不重复"，这里带的是"多久重复一次"。 */
+  recurRule: string = '';
+  /** 待办的 DTSTART（重复基准，毫秒；0 = 无） */
+  dtstart: number = 0;
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
@@ -365,6 +370,9 @@ export class CalendarDataService {
         d.calName = nameOf(e.calKey);
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
+        d.recurRule = e.rrule;
+        d.dtstart = e.dtstart;
+        d.recurring = e.rrule !== '';
         result.push(d);
       }
     } catch (err) {
