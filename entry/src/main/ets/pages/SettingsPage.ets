@@ -1697,6 +1697,36 @@ struct SettingsPage {
             this.openDoc(AppSettings.HELP_TITLE, AppSettings.HELP_URL);
           })
 
+          // FEEDBACK_CARD 问题反馈（FeedLite 平台，?sw=synccalendar 指定本项目站点）
+          Column({ space: 8 }) {
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('问题反馈')
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                Text('遇到问题或有建议，点这里告诉我们')
+                  .fontSize(12)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text('›')
+                .fontSize(18)
+                .fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+          .border({ width: 1, color: $r('app.color.shadow_color') })
+          .onClick(() => {
+            this.openDoc(AppSettings.FEEDBACK_TITLE, AppSettings.FEEDBACK_URL);
+          })
+
           // 隐私政策与用户协议（点击弹层；bindSheet 挂在本卡片上，避免与其它弹层冲突）
           Column({ space: 8 }) {
             Row({ space: 10 }) {

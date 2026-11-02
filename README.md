@@ -3,7 +3,7 @@
 一款以**同步为核心**的鸿蒙原生日历应用，基于 HarmonyOS NEXT（ArkTS / Stage 模型）开发。对接标准 CalDAV 服务器（群晖、Nextcloud、Radicale、Baikal 等），让你的日程真正掌握在自己手里——不经过第三方云服务，数据始终同步在你自己的 NAS 上。
 
 - 应用市场送审版本：**0.1.0** ｜ 仓库当前：**0.1.0**（versionCode 10000）
-- 官网：<https://synccalendar.yangyq.net> ｜ 问题反馈：<https://synccalendar.yangyq.net/feedback/>
+- 官网：<https://synccalendar.yangyq.net> ｜ 问题反馈：<https://feedlite.yangyq.net/?sw=synccalendar>
 - 开源协议：Apache License 2.0
 
 ---
@@ -337,7 +337,7 @@ hvigorw assembleApp --mode project -p product=default -p buildMode=release
 | 软件特性 | <https://synccalendar.yangyq.net/sf.html> |
 | 隐私政策 | <https://synccalendar.yangyq.net/upa.html> |
 | 用户服务协议 | <https://synccalendar.yangyq.net/usa.html> |
-| 问题反馈 | <https://synccalendar.yangyq.net/feedback/> |
+| 问题反馈 | <https://feedlite.yangyq.net/?sw=synccalendar> |
 
 网站备案：**鲁ICP备17014997号-6A**
 
