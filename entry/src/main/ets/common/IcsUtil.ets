@@ -327,6 +327,175 @@ export class IcsUtil {
     return text2.endsWith(crlf) ? text2 : text2 + crlf;
   }
 
+  /**
+   * 在**服务器原文**上改写 VTODO 的内容字段，返回新的整份 ICS。
+   *
+   * 只改三项，其余（PRIORITY / CATEGORIES / X-* / STATUS / COMPLETED …）原样保留：
+   *   - SUMMARY     标题
+   *   - DESCRIPTION 备注
+   *   - DUE         截止时间（dueMs<=0 → 删除该行）
+   *
+   * 与 rewriteTodoCompletion 相同的两遍处理：
+   *   ① 先定位含目标 uid 的 VTODO 块（RFC 5545 不规定字段顺序，不能边扫边改）
+   *   ② 再在块内替换/删除目标字段，缺失的在 END:VTODO 前补齐
+   */
+  static rewriteTodoFields(ics: string, uid: string, title: string,
+    desc: string, dueMs: number): string {
+    const crlf: string = '\r\n';
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+
+    // ---- 第 1 遍：定位目标 VTODO 块 ----
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      return ics; // 找不到目标，原样返回
+    }
+
+    // ---- 第 2 遍：块内改写 ----
+    const out: string[] = [];
+    let sawSummary: boolean = false;
+    let sawDesc: boolean = false;
+    let sawDue: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('SUMMARY')) {
+        sawSummary = true;
+        if (title !== '') {
+          out.push('SUMMARY:' + IcsUtil.escape(title));
+        }
+        continue;
+      }
+      if (u.startsWith('DESCRIPTION')) {
+        sawDesc = true;
+        if (desc !== '') {
+          out.push('DESCRIPTION:' + IcsUtil.escape(desc));
+        }
+        continue;
+      }
+      if (u.startsWith('DUE')) {
+        sawDue = true;
+        if (dueMs > 0) {
+          out.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+        }
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺失字段补齐
+    const extra: string[] = [];
+    if (!sawSummary && title !== '') {
+      extra.push('SUMMARY:' + IcsUtil.escape(title));
+    }
+    if (!sawDesc && desc !== '') {
+      extra.push('DESCRIPTION:' + IcsUtil.escape(desc));
+    }
+    if (!sawDue && dueMs > 0) {
+      extra.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // 按**结构**定位插入点（不能按行号：上面可能删掉了 DUE 行，行号已不对齐）
+    const result: string[] = [];
+    let vtodoIdx: number = -1;
+    let targetOrdinal: number = -1;
+    // 重新数出目标的块序号
+    {
+      let n: number = -1;
+      let inBlk: boolean = false;
+      let has: boolean = false;
+      for (let i = 0; i < out.length; i++) {
+        const u: string = upperOf(out[i]);
+        if (u.startsWith('BEGIN:VTODO')) {
+          n++;
+          inBlk = true;
+          has = false;
+          continue;
+        }
+        if (u.startsWith('UID:') && inBlk && out[i].substring(4).trim() === uid) {
+          has = true;
+          continue;
+        }
+        if (u.startsWith('END:VTODO') && inBlk) {
+          if (has && targetOrdinal < 0) {
+            targetOrdinal = n;
+          }
+          inBlk = false;
+        }
+      }
+    }
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
+        vtodoIdx = -1;
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const merged: string = tail0.substring(0, idxVc) + extra.join(crlf) + crlf
+          + tail0.substring(idxVc);
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
   /** 解析 VCALENDAR 中的 VTODO 待办列表（待办为只读展示，不参与推送） */
   static parseTodos(ics: string): RemoteEvent[] {
     const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');

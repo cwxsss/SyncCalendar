@@ -39,6 +39,18 @@ class MonthCell {
   hasEvent: boolean = false;
 }
 
+/**
+ * 待办分组（按日历本聚合）。
+ * 用 class 而不是 Map/匿名对象：ArkUI 的 ForEach 需要稳定结构，
+ * 用带类型的类更不容易在 ArkTS 严格模式下出错。
+ */
+class TodoGroup {
+  calKey: string = '';
+  name: string = '';
+  color: string = '#007DFF';
+  items: DisplayEvent[] = [];
+}
+
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
@@ -54,6 +66,19 @@ struct Index {
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State todoBusy: boolean = false;  // 正在写回待办状态（防连点）
+  // ⭐ TODO_EDITOR 待办编辑弹框状态
+  @State todoEditShow: boolean = false;
+  @State todoEditId: number = 0;
+  @State todoEditTitle: string = '';
+  @State todoEditDesc: string = '';
+  @State todoEditDueMs: number = 0;      // 0 = 无截止时间
+  @State todoEditBook: string = '';      // 所属本名（只读展示）
+  @State todoEditWritable: boolean = true;
+  @State todoEditHasDue: boolean = false;
+  @State todoEditPickShow: boolean = false;  // 截止时间选择器
+  @State todoEditPickDate: Date = new Date();
+  @State todoEditPickHour: number = 9;
+  @State todoEditPickMin: number = 0;
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
@@ -491,6 +516,10 @@ struct Index {
     const gridStart: number = first - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
     const eventDays: Set<number> = this.buildEventDaySet();
+    // DOT_DEBUG 临时：确认集合算出来了没有
+    if (month >= 0) {
+      LogUtil.write(`月格点标记 ${year}-${month + 1}：事件 ${this.events.length} 条，有事件的日期 ${eventDays.size} 天`);
+    }
     const cells: MonthCell[] = [];
     for (let i = 0; i < 42; i++) {
       const dateMs: number = gridStart + i * 86400000;
@@ -1118,6 +1147,11 @@ struct Index {
         this.consentGate()
       }
 
+      // ⭐ TODO_EDITOR_UI 待办编辑弹框（覆盖层方案：同一组件只能挂一个 bindSheet）
+      if (this.todoEditShow) {
+        this.todoEditorOverlay()
+      }
+
       // 功能引导：整页覆盖层，放根 Stack 最后一层（盖住主界面与悬浮按钮）
       if (this.showTips) {
         this.tipsOverlay()
@@ -1654,16 +1688,27 @@ struct Index {
             .backgroundColor(cell.dateMs === this.selectedDate
               ? $r('app.color.selected_bg')
               : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-          Text(cell.lunar)
-            .fontSize(8)
-            .fontColor($r('app.color.text_hint'))
-            .maxLines(1)
+          // 农历 + 圆点同一行（与月视图排版一致，避免周条变高）
+          Row({ space: 2 }) {
+            Text(cell.lunar)
+              .fontSize(8)
+              .fontColor($r('app.color.text_hint'))
+              .maxLines(1)
+            // ⭐ 圆点用主题色：它只表示"这天有安排"，不代表某个日历本，
+            //    所以不取本的色（否则会误导成"只有那个本有日程"）。
+            //    选中日深底 → 换白点保对比度；无事件时透明占位保持行高一致。
+            Circle({ width: 5, height: 5 })
+              .fill(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.brand'))
+              .opacity(cell.hasEvent ? 1 : 0)
+          }
+          .justifyContent(FlexAlign.Center)
         }
         .layoutWeight(1)
         .onClick(() => {
           this.selectedDate = cell.dateMs;
         })
-      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}`)
+      }, (cell: MonthCell) => `${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvent}`)
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -1682,6 +1727,9 @@ struct Index {
     const offset: number = (sel.getDay() + 6) % 7;
     const weekStart: number = this.selectedDate - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
+    // ⭐ WEEK_DOT 周条也要显示圆点 ⇒ 与月视图共用同一份"有事件日期"集合，
+    //    口径完全一致（区间相交，跨天事件覆盖的每天都算）。
+    const eventDays: Set<number> = this.buildEventDaySet();
     const cells: MonthCell[] = [];
     for (let i = 0; i < 7; i++) {
       const dateMs: number = weekStart + i * 86400000;
@@ -1690,6 +1738,7 @@ struct Index {
       cell.day = new Date(dateMs).getDate();
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.hasEvent = eventDays.has(this.startOfDay(dateMs));
       cells.push(cell);
     }
     return cells;
@@ -2520,27 +2569,63 @@ struct Index {
 
   /** 待办页：与日历视图完全分开，只读展示服务器端 VTODO */
   @Builder
+  // ⭐ TODO_GROUPED 待办视图：未完成 / 已完成 两大段，段内再按**日历本**分组。
+  //    用户要求"按日历本分类显示，未完成里也能按家庭、生活分开，要有区分度"。
+  //    分组标题前带该本的颜色圆点 —— 这才是"区分度"的来源。
   todoBody() {
     Scroll() {
       Column({ space: 8 }) {
-        Text('未完成')
+        Text(`未完成（${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length}）`)
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
-        ForEach(this.todos.filter((t: DisplayEvent): boolean => !t.completed), (t: DisplayEvent) => {
-          this.todoRow(t)
-        }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+        ForEach(this.todoGroups(false), (g: TodoGroup) => {
+          Column({ space: 6 }) {
+            Row({ space: 6 }) {
+              Circle({ width: 8, height: 8 }).fill(g.color)
+              Text(`${g.name}（${g.items.length}）`)
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_secondary'))
+              Blank()
+            }
+            .width('100%')
+            .padding({ top: 4 })
+            ForEach(g.items, (t: DisplayEvent) => {
+              this.todoRow(t)
+            }, (t: DisplayEvent) => `u${t.id}_${t.completed}`)
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+        }, (g: TodoGroup) => `g0_${g.calKey}`)
+
         if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
-          Text('已完成')
+          Text(`已完成（${this.todos.filter((t: DisplayEvent): boolean => t.completed).length}）`)
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.text_secondary'))
             .width('100%')
             .margin({ top: 10 })
-          ForEach(this.todos.filter((t: DisplayEvent): boolean => t.completed), (t: DisplayEvent) => {
-            this.todoRow(t)
-          }, (t: DisplayEvent) => `t${t.id}_${t.completed}`)
+          ForEach(this.todoGroups(true), (g: TodoGroup) => {
+            Column({ space: 6 }) {
+              Row({ space: 6 }) {
+                Circle({ width: 8, height: 8 }).fill(g.color)
+                Text(`${g.name}（${g.items.length}）`)
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_secondary'))
+                Blank()
+              }
+              .width('100%')
+              .padding({ top: 4 })
+              ForEach(g.items, (t: DisplayEvent) => {
+                this.todoRow(t)
+              }, (t: DisplayEvent) => `c${t.id}_${t.completed}`)
+            }
+            .alignItems(HorizontalAlign.Start)
+            .width('100%')
+          }, (g: TodoGroup) => `g1_${g.calKey}`)
         }
         if (this.todos.length === 0 && !this.loading) {
           Column({ space: 8 }) {
@@ -2574,39 +2659,275 @@ struct Index {
     .align(Alignment.Top)
   }
 
+  /**
+   * 待办编辑覆盖层。
+   *
+   * 为什么用覆盖层而不是 bindSheet：
+   *   ArkUI 里**同一组件只能挂一个 bindSheet**，Index 已用 `detailShow` 挂了日程详情，
+   *   再挂一个会被覆盖（EventEditPage 顶部也记过这个坑）。
+   *   覆盖层跟 tipsOverlay / consentGate 是同一套路，已验证可用。
+   */
+  @Builder
+  todoEditorOverlay() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      // 半透明遮罩：点空白关闭
+      Column()
+        .width('100%')
+        .height('100%')
+        // 与 tipsOverlay 同款遮罩色（资源里没有 scrim 这个色，用字面值保持一致）
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.todoEditShow = false;
+        })
+
+      Column({ space: 12 }) {
+        // 标题行
+        Row({ space: 8 }) {
+          Text('编辑待办')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+          Blank()
+          if (this.todoEditWritable) {
+            Text('删除')
+              .fontSize(14)
+              .fontColor($r('app.color.error'))
+              .onClick(() => {
+                this.askDeleteTodo();
+              })
+          }
+        }
+        .width('100%')
+
+        if (this.todoEditBook !== '') {
+          Row({ space: 6 }) {
+            Text('日历本')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+            Text(this.todoEditBook)
+              .fontSize(12)
+              .fontColor($r('app.color.text_primary'))
+            Blank()
+          }
+          .width('100%')
+        }
+
+        if (!this.todoEditWritable) {
+          Text('该日历本为只读，无法修改')
+            .fontSize(12)
+            .fontColor($r('app.color.error'))
+            .width('100%')
+        }
+
+        // 标题输入
+        TextInput({ text: this.todoEditTitle, placeholder: '待办标题' })
+          .fontSize(15)
+          .height(44)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.page_bg'))
+          .onChange((v: string) => {
+            this.todoEditTitle = v;
+          })
+
+        // 截止时间
+        Row({ space: 8 }) {
+          Text('截止时间')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          Text(this.todoEditHasDue
+            ? this.fmtDueFull(this.todoEditDueMs) : '无')
+            .fontSize(14)
+            .fontColor(this.todoEditHasDue
+              ? $r('app.color.text_primary') : $r('app.color.text_hint'))
+          if (this.todoEditHasDue) {
+            Text('清除')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.todoEditHasDue = false;
+                this.todoEditDueMs = 0;
+              })
+          }
+        }
+        .width('100%')
+        .padding({ top: 4, bottom: 4 })
+        .onClick(() => {
+          this.openTodoDuePicker();
+        })
+
+        // 备注
+        TextArea({ text: this.todoEditDesc, placeholder: '备注（可选）' })
+          .fontSize(14)
+          .height(88)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.page_bg'))
+          .onChange((v: string) => {
+            this.todoEditDesc = v;
+          })
+
+        Row({ space: 10 }) {
+          Button('取消')
+            .layoutWeight(1)
+            .height(44)
+            .borderRadius(12)
+            .fontSize(15)
+            .fontColor($r('app.color.text_primary'))
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .onClick(() => {
+              this.todoEditShow = false;
+            })
+          Button(this.todoBusy ? '保存中…' : '保存')
+            .layoutWeight(1)
+            .height(44)
+            .borderRadius(12)
+            .fontSize(15)
+            .enabled(!this.todoBusy && this.todoEditWritable)
+            .onClick(() => {
+              this.saveTodoEdit();
+            })
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .padding(18)
+      .borderRadius({ topLeft: 18, topRight: 18 })
+      .backgroundColor($r('app.color.card_bg'))
+      .shadow({ radius: 16, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: -2 })
+
+      // 截止时间选择器（叠在弹框之上）
+      if (this.todoEditPickShow) {
+        Column({ space: 12 }) {
+          Text('选择截止时间')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+            .textAlign(TextAlign.Center)
+          Row({ space: 4 }) {
+            DatePicker({
+              start: new Date(2000, 0, 1),
+              end: new Date(2050, 11, 31),
+              selected: this.todoEditPickDate
+            })
+              .onDateChange((value: Date) => {
+                this.todoEditPickDate = value;
+              })
+              .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+              .selectedTextStyle({
+                color: $r('app.color.text_primary'),
+                font: { size: 16, weight: FontWeight.Medium }
+              })
+              .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+              .layoutWeight(1)
+              .height(200)
+            TimePicker({ selected: new Date(2000, 0, 1, this.todoEditPickHour, this.todoEditPickMin) })
+              .onChange((value: TimePickerResult) => {
+                this.todoEditPickHour = value.hour;
+                this.todoEditPickMin = value.minute;
+              })
+              .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+              .selectedTextStyle({
+                color: $r('app.color.text_primary'),
+                font: { size: 16, weight: FontWeight.Medium }
+              })
+              .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+              .layoutWeight(1)
+              .height(200)
+          }
+          .width('100%')
+          Row({ space: 10 }) {
+            Button('取消')
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(12)
+              .fontSize(15)
+              .fontColor($r('app.color.text_primary'))
+              .backgroundColor($r('app.color.chip_off_bg'))
+              .onClick(() => {
+                this.todoEditPickShow = false;
+              })
+            Button('确定')
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(12)
+              .fontSize(15)
+              .onClick(() => {
+                this.confirmTodoDue();
+              })
+          }
+          .width('100%')
+        }
+        .width('92%')
+        .padding(16)
+        .borderRadius(16)
+        .backgroundColor($r('app.color.card_bg'))
+        .shadow({ radius: 20, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 4 })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 截止时间完整显示（含时分） */
+  private fmtDueFull(ms: number): string {
+    const d = new Date(ms);
+    const hh: string = d.getHours() < 10 ? `0${d.getHours()}` : `${d.getHours()}`;
+    const mm: string = d.getMinutes() < 10 ? `0${d.getMinutes()}` : `${d.getMinutes()}`;
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
+  }
+
   @Builder
   todoRow(t: DisplayEvent) {
+    // ⭐ TODO_ROW_SPLIT 点击区域拆分：
+    //    · 左侧圆圈 → 勾选/取消完成
+    //    · 其余部分 → 打开编辑弹框
+    //    旧版把 onClick 挂在整行上，点标题、点截止时间、点空白都会改完成状态，
+    //    用户反馈"点任何地方都是完成"，是明确的交互缺陷。
     Row({ space: 10 }) {
-      // 勾选框（颜色跟随日历本）
-      if (t.completed) {
-        Text('✓')
-          .fontSize(13)
-          .fontColor($r('app.color.button_text'))
-          .width(22)
-          .height(22)
-          .textAlign(TextAlign.Center)
-          .borderRadius(11)
-          .backgroundColor(this.colorOfCal(t.calKey))
-      } else {
-        Text('')
-          .width(22)
-          .height(22)
-          .borderRadius(11)
-          .border({ width: 2, color: this.colorOfCal(t.calKey) })
+      // 勾选框（颜色跟随日历本）—— **只有这块触发完成切换**
+      Row() {
+        if (t.completed) {
+          Text('✓')
+            .fontSize(13)
+            .fontColor($r('app.color.button_text'))
+            .width(22)
+            .height(22)
+            .textAlign(TextAlign.Center)
+            .borderRadius(11)
+            .backgroundColor(this.colorOfCal(t.calKey))
+        } else {
+          Text('')
+            .width(22)
+            .height(22)
+            .borderRadius(11)
+            .border({ width: 2, color: this.colorOfCal(t.calKey) })
+        }
       }
+      .padding({ right: 2 })
+      .onClick(() => {
+        this.toggleTodo(t);
+      })
+
       Column({ space: 3 }) {
         Text(t.title === '' ? '(无标题待办)' : t.title)
           .fontSize(15)
           .fontColor(t.completed ? $r('app.color.text_hint') : $r('app.color.text_primary'))
           .decoration({ type: t.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间')
+        Text(this.todoSubtitle(t))
           .fontSize(12)
           .fontColor($r('app.color.text_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+      // ⭐ 内容区点击 → 打开编辑（不改变完成状态）
+      .onClick(() => {
+        this.openTodoEditor(t);
+      })
     }
     .width('100%')
     .padding(10)
@@ -2614,9 +2935,178 @@ struct Index {
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
-    .onClick(() => {
-      this.toggleTodo(t);
-    })
+  }
+
+  /**
+   * 把待办按日历本聚合成组。
+   *
+   * @param completed true=取已完成；false=取未完成
+   * @returns 按"未完成优先、组内按截止时间升序"排好的分组
+   *
+   * 为什么单独抽出来：视图里直接写 filter + group 会让 build() 里塞逻辑，
+   * 而且 ForEach 的 key 需要稳定（用 calKey），抽出来更好维护。
+   */
+  private todoGroups(completed: boolean): TodoGroup[] {
+    const list: DisplayEvent[] = this.todos.filter(
+      (t: DisplayEvent): boolean => t.completed === completed);
+    const map: Map<string, TodoGroup> = new Map<string, TodoGroup>();
+    const order: string[] = [];
+    for (const t of list) {
+      const key: string = t.calKey === '' ? '__unknown' : t.calKey;
+      let g: TodoGroup | undefined = map.get(key);
+      if (g === undefined) {
+        const ng = new TodoGroup();
+        ng.calKey = key;
+        ng.name = t.calName !== '' ? t.calName : '其他';
+        ng.color = t.color;
+        map.set(key, ng);
+        order.push(key);
+        g = ng;
+      }
+      g.items.push(t);
+    }
+    const out: TodoGroup[] = [];
+    for (const k of order) {
+      const g = map.get(k);
+      if (g !== undefined) {
+        // 组内按截止时间升序（无截止时间的排最后）
+        g.items.sort((a: DisplayEvent, b: DisplayEvent): number => {
+          const av: number = a.startTime > 0 ? a.startTime : Number.MAX_SAFE_INTEGER;
+          const bv: number = b.startTime > 0 ? b.startTime : Number.MAX_SAFE_INTEGER;
+          return av - bv;
+        });
+        out.push(g);
+      }
+    }
+    // 组之间按"组内最早截止时间"排序，最紧急的本排前面
+    out.sort((a: TodoGroup, b: TodoGroup): number => {
+      const av: number = a.items.length > 0 && a.items[0].startTime > 0
+        ? a.items[0].startTime : Number.MAX_SAFE_INTEGER;
+      const bv: number = b.items.length > 0 && b.items[0].startTime > 0
+        ? b.items[0].startTime : Number.MAX_SAFE_INTEGER;
+      return av - bv;
+    });
+    return out;
+  }
+
+  /** 打开待办编辑弹框（点内容区触发；不会改变完成状态） */
+  private openTodoEditor(t: DisplayEvent): void {
+    this.todoEditId = t.id;
+    this.todoEditTitle = t.title;
+    this.todoEditDesc = t.description;
+    this.todoEditDueMs = t.startTime > 0 ? t.startTime : 0;
+    this.todoEditHasDue = t.startTime > 0;
+    this.todoEditBook = t.calName;
+    this.todoEditWritable = t.writable;
+    // 默认值给"明天 09:00"，与新建日程的口径一致（非今天用 9 点）
+    const base: Date = new Date();
+    this.todoEditPickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
+    this.todoEditPickHour = 9;
+    this.todoEditPickMin = 0;
+    this.todoEditPickShow = false;
+    this.todoEditShow = true;
+  }
+
+  /** 打开截止时间选择器（把当前值灌进滚轮初值） */
+  private openTodoDuePicker(): void {
+    const d: Date = this.todoEditHasDue && this.todoEditDueMs > 0
+      ? new Date(this.todoEditDueMs) : new Date();
+    this.todoEditPickDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    this.todoEditPickHour = d.getHours();
+    this.todoEditPickMin = d.getMinutes();
+    this.todoEditPickShow = true;
+  }
+
+  /** 确认截止时间 */
+  private confirmTodoDue(): void {
+    const d: Date = this.todoEditPickDate;
+    this.todoEditDueMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
+      this.todoEditPickHour, this.todoEditPickMin).getTime();
+    this.todoEditHasDue = true;
+    this.todoEditPickShow = false;
+  }
+
+  /** 保存待办编辑（标题 / 备注 / 截止时间） */
+  private async saveTodoEdit(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy || this.todoEditId <= 0) {
+      return;
+    }
+    if (!this.todoEditWritable) {
+      this.getUIContext().getPromptAction().showToast({ message: '该日历本为只读，无法修改' });
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const ok: boolean = await TodoService.updateTodo(ctx, this.todoEditId,
+        this.todoEditTitle, this.todoEditDesc,
+        this.todoEditHasDue ? this.todoEditDueMs : 0);
+      if (ok) {
+        this.todoEditShow = false;
+        this.getUIContext().getPromptAction().showToast({ message: '已保存' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '保存失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 删除待办（带二次确认） */
+  private askDeleteTodo(): void {
+    this.getUIContext().showAlertDialog({
+      title: '删除待办',
+      message: '将从服务器删除这条待办，删除后无法撤销。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        action: (): void => {
+          this.doDeleteTodo();
+        }
+      }
+    });
+  }
+
+  private async doDeleteTodo(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy || this.todoEditId <= 0) {
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const ok: boolean = await TodoService.deleteTodo(ctx, this.todoEditId);
+      if (ok) {
+        this.todoEditShow = false;
+        this.getUIContext().getPromptAction().showToast({ message: '已删除' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 待办副标题：截止时间 · 所属日历本（分组后本名仍在，方便跨组辨识） */
+  private todoSubtitle(t: DisplayEvent): string {
+    const due: string = t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间';
+    const book: string = t.calName !== '' ? ` · ${t.calName}` : '';
+    return due + book;
   }
 
   /** 待办完成状态切换：写回服务器成功后刷新列表；失败保持原状并提示。
@@ -2669,27 +3159,36 @@ struct Index {
         .backgroundColor(cell.dateMs === this.selectedDate
           ? $r('app.color.selected_bg')
           : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-      if (!this.wideLayout) {
-        // 宽屏下月历格子变窄，省略农历腾出空间
-        Text(cell.lunar)
-          .fontSize(8)
-          .fontColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
-          .maxLines(1)
+      // ⭐ DOT_INLINE 有事件的日期标记：**每个日期最多一个**圆点，叠在农历行右侧。
+      //    为什么不做成独立一行：实测格子高度已被"星期/日期/农历"占满
+      //    （175px 全部用尽），再插一行会把内容顶出格子、圆点不可见。
+      //    无事件时圆点透明但仍占位，保证有/无事件的行高完全一致、不会跳。
+      //    口径：hasEvent 由 buildEventDaySet() 统一算出，不区分日历本、不区分几条。
+      Row({ space: 2 }) {
+        if (!this.wideLayout) {
+          // 宽屏下月历格子变窄，省略农历腾出空间
+          Text(cell.lunar)
+            .fontSize(8)
+            .fontColor(cell.dateMs === this.selectedDate
+              ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+            .maxLines(1)
+            .layoutWeight(1)
+            .textAlign(TextAlign.Center)
+        }
+        // ⭐ DOT_CIRCLE 用 Circle 组件而不是空 Row：
+        //    空容器 + 透明背景不会产生实际绘制，dump 里根本看不到节点
+        //    （实测连改两版都"没渲染"，其实是被优化掉了）。
+        //    Circle 是专门画圆的组件，一定落绘制节点。
+        Circle({ width: this.wideLayout ? 4 : 5, height: this.wideLayout ? 4 : 5 })
+          .fill(cell.hasEvent
+            ? (cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text')   // 选中日深底 → 白点保对比度
+              : $r('app.color.brand'))        // 其余用主题色，比纯红柔和
+            : Color.Transparent)
+          .opacity(cell.hasEvent ? 1 : 0)
       }
-      // ⭐ EVENT_DOT 有事件的日期标记：**每个日期最多一个**圆点。
-      //    只表达"这天有安排"，不区分是哪个日历本、有几条。
-      //    （旧实现按日历本逐个画，3 个本 3 个点，15 个本满屏都是点，故被废弃。）
-      //    无事件时用等高的透明占位，避免有/无点导致格子高度跳动、整月行高不一致。
-      Row()
-        .width(this.wideLayout ? 4 : 5)
-        .height(this.wideLayout ? 4 : 5)
-        .borderRadius(this.wideLayout ? 2 : 2.5)
-        .backgroundColor(cell.hasEvent
-          ? (cell.dateMs === this.selectedDate
-            ? $r('app.color.button_text')   // 选中日深底 → 用白点保证对比度
-            : $r('app.color.brand'))        // 其余用主题色，比纯红柔和
-          : Color.Transparent)
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
     }
     .layoutWeight(1)
     .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 3 })

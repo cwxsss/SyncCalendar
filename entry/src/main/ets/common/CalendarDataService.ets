@@ -341,6 +341,11 @@ export class CalendarDataService {
       const found = sources.find((s: CalSource): boolean => s.calKey === key);
       return found !== undefined ? found.color : '#9AA0A6';
     };
+    // ⭐ 待办按日历本分组显示需要"本名"；原来只带 calKey，分组标题无法显示
+    const nameOf = (key: string): string => {
+      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      return found !== undefined ? found.name : '';
+    };
     try {
       const rows: LocalEvent[] = await EventDb.queryTodos(context);
       for (const e of rows) {
@@ -357,6 +362,7 @@ export class CalendarDataService {
         d.endTime = e.endTime;
         d.isAllDay = e.isAllDay;
         d.calKey = e.calKey;
+        d.calName = nameOf(e.calKey);
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
         result.push(d);

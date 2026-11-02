@@ -338,6 +338,22 @@ export class EventDb {
   /** 全部未删除的待办（VTODO），未完成在前、按截止时间升序 */
   /** 按本地行 id 查一行（待办完成时用来取 uid / href / remotePath / etag） */
   /** 更新待办的完成状态与 etag（推送成功后调用，保证本地与服务器一致） */
+  /** 更新待办内容字段（标题 / 备注 / 截止时间）与 etag */
+  static async updateTodoFields(context: common.Context, id: number, title: string,
+    desc: string, dueMs: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'title': title,
+      'description': desc,
+      'start_time': dueMs,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
   static async setTodoCompleted(context: common.Context, id: number, completed: boolean,
     etag: string): Promise<void> {
     const store = await EventDb.getDb(context);

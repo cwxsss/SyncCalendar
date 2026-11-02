@@ -31,6 +31,116 @@ export class TodoService {
    * @param done    true=标记完成；false=取消完成
    * @returns 成功返回 true；失败返回 false（**本地状态不变**，避免界面与服务器不一致）
    */
+  /**
+   * 更新待办内容（标题 / 备注 / 截止时间）。
+   *
+   * 同样走 GET 原文 → 改字段 → PUT：
+   *   VTODO 上有本地库没保存的字段（PRIORITY / CATEGORIES / X-* 等），
+   *   重建整份会把这些抹掉。
+   *
+   * 只改 SUMMARY / DESCRIPTION / DUE 三项，**不动完成状态**
+   * （用户改的是内容，不该顺带把状态重置了）。
+   *
+   * @param dueMs 0 = 清除截止时间（删除 DUE 行）
+   */
+  static async updateTodo(context: common.Context, localId: number, title: string,
+    desc: string, dueMs: number): Promise<boolean> {
+    const row: LocalEvent | null = await EventDb.queryById(context, localId);
+    if (row === null || row.kind !== 'todo') {
+      LogUtil.write(`待办更新失败：行不存在或不是待办 id=${localId}`);
+      return false;
+    }
+    if (row.href === '' || row.remotePath === '') {
+      LogUtil.write(`待办更新失败：缺少服务器路径 id=${localId}`);
+      return false;
+    }
+    const accResolved: DavAccount | null = await TodoService.findAccount(context, row.href);
+    if (accResolved === null) {
+      LogUtil.write(`待办更新失败：找不到所属账号`);
+      return false;
+    }
+    const idx: number = accResolved.calendarHrefs.indexOf(row.href);
+    if (idx >= 0 && accResolved.calendarWritable.length > idx
+      && accResolved.calendarWritable[idx] === '0') {
+      LogUtil.write(`待办更新失败：该日历本只读 id=${localId}`);
+      return false;
+    }
+    const auth: string = DavClient.authHeader(accResolved.username, accResolved.password);
+    const url: string = row.href.endsWith('/') ? row.href + row.remotePath
+      : `${row.href}/${row.remotePath}`;
+    try {
+      const original: string = await DavClient.getRawStrict(url, auth);
+      if (!original.toUpperCase().includes('BEGIN:VTODO')) {
+        LogUtil.write(`待办更新失败：服务器内容不是 VTODO id=${localId}`);
+        return false;
+      }
+      const updated: string = IcsUtil.rewriteTodoFields(original, row.uid, title, desc, dueMs);
+      const newEtag: string = await DavClient.putEvent(url, auth, updated);
+      await EventDb.updateTodoFields(context, localId, title, desc,
+        dueMs > 0 ? dueMs : 0, newEtag);
+      LogUtil.write(`待办更新成功 id=${localId}（标题已脱敏）`);
+      return true;
+    } catch (err) {
+      if (err instanceof DavHttpError) {
+        LogUtil.write(`待办更新失败 HTTP ${(err as DavHttpError).status} id=${localId}`);
+      } else {
+        LogUtil.write(`待办更新失败 id=${localId} ${(err as BusinessError).message ?? ''}`);
+      }
+      return false;
+    }
+  }
+
+  /** 删除待办（DELETE 服务器资源 + 本地软删） */
+  static async deleteTodo(context: common.Context, localId: number): Promise<boolean> {
+    const row: LocalEvent | null = await EventDb.queryById(context, localId);
+    if (row === null || row.kind !== 'todo') {
+      LogUtil.write(`待办删除失败：行不存在或不是待办 id=${localId}`);
+      return false;
+    }
+    if (row.href === '' || row.remotePath === '') {
+      LogUtil.write(`待办删除失败：缺少服务器路径 id=${localId}`);
+      return false;
+    }
+    const accResolved: DavAccount | null = await TodoService.findAccount(context, row.href);
+    if (accResolved === null) {
+      LogUtil.write(`待办删除失败：找不到所属账号`);
+      return false;
+    }
+    const idx: number = accResolved.calendarHrefs.indexOf(row.href);
+    if (idx >= 0 && accResolved.calendarWritable.length > idx
+      && accResolved.calendarWritable[idx] === '0') {
+      LogUtil.write(`待办删除失败：该日历本只读 id=${localId}`);
+      return false;
+    }
+    const auth: string = DavClient.authHeader(accResolved.username, accResolved.password);
+    const url: string = row.href.endsWith('/') ? row.href + row.remotePath
+      : `${row.href}/${row.remotePath}`;
+    try {
+      await DavClient.deleteRemote(url, auth);
+      await EventDb.purge(context, localId);
+      LogUtil.write(`待办删除成功 id=${localId}（标题已脱敏）`);
+      return true;
+    } catch (err) {
+      if (err instanceof DavHttpError) {
+        LogUtil.write(`待办删除失败 HTTP ${(err as DavHttpError).status} id=${localId}`);
+      } else {
+        LogUtil.write(`待办删除失败 id=${localId} ${(err as BusinessError).message ?? ''}`);
+      }
+      return false;
+    }
+  }
+
+  /** 按 href 找所属账号（updateTodo/deleteTodo 共用） */
+  private static async findAccount(context: common.Context, href: string): Promise<DavAccount | null> {
+    const accounts: DavAccount[] = await AccountStore.loadAll(context);
+    for (const a of accounts) {
+      if (a.calendarHrefs.includes(href)) {
+        return a;
+      }
+    }
+    return null;
+  }
+
   static async setCompleted(context: common.Context, localId: number, done: boolean): Promise<boolean> {
     const row: LocalEvent | null = await EventDb.queryById(context, localId);
     if (row === null) {
