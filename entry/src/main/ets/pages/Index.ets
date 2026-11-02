@@ -1692,21 +1692,15 @@ struct Index {
             .backgroundColor(cell.dateMs === this.selectedDate
               ? $r('app.color.selected_bg')
               : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-          // 农历 + 圆点同一行（与月视图排版一致，避免周条变高）
-          Row({ space: 2 }) {
-            Text(cell.lunar)
-              .fontSize(8)
-              .fontColor($r('app.color.text_hint'))
-              .maxLines(1)
-            // ⭐ 圆点用主题色：它只表示"这天有安排"，不代表某个日历本，
-            //    所以不取本的色（否则会误导成"只有那个本有日程"）。
-            //    选中日深底 → 换白点保对比度；无事件时透明占位保持行高一致。
-            Circle({ width: 5, height: 5 })
-              .fill(cell.dateMs === this.selectedDate
-                ? $r('app.color.button_text') : $r('app.color.brand'))
-              .opacity(cell.hasEvent ? 1 : 0)
-          }
-          .justifyContent(FlexAlign.Center)
+          // ⭐ WEEK_TINT 与月视图统一：有事件 → 农历文字变主题色，不再画圆点。
+          //    （两种视图用两套标记会让人以为是不同含义。）
+          Text(cell.lunar)
+            .fontSize(8)
+            .fontColor(cell.dateMs === this.selectedDate
+              ? (cell.hasEvent ? $r('app.color.button_text') : $r('app.color.text_secondary'))
+              : (cell.hasEvent ? $r('app.color.brand') : $r('app.color.text_hint')))
+            .fontWeight(cell.hasEvent ? FontWeight.Medium : FontWeight.Normal)
+            .maxLines(1)
         }
         .layoutWeight(1)
         .onClick(() => {
@@ -3254,36 +3248,32 @@ struct Index {
         .backgroundColor(cell.dateMs === this.selectedDate
           ? $r('app.color.selected_bg')
           : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
-      // ⭐ DOT_INLINE 有事件的日期标记：**每个日期最多一个**圆点，叠在农历行右侧。
-      //    为什么不做成独立一行：实测格子高度已被"星期/日期/农历"占满
-      //    （175px 全部用尽），再插一行会把内容顶出格子、圆点不可见。
-      //    无事件时圆点透明但仍占位，保证有/无事件的行高完全一致、不会跳。
-      //    口径：hasEvent 由 buildEventDaySet() 统一算出，不区分日历本、不区分几条。
-      Row({ space: 2 }) {
-        if (!this.wideLayout) {
-          // 宽屏下月历格子变窄，省略农历腾出空间
-          Text(cell.lunar)
-            .fontSize(8)
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
-            .maxLines(1)
-            .layoutWeight(1)
-            .textAlign(TextAlign.Center)
-        }
-        // ⭐ DOT_CIRCLE 用 Circle 组件而不是空 Row：
-        //    空容器 + 透明背景不会产生实际绘制，dump 里根本看不到节点
-        //    （实测连改两版都"没渲染"，其实是被优化掉了）。
-        //    Circle 是专门画圆的组件，一定落绘制节点。
-        Circle({ width: this.wideLayout ? 4 : 5, height: this.wideLayout ? 4 : 5 })
-          .fill(cell.hasEvent
-            ? (cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text')   // 选中日深底 → 白点保对比度
-              : $r('app.color.brand'))        // 其余用主题色，比纯红柔和
-            : Color.Transparent)
+      // ⭐ LUNAR_TINT 有事件的日期标记 = **农历文字变色**（不再画圆点）。
+      //
+      // 为什么弃用圆点：圆点塞在农历行的 Row 里，而农历用了 layoutWeight(1)
+      // 撑满整行，圆点被挤到格子最右侧；格子宽 133px 远大于文字宽，
+      // 视觉上就成了"贴着下一个日期"，很怪。
+      //
+      // 改成给农历文字本身染色：位置天然跟着文字走，不额外占空间，
+      // 也不会像"满屏红点"那样显得乱（那正是上一版被砍掉的原因）。
+      //
+      // 对比度：选中日的日期数字坐在深色底上，农历若还用主题蓝会看不清，
+      // 所以选中日改用 button_text（白）；其余有事件的日用 brand。
+      if (!this.wideLayout) {
+        // 宽屏下月历格子变窄，仍保留点（用一个小圆点补位，宽度足够）
+        Text(cell.lunar)
+          .fontSize(8)
+          .fontColor(cell.dateMs === this.selectedDate
+            ? (cell.hasEvent ? $r('app.color.button_text') : $r('app.color.text_secondary'))
+            : (cell.hasEvent ? $r('app.color.brand') : $r('app.color.text_hint')))
+          .fontWeight(cell.hasEvent ? FontWeight.Medium : FontWeight.Normal)
+          .maxLines(1)
+      } else {
+        // 宽屏：农历被省略，用一个小圆点表示（此时格子窄，圆点就在正中，不会有位置问题）
+        Circle({ width: 4, height: 4 })
+          .fill(cell.hasEvent ? $r('app.color.brand') : Color.Transparent)
           .opacity(cell.hasEvent ? 1 : 0)
       }
-      .width('100%')
-      .justifyContent(FlexAlign.Center)
     }
     .layoutWeight(1)
     .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 3 })
