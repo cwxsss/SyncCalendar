@@ -644,13 +644,24 @@ export class EventDb {
         updated++;
       } else {
         unchanged++;
-        // etag 未变也要校正 href：日历本被删除重建后集合 URL 变化，etag 比对仍然全部命中，
-        // 不在这里刷新的话旧 URL 会一直残留在行上（见上方更新分支的注释）
+        // ⭐ UNCHANGED_REMOTE_PATH etag 未变是**常态路径**（REPORT 只给 etag，
+        //    未变就直接复用本地行、不 GET）。实测 742 行里 99% 走这里。
+        //    若只在"更新分支"回填 remotePath，对存量数据等于无效 ——
+        //    历史行里存的是旧的 uid 猜测值，而 DELETE/PUT 正是用它拼 URL，
+        //    拼错就 404（服务器上删不掉）。
+        //    所以这里必须一并校正 href 与 remotePath。
+        const hb: relationalStore.ValuesBucket = {};
         if (found.href !== href) {
           found.href = href;
+          hb['href'] = href;
+        }
+        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+          found.remotePath = r.remotePath;
+          hb['remote_path'] = r.remotePath;
+        }
+        if (Object.keys(hb).length > 0) {
           const hp = new relationalStore.RdbPredicates('events');
           hp.equalTo('id', found.id);
-          const hb: relationalStore.ValuesBucket = { 'href': href };
           await store.update(hb, hp);
         }
       }

@@ -816,6 +816,43 @@ export class IcsUtil {
   }
 
   /**
+   * 从零构造一份 VTODO 资源（新建待办用）。
+   *
+   * @param uid   待办全局唯一标识
+   * @param title 标题
+   * @param desc  备注（可为空，空则不写 DESCRIPTION）
+   * @param dueMs 截止时间毫秒（0 = 无截止时间，不写 DUE）
+   * @param dueIsDateOnly 截止时间是否"只有日期无时刻"（true 写 `DUE;VALUE=DATE`）
+   */
+  static buildTodo(uid: string, title: string, desc: string, dueMs: number,
+    dueIsDateOnly: boolean): string {
+    const now: string = IcsUtil.fmtUtcNow();
+    let out: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Calendar//CN\r\n' +
+      'CALSCALE:GREGORIAN\r\n' +
+      'BEGIN:VTODO\r\n' +
+      `UID:${uid}\r\n` +
+      `DTSTAMP:${now}\r\n` +
+      `SUMMARY:${IcsUtil.escape(title)}\r\n`;
+    if (desc !== '') {
+      out += `DESCRIPTION:${IcsUtil.escape(desc)}\r\n`;
+    }
+    if (dueMs > 0) {
+      if (dueIsDateOnly) {
+        out += `DUE;VALUE=DATE:${IcsUtil.fmtIcsTime(dueMs, true)}\r\n`;
+      } else {
+        out += `DUE:${IcsUtil.fmtIcsTime(dueMs, false)}\r\n`;
+      }
+    }
+    // 新建待办一律"未开始"，完成态由 setCompleted 切换到 COMPLETED
+    out += 'STATUS:NEEDS-ACTION\r\n';
+    out += 'END:VTODO\r\n';
+    out += 'END:VCALENDAR\r\n';
+    return out;
+  }
+
+  /**
    * ⭐ 构建"一个重复系列"的完整资源：**主事件 + 全部覆盖实例**放在同一个 VCALENDAR 里。
    *
    * 为什么必须合在一起：CalDAV 里"重复日程的某一次发生被单独修改"的标准表示法是

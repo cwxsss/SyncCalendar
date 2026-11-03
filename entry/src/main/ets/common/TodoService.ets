@@ -90,6 +90,81 @@ export class TodoService {
     }
   }
 
+  /**
+   * 新建待办：生成 VTODO → PUT 到服务器 → 落本地库。
+   *
+   * @param href   目标日历本的集合 URL
+   * @param title  标题（调用方保证非空）
+   * @param desc   备注（可为空串）
+   * @param dueMs  截止时间毫秒（0 = 无截止）
+   * @param dueIsDateOnly 截止时间是否只到日（true 写 DUE;VALUE=DATE）
+   * @returns 成功返回新行 id（>0），失败返回 0
+   */
+  static async createTodo(context: common.Context, href: string, title: string,
+    desc: string, dueMs: number, dueIsDateOnly: boolean): Promise<number> {
+    const t: string = title.trim();
+    if (t === '' || href === '') {
+      LogUtil.write(`待办新建失败：标题或日历本为空`);
+      return 0;
+    }
+    // 1) 找到该 href 所属账号
+    const acc: DavAccount | null = await TodoService.findAccount(context, href);
+    if (acc === null) {
+      LogUtil.write(`待办新建失败：找不到所属账号 href=${href}`);
+      return 0;
+    }
+    // 2) 只读日历本提前拦下（否则必然 403）
+    const idx: number = acc.calendarHrefs.indexOf(href);
+    if (idx >= 0 && acc.calendarWritable.length > idx && acc.calendarWritable[idx] === '0') {
+      LogUtil.write(`待办新建失败：该日历本只读 href=${href}`);
+      return 0;
+    }
+
+    // 3) 生成 uid 与资源文件名
+    //    格式与事件侧一致：todo-<毫秒时间戳>-<随机6位>，足够避免撞车
+    const stamp: number = Date.now();
+    const rnd: string = Math.random().toString(36).substring(2, 8);
+    const uid: string = `todo-${stamp}-${rnd}`;
+    const fileName: string = `${uid}.ics`;
+    const url: string = href.endsWith('/') ? href + fileName : `${href}/${fileName}`;
+    const auth: string = DavClient.authHeader(acc.username, acc.password);
+
+    try {
+      // 4) 先推服务器：成功才落库，避免产生"本地有、服务器没有"的孤儿
+      const ics: string = IcsUtil.buildTodo(uid, t, desc, dueMs, dueIsDateOnly);
+      const etag: string = await DavClient.putEvent(url, auth, ics);
+
+      // 5) 落本地库（insertLocal 会置 dirty=true，但 etag 已写回故不会被重复推送）
+      const e: LocalEvent = new LocalEvent();
+      e.uid = uid;
+      e.calKey = `${acc.id}_${idx}`;
+      e.href = href;
+      e.remotePath = fileName;
+      e.etag = etag;
+      e.kind = 'todo';
+      e.title = t;
+      e.description = desc;
+      e.startTime = dueMs > 0 ? dueMs : 0; // 待办的"开始"即截止（与 loadTodos 口径一致）
+      e.endTime = dueMs > 0 ? dueMs : 0;
+      e.isAllDay = dueIsDateOnly;
+      e.completed = false;
+      e.dirty = false;  // 已经推成功了，无需再推
+      e.deleted = false;
+      const newId: number = await EventDb.insertLocal(context, e);
+      // insertLocal 强制置 dirty=true，这里立刻清掉（内容已在服务器上了）
+      await EventDb.clearDirty(context, newId, etag);
+      LogUtil.write(`待办新建成功 id=${newId}（标题已脱敏）→ ${fileName}`);
+      return newId;
+    } catch (err) {
+      if (err instanceof DavHttpError) {
+        LogUtil.write(`待办新建失败 HTTP ${(err as DavHttpError).status}（标题已脱敏）`);
+      } else {
+        LogUtil.write(`待办新建失败 ${(err as BusinessError).message ?? ''}`);
+      }
+      return 0;
+    }
+  }
+
   /** 删除待办（DELETE 服务器资源 + 本地软删） */
   static async deleteTodo(context: common.Context, localId: number): Promise<boolean> {
     const row: LocalEvent | null = await EventDb.queryById(context, localId);

@@ -66,6 +66,15 @@ struct Index {
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State todoBusy: boolean = false;  // 正在写回待办状态（防连点）
+  // ⭐ 待办新建模式：true=新建（弹层显示日历本选择），false=编辑既有待办
+  @State todoCreating: boolean = false;
+  // 新建待办时可选的日历本（铺开供用户选，与新建日程一致）
+  @State todoBooks: CalSource[] = [];
+  // 新建待办时选中的日历本 calKey
+  @State todoCreateBookKey: string = '';
+  // calKey → 日历本集合 URL 的映射（CalSource 本身不带 href，需从账号解析）
+  private todoBookHrefs: Map<string, string> = new Map<string, string>();
+
   // ⭐ TODO_EDITOR 待办编辑弹框状态
   @State todoEditShow: boolean = false;
   @State todoEditId: number = 0;
@@ -1183,7 +1192,13 @@ struct Index {
       .shadow({ radius: 8, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 2 })
       .margin(24)
       .onClick(() => {
-        this.addEvent();
+        // ⭐ 职责感知：待办视图下新建待办，其余视图新建日程。
+        //    原来固定 addEvent()，导致在待办页点 ＋ 却跳到日程编辑页，与当前语境不符。
+        if (this.mode === 'todo') {
+          this.openTodoCreator();
+        } else {
+          this.addEvent();
+        }
       })
 
       // 未同意《隐私政策》与《用户协议》：整页门禁盖在最上层（不申请权限、不加载数据）
@@ -2747,14 +2762,15 @@ struct Index {
         })
 
       Column({ space: 12 }) {
-        // 标题行
+        // 标题行（新建/编辑两态）
         Row({ space: 8 }) {
-          Text('编辑待办')
+          Text(this.todoCreating ? '新建待办' : '编辑待办')
             .fontSize(17)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.text_primary'))
           Blank()
-          if (this.todoEditWritable) {
+          // 新建时没有可删的东西，隐藏删除入口
+          if (!this.todoCreating && this.todoEditWritable) {
             Text('删除')
               .fontSize(14)
               .fontColor($r('app.color.error'))
@@ -2765,7 +2781,42 @@ struct Index {
         }
         .width('100%')
 
-        if (this.todoEditBook !== '') {
+        // 日历本区：新建时**铺开全部可写本供选择**（与新建日程一致的交互），
+        // 编辑时只读显示归属本（改归属等于搬家，不支持原地改）
+        if (this.todoCreating) {
+          Column({ space: 6 }) {
+            Text('日历本')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+              .textAlign(TextAlign.Start)
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              ForEach(this.todoBooks, (b: CalSource) => {
+                Row({ space: 6 }) {
+                  Circle().width(8).height(8).fill(b.color)
+                  Text(b.name)
+                    .fontSize(12)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .fontColor(this.todoCreateBookKey === b.calKey
+                      ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                }
+                .width('48%')
+                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                .borderRadius(14)
+                .margin({ bottom: 8 })
+                .backgroundColor(this.todoCreateBookKey === b.calKey
+                  ? b.color : $r('app.color.chip_off_bg'))
+                .onClick(() => {
+                  this.todoCreateBookKey = b.calKey;
+                })
+              }, (b: CalSource) => b.calKey)
+            }
+            .width('100%')
+          }
+          .width('100%')
+        } else if (this.todoEditBook !== '') {
           Row({ space: 6 }) {
             Text('日历本')
               .fontSize(12)
@@ -2888,7 +2939,7 @@ struct Index {
             .onClick(() => {
               this.todoEditShow = false;
             })
-          Button(this.todoBusy ? '保存中…' : '保存')
+          Button(this.todoBusy ? '保存中…' : (this.todoCreating ? '创建' : '保存'))
             .layoutWeight(1)
             .height(44)
             .borderRadius(12)
@@ -3100,8 +3151,81 @@ struct Index {
     return out;
   }
 
+  /**
+   * 打开「新建待办」弹层。
+   *
+   * 与 openTodoEditor 的区别：不预填任何既有数据，todoEditId=0，
+   * 并把**所有可写日历本铺开**供用户选择。
+   *
+   * 默认选中策略：优先 Inbox（多数 CalDAV 服务器把待办收件箱叫 inbox/Inbox/收件箱），
+   * 找不到就选第一个可写的本 —— 让用户少点一步，但仍可改。
+   */
+  private async openTodoCreator(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    // 只取可写的 CalDAV 本（'dav' 来源）；只读本推上去必 403，不该出现在选项里
+    // 注意：CalSource 没有 href 字段，需从账号里按 calKey 反解
+    const accounts: DavAccount[] = await AccountStore.loadAll(ctx);
+    this.todoBookHrefs.clear();
+    const writable: CalSource[] = [];
+    for (const s of this.sources) {
+      if (!s.writable || s.source !== 'dav') {
+        continue;
+      }
+      // calKey 形如 "<accountId>_<index>"
+      const us: number = s.calKey.lastIndexOf('_');
+      if (us <= 0) {
+        continue;
+      }
+      const accId: string = s.calKey.substring(0, us);
+      const idx: number = parseInt(s.calKey.substring(us + 1), 10);
+      if (isNaN(idx)) {
+        continue;
+      }
+      const acc: DavAccount | undefined = accounts.find(
+        (a: DavAccount): boolean => String(a.id) === accId);
+      if (acc === undefined || idx < 0 || idx >= acc.calendarHrefs.length) {
+        continue;
+      }
+      this.todoBookHrefs.set(s.calKey, acc.calendarHrefs[idx]);
+      writable.push(s);
+    }
+    if (writable.length === 0) {
+      this.getUIContext().getPromptAction().showToast({
+        message: '还没有可写入的 CalDAV 日历本，请先添加账号'
+      });
+      return;
+    }
+    this.todoBooks = writable;
+    // 默认选中：名字里含 inbox/收件箱 的本优先，否则第一个
+    let pick: string = writable[0].calKey;
+    for (const s of writable) {
+      const n: string = s.name.toLowerCase();
+      if (n.indexOf('inbox') >= 0 || s.name.indexOf('收件箱') >= 0) {
+        pick = s.calKey;
+        break;
+      }
+    }
+    this.todoCreateBookKey = pick;
+    // 清空编辑态数据，进入"新建"
+    this.todoCreating = true;
+    this.todoEditId = 0;
+    this.todoEditTitle = '';
+    this.todoEditDesc = '';
+    this.todoEditDueMs = 0;
+    this.todoEditHasDue = false;
+    this.todoEditWritable = true;
+    this.todoEditBook = '';
+    this.todoEditRecur = '';
+    this.todoEditPickShow = false;
+    this.todoEditShow = true;
+  }
+
   /** 打开待办编辑弹框（点内容区触发；不会改变完成状态） */
   private openTodoEditor(t: DisplayEvent): void {
+    this.todoCreating = false;
     this.todoEditId = t.id;
     this.todoEditTitle = t.title;
     this.todoEditDesc = t.description;
@@ -3141,7 +3265,15 @@ struct Index {
   /** 保存待办编辑（标题 / 备注 / 截止时间） */
   private async saveTodoEdit(): Promise<void> {
     const ctx = this.getUIContext().getHostContext();
-    if (ctx === undefined || this.todoBusy || this.todoEditId <= 0) {
+    if (ctx === undefined || this.todoBusy) {
+      return;
+    }
+    // ⭐ 新建分支：走 createTodo（先 PUT 服务器，成功才落库）
+    if (this.todoCreating) {
+      await this.saveNewTodo(ctx);
+      return;
+    }
+    if (this.todoEditId <= 0) {
       return;
     }
     if (!this.todoEditWritable) {
@@ -3172,6 +3304,43 @@ struct Index {
       }
     } catch (err) {
       this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 保存新建的待办 */
+  private async saveNewTodo(ctx: common.Context): Promise<void> {
+    const title: string = this.todoEditTitle.trim();
+    if (title === '') {
+      this.getUIContext().getPromptAction().showToast({ message: '请填写待办标题' });
+      return;
+    }
+    const href: string = this.todoBookHrefs.get(this.todoCreateBookKey) ?? '';
+    if (href === '') {
+      this.getUIContext().getPromptAction().showToast({ message: '请选择日历本' });
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const dueMs: number = this.todoEditHasDue ? this.todoEditDueMs : 0;
+      // 截止时间只到日（00:00 视为"当天"）→ 用 DATE 值，避免服务器上显示 00:00
+      const dateOnly: boolean = dueMs > 0 && this.todoEditDueMs % 86400000 === 0;
+      const newId: number = await TodoService.createTodo(ctx, href, title,
+        this.todoEditDesc, dueMs, dateOnly);
+      if (newId > 0) {
+        this.todoEditShow = false;
+        this.todoCreating = false;
+        this.getUIContext().getPromptAction().showToast({ message: '待办已创建' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '创建失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '创建失败，请稍后重试' });
     } finally {
       this.todoBusy = false;
     }

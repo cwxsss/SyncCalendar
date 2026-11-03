@@ -51,6 +51,26 @@
     {
       "name": "sync_work_desc",
       "value": "日历后台兜底同步任务"
+    },
+    {
+      "name": "todo_card_2x2_name",
+      "value": "待办 2×2"
+    },
+    {
+      "name": "todo_card_2x4_name",
+      "value": "待办 2×4"
+    },
+    {
+      "name": "todo_card_4x4_name",
+      "value": "待办 4×4"
+    },
+    {
+      "name": "todo_card_6x4_name",
+      "value": "待办 6×4"
+    },
+    {
+      "name": "todo_card_desc",
+      "value": "待办服务卡片：查看未完成待办，可直接点击完成"
     }
   ]
 }

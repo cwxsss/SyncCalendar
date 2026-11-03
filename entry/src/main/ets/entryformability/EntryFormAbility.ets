@@ -6,6 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import process from '@ohos.process';
 import { CardDataService, CardData } from '../common/CardDataService';
 import { BackgroundSyncRunner } from '../common/BackgroundSyncRunner';
+import { TodoService } from '../common/TodoService';
 import { LogUtil } from '../common/LogUtil';
 
 export default class EntryFormAbility extends FormExtensionAbility {
@@ -18,15 +19,31 @@ export default class EntryFormAbility extends FormExtensionAbility {
     }
   }
 
-  /** 组装更新数据并推送到指定卡片 */
+  /**
+   * 组装更新数据并推送到指定卡片。
+   *
+   * ⭐ 一次同时构建「日程」与「待办」两份数据，合并进同一个 binding。
+   *    日程卡片只读 eventsJson 等字段，待办卡片只读 todoListJson 等字段，
+   *    彼此不会串味。这样无需维护 formId → 卡片类型的映射（那需要持久化，
+   *    且系统重启后容易丢失），一套逻辑服务全部 8 张卡片。
+   */
   private pushData(formId: string, dayOffset: number = 0): void {
-    CardDataService.buildCardData(this.context, dayOffset).then((data: CardData): void => {
+    Promise.all([
+      CardDataService.buildCardData(this.context, dayOffset),
+      CardDataService.buildTodoCardData(this.context),
+    ]).then((results: CardData[]): void => {
+      const ev: CardData = results[0];
+      const td: CardData = results[1];
+      // 待办字段并入日程数据对象（两者都是 CardData，字段不冲突）
+      ev.todoListJson = td.todoListJson;
+      ev.todoCount = td.todoCount;
+      ev.todoTodayCount = td.todoTodayCount;
       const binding: formBindingData.FormBindingData =
-        formBindingData.createFormBindingData(data);
+        formBindingData.createFormBindingData(ev);
       formProvider.updateForm(formId, binding).catch((err: BusinessError): void => {
         LogUtil.write(`卡片 ${formId} 更新失败: ${err.message}`);
       });
-      LogUtil.write(`卡片 ${formId} 数据已推送`);
+      LogUtil.write(`卡片 ${formId} 数据已推送（日程+待办）`);
     }).catch((err: BusinessError): void => {
       LogUtil.write(`卡片数据构建失败: ${err.message}`);
     });
@@ -84,12 +101,31 @@ export default class EntryFormAbility extends FormExtensionAbility {
     CardDataService.clearDayOffset(formId);
   }
 
-  /** 卡片上「‹ / › / 回到今天」按钮触发：message 里带 pageAction=prev|next|today */
+  /**
+   * 卡片事件：既处理日程翻页，也处理待办打勾。
+   *
+   * ⚠️ 不用 JSON.parse 解析 message —— 不同系统版本下格式可能是
+   *    `{params:{...}}` 也可能是直接 `{...}`，格式差异会让 JSON 解析拿到 undefined。
+   *    统一用**子串匹配**，稳且不依赖具体结构。
+   */
   onFormEvent(formId: string, message: string): void {
     LogUtil.init(this.context);
+
+    // ===== 待办打勾：message 里带 todoCheck=<localId> =====
+    const checkIdx: number = message.indexOf('todoCheck');
+    if (checkIdx >= 0) {
+      const m = /todoCheck\D{0,8}(\d+)/.exec(message);
+      const localId: number = m !== null ? parseInt(m[1], 10) : 0;
+      LogUtil.write(`卡片打勾待办: formId=${formId} localId=${localId} msg=${message}`);
+      if (localId > 0) {
+        this.completeTodoFromCard(formId, localId);
+      }
+      return;
+    }
+
+    // ===== 日程翻页 =====
     const cur: number = CardDataService.getDayOffset(formId);
     let next: number = cur;
-    // 不用 JSON 解析：不同版本 message 的格式可能是 {params:{...}} 或直接 {...}，直接子串匹配更稳
     if (message.indexOf('prev') >= 0) {
       next = cur - 1;
     } else if (message.indexOf('next') >= 0) {
@@ -100,5 +136,55 @@ export default class EntryFormAbility extends FormExtensionAbility {
     CardDataService.setDayOffset(formId, next);
     LogUtil.write(`卡片翻页: formId=${formId} ${cur} → ${next}`);
     this.pushData(formId, next);
+  }
+
+  /**
+   * 在卡片上完成一条待办。
+   *
+   * 时序设计（关键）：
+   *  ① **先推一次数据让该条从卡片消失** —— 用户点勾必须立刻有视觉反馈。
+   *     但此时库里还没改成 completed，所以这里不等它完成，
+   *     而是先推送"排除该 localId"的临时数据（见 pushDataExcludingTodo）。
+   *  ② 再真正调 TodoService.setCompleted（内部 GET 原 ics → 改写 → PUT）。
+   *  ③ 成功 → 推真实数据（该条已 completed，本来就不在列表里，效果一致）；
+   *     失败 → 也推真实数据（该条会重新出现，用户能看出没成功，可重试或进 App 处理）。
+   *
+   * 为什么不 await 完再推：
+   *   FormExtensionAbility 生命周期回调只有 10 秒窗口，
+   *   GET+PUT 两步网络在慢网下可能 10 秒以上，卡片会先"卡住不动"再消失，体验很差。
+   */
+  private completeTodoFromCard(formId: string, localId: number): void {
+    // ① 乐观移除：立即推送不含该条的列表
+    this.pushDataExcludingTodo(formId, localId);
+    // ② 真正落库 + 推送服务器
+    TodoService.setCompleted(this.context, localId, true).then((ok: boolean): void => {
+      LogUtil.write(`卡片打勾结果: localId=${localId} ${ok ? '成功' : '失败'}`);
+      // ③ 无论成败都推一次真实数据：成功则列表已无该条；失败则该条重新出现
+      this.pushData(formId);
+    }).catch((err: BusinessError): void => {
+      LogUtil.write(`卡片打勾异常: localId=${localId} ${err.message}`);
+      this.pushData(formId);
+    });
+  }
+
+  /** 推送"排除某条待办"的卡片数据（乐观更新用，只改卡片视图，不动数据库） */
+  private pushDataExcludingTodo(formId: string, excludeId: number): void {
+    Promise.all([
+      CardDataService.buildCardData(this.context, CardDataService.getDayOffset(formId)),
+      CardDataService.buildTodoCardData(this.context, excludeId),
+    ]).then((results: CardData[]): void => {
+      const ev: CardData = results[0];
+      const td: CardData = results[1];
+      ev.todoListJson = td.todoListJson;
+      ev.todoCount = td.todoCount;
+      ev.todoTodayCount = td.todoTodayCount;
+      const binding: formBindingData.FormBindingData =
+        formBindingData.createFormBindingData(ev);
+      formProvider.updateForm(formId, binding).catch((err: BusinessError): void => {
+        LogUtil.write(`卡片 ${formId} 乐观更新失败: ${err.message}`);
+      });
+    }).catch((err: BusinessError): void => {
+      LogUtil.write(`卡片乐观更新数据构建失败: ${err.message}`);
+    });
   }
 }

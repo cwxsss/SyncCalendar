@@ -2,7 +2,7 @@
 // 日程编辑页：新建 / 修改 / 删除日程（一律属于某个 CalDAV 日历本，不再支持"本机"日程）
 import { curves, router, KeyboardAvoidMode } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { DavAccount, AccountStore, CalSource, BookPalette, LOCAL_CAL_KEY } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
@@ -14,6 +14,7 @@ import { LogUtil } from '../common/LogUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
 import { PlaceSuggest, PlaceItem } from '../common/PlaceSuggest';
+import { PlaceParser, ParsedPlace } from '../common/PlaceParser';
 
 /** 重复系列某次发生的前后边界（用于 EXDATE / UNTIL / 拆分） */
 class SeriesBounds {
@@ -441,6 +442,123 @@ struct EventEditPage {
     }
     .width('100%')
     .padding({ top: 4, bottom: 4 })
+  }
+
+  /**
+   * 从剪贴板粘贴并解析地点。
+   *
+   * ⚠️ 必须由 PasteButton 的 onClick 触发，权限仅在回调内有效。
+   *    在回调外调用 pasteboard.getData() 会因缺少权限而失败。
+   */
+  private async pastePlace(): Promise<void> {
+    this.cancelSuggestTimer();
+    let text: string = '';
+    try {
+      const sys = pasteboard.getSystemPasteboard();
+      const has: boolean = await sys.hasData();
+      if (!has) {
+        this.toast('剪贴板是空的');
+        return;
+      }
+      const data: pasteboard.PasteData = await sys.getData();
+      text = data.getPrimaryText();
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`粘贴读取失败: ${e.code} ${e.message}`);
+      this.toast('无法读取剪贴板');
+      return;
+    }
+    if (text === undefined || text === null || text.trim() === '') {
+      this.toast('剪贴板里没有文字');
+      return;
+    }
+    await this.resolvePastedText(text.trim());
+  }
+
+  /**
+   * 把粘贴到的文本解析成地点。
+   *
+   * 三级降级（从准到松）：
+   *  ① 高德链接 → 直接有坐标，无需检索
+   *  ② 微信文本 → 拆出名称，用**名称**检索（实测命中率最高）
+   *  ③ 名称搜不到 → 用完整地址再搜一次
+   *  ④ 都失败 → 把原文填进地点栏，提示用户手动确认
+   *
+   * 第 ④ 步兜底很重要：宁可让用户自己看一眼，
+   * 也不能因为解析失败就清空输入框或卡住保存。
+   */
+  private async resolvePastedText(text: string): Promise<void> {
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+    let parsed: ParsedPlace | null = null;
+    try {
+      parsed = await PlaceParser.parse(text, ctx);
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`粘贴解析异常: ${e.message}`);
+    }
+
+    // 解析不出东西 → 原文填入，让用户自行判断
+    if (parsed === null) {
+      this.lastAppliedText = text;
+      this.location = text;
+      this.toast('已填入，请确认地点是否正确');
+      return;
+    }
+
+    // 有坐标（高德链接）：直接用，坐标已包含在解析结果里
+    if (parsed.hasCoord) {
+      const locText: string = PlaceParser.mergeForLocationText(parsed.name, parsed.address);
+      this.lastAppliedText = locText !== '' ? locText : text;
+      this.location = this.lastAppliedText;
+      this.placePicked = true;
+      this.toast('已从链接解析地点');
+      return;
+    }
+
+    // 无坐标（微信文本）：名称优先检索，失败再用地址
+    const tryKeywords: string[] = [];
+    if (parsed.name !== '') {
+      tryKeywords.push(parsed.name);
+    }
+    if (parsed.address !== '' && parsed.address !== parsed.name) {
+      tryKeywords.push(parsed.address);
+    }
+    if (tryKeywords.length === 0) {
+      tryKeywords.push(text);
+    }
+
+    for (let i = 0; i < tryKeywords.length; i++) {
+      const kw: string = tryKeywords[i];
+      try {
+        let items: PlaceItem[] = await PlaceSuggest.query(kw, ctx);
+        if (items.length === 0) {
+          items = await PlaceSuggest.search(kw, ctx);
+        }
+        if (items.length > 0) {
+          // 命中：直接应用第一条（与用户点选候选等价）
+          const best: PlaceItem = items[0];
+          this.placePicked = true;
+          this.lastAppliedText = best.locationText;
+          this.location = best.locationText;
+          this.toast('已匹配到地点');
+          return;
+        }
+      } catch (err) {
+        LogUtil.write(`粘贴检索失败(${kw}): ${(err as BusinessError).message}`);
+      }
+    }
+
+    // 全部检索失败：填原文，不阻塞
+    const fallback: string = parsed.name !== '' ? parsed.name : parsed.address;
+    this.lastAppliedText = fallback !== '' ? fallback : text;
+    this.location = this.lastAppliedText;
+    this.placePicked = true;
+    this.toast('已填入，请确认地点是否正确');
+  }
+
+  /** 轻量提示（复用页面已有的 toast 机制；没有就静默） */
+  private toast(msg: string): void {
+    this.getUIContext().getPromptAction().showToast({ message: msg, duration: 1800 });
   }
 
   /** 选中一条候选：写进地点输入框并收起列表 */
@@ -1624,6 +1742,18 @@ struct EventEditPage {
                 }
               })
               .id('placeAnchor')
+            // ⭐ 粘贴地址：系统 PasteButton 安全控件
+            //    用它而不是自绘按钮 + pasteboard.getData()，原因见 pastePlace() 注释：
+            //    READ_PASTEBOARD 是受限权限，普通应用申请会被拒绝。
+            //    PasteButton 无需声明权限、无需弹窗，权限仅在 onClick 内有效。
+            PasteButton()
+              .height(44)
+              .padding({ left: 8, right: 8 })
+              .borderRadius(12)
+              .backgroundColor($r('app.color.card_bg'))
+              .onClick(() => {
+                this.pastePlace();
+              })
             // 在地图上选点（系统地图界面，可选可搜可周边）
             Text('地图')
               .fontSize(13)
