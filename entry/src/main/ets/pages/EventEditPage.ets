@@ -1754,7 +1754,11 @@ struct EventEditPage {
             // 外观与右边的「地图」按钮保持一致：同字号、同色、同底色、同圆角、同高度。
             PasteButton({
               text: PasteDescription.PASTE,
-              buttonType: ButtonType.Capsule
+              // ⚠️ 必须用 Normal，不能用 Capsule：
+              //    按 SDK 文档，Capsule / Circle 下 borderRadius **不生效**，
+              //    圆角由按钮类型自动决定（= 两端全圆），与「地图」的圆角矩形不一致。
+              //    只有 Normal / ROUNDED_RECTANGLE 才认 borderRadius。
+              buttonType: ButtonType.Normal
             })
               .fontSize(13)
               .fontColor($r('app.color.brand_text'))

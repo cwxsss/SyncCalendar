@@ -63,13 +63,54 @@ export class PlaceParser {
 
   // ==================== 链接解析 ====================
 
+  /**
+   * 裁剪 URL 尾部：只裁"多出来"的右括号与中文标点，保留 URL 内部的合法括号。
+   *
+   * 为什么需要：高德分享链接里的 POI 名称常含未编码的半角括号，
+   *   如 `...青岛菜(黄岛珠江路店)%2C武夷山路...`
+   * 若正则直接排除 ')'，就会在第一个 ')' 处截断 → 后面的地址段全丢。
+   *   实测该链接被截到 221/456 字符，__p 从 5 段变成 4 段。
+   *
+   * 做法：从左往右数括号，depth 变负说明这个 ')' 没有对应 '('，
+   *   它不属于 URL → 从这里截断。
+   */
+  private static trimUrlTail(raw: string): string {
+    let depth: number = 0;
+    let cut: number = raw.length;
+    for (let i = 0; i < raw.length; i++) {
+      const ch: string = raw.charAt(i);
+      if (ch === '(') {
+        depth++;
+      } else if (ch === ')') {
+        depth--;
+        if (depth < 0) {
+          // 多出来的右括号 → URL 到此为止
+          cut = i;
+          break;
+        }
+      }
+    }
+    let out: string = raw.substring(0, cut);
+    // 再裁掉可能粘在末尾的中文标点（用户手动加的全角句号/逗号等）
+    while (out.length > 0) {
+      const last: string = out.charAt(out.length - 1);
+      if (last === '。' || last === '，' || last === '、' || last === '；' ||
+        last === '！' || last === '？') {
+        out = out.substring(0, out.length - 1);
+      } else {
+        break;
+      }
+    }
+    return out;
+  }
+
   private static async parseUrl(text: string): Promise<ParsedPlace | null> {
     // 从可能夹带其他文字的段落里抽出第一个 http(s) 链接
-    const urlMatch: RegExpExecArray | null = /https?:\/\/[^\s"'<>）)]+/i.exec(text);
+    const urlMatch: RegExpExecArray | null = /https?:\/\/[^\s"'<>（）【】]+/i.exec(text);
     if (urlMatch === null) {
       return null;
     }
-    const url: string = urlMatch[0];
+    const url: string = PlaceParser.trimUrlTail(urlMatch[0]);
     // ① poi/detail: __p=<id>,<lat>,<lng>,<name>,<address...>
     const p: ParsedPlace | null = PlaceParser.parseAmapP(url);
     if (p !== null) {
