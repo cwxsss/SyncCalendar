@@ -3174,6 +3174,11 @@ struct Index {
       if (!s.writable || s.source !== 'dav') {
         continue;
       }
+      // ⭐ 只列**能放待办**的本：纯日历本（COMP_SET 只有 VEVENT）写不进 VTODO。
+      //    'both' / 'unknown' 都保留 —— unknown 是服务器未声明或旧数据，不能武断排除。
+      if (s.comps === 'event') {
+        continue;
+      }
       // calKey 形如 "<accountId>_<index>"
       const us: number = s.calKey.lastIndexOf('_');
       if (us <= 0) {

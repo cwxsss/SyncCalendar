@@ -77,6 +77,14 @@ export class CalSource {
   source: string = 'dav'; // 'dav' | 'system' | 'local'
   visible: boolean = true;
   writable: boolean = true; // 只读日历本中的日程只能查看详情，不能编辑
+  /**
+   * 本支持哪些组件（来自服务器 COMP_SET 声明）：
+   *   'event'   纯日历本（新建日程可选，新建待办不可选）
+   *   'todo'    纯待办本（反过来）
+   *   'both'    两者都可
+   *   'unknown' 服务器未声明 → 两边都按可用处理（旧数据兼容）
+   */
+  comps: string = 'unknown';
 }
 
 /** 与 UI 无关的调色板 */

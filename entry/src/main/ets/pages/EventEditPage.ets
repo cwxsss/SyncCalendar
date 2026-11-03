@@ -2159,6 +2159,13 @@ class CalendarDataBridge {
         if (!detected || manualKeys.includes(`${acc.id}_${i}`)) {
           continue;
         }
+        // ⭐ 只列**能放日程**的本：纯待办本（COMP_SET 只有 VTODO）写不进 VEVENT。
+        //    'both' / 'unknown' 保留，理由同 Index.openTodoCreator。
+        const comp: string = i < acc.calendarComps.length && acc.calendarComps[i] !== ''
+          ? acc.calendarComps[i] : 'unknown';
+        if (comp === 'todo') {
+          continue;
+        }
         const s = new CalSourceWithHref();
         s.calKey = `${acc.id}_${i}`;
         let name: string = i < acc.calendarNames.length ? acc.calendarNames[i] : '';

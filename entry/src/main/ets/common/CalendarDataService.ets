@@ -117,6 +117,9 @@ export class CalendarDataService {
           const detected: boolean = acc.calendarWritable.length > i
             ? acc.calendarWritable[i] !== '0' : true;
           s.writable = detected && !manualKeys.includes(s.calKey);
+          // 透传本支持的类型（新建待办/日程时据此过滤，避免把待办写进纯日历本）
+          s.comps = i < acc.calendarComps.length && acc.calendarComps[i] !== ''
+            ? acc.calendarComps[i] : 'unknown';
           sources.push(s);
         }
       }
