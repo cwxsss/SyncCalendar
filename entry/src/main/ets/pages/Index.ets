@@ -291,12 +291,28 @@ struct Index {
     }
   }
 
-  /** 消费卡片"添加"深链：拉起新建日程页并立即清除标记，避免重复触发 */
+  /**
+   * 消费卡片"添加"深链。
+   *
+   * 三种来源：
+   *   add      日程卡片 ＋ → 新建日程
+   *   addTodo  待办卡片 ＋ → 新建待办
+   *   openTodo 待办卡片整卡点击 → 切到待办 Tab
+   * 处理完立刻清标记，否则页面重建会重复触发。
+   */
   private consumeWidgetAction(): void {
     const action: string = AppStorage.get<string>('widgetAction') ?? '';
+    if (action === '') {
+      return;
+    }
+    AppStorage.setOrCreate<string>('widgetAction', '');
     if (action === 'add') {
-      AppStorage.setOrCreate<string>('widgetAction', '');
       this.addEvent();
+    } else if (action === 'addTodo') {
+      this.mode = 'todo';
+      this.openTodoCreator();
+    } else if (action === 'openTodo') {
+      this.mode = 'todo';
     }
   }
 

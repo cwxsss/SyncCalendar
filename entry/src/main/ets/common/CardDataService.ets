@@ -149,25 +149,53 @@ export class CardDataService {
   }
 
   /** App 内同步完成后调用：刷新所有已添加的卡片 */
+  /**
+   * 把待办数据合并进日程数据对象。
+   *
+   * ⭐ 抽出来的原因： EntryFormAbility.pushData 与 CardDataService.pushToAllForms
+   * 是两条独立的推送路径，之前只有前者做了合并，后者漏了 ⇒
+   * 待办卡片永远显示 0 条（todoCount 停在默认值）。
+   * 两处共用同一段逻辑，避免再出现"改一处忘一处"。
+   */
+  private static mergeTodoInto(ev: CardData, td: CardData): void {
+    ev.todoListJson = td.todoListJson;
+    ev.todoCount = td.todoCount;
+    ev.todoTodayCount = td.todoTodayCount;
+  }
+
   static async pushToAllForms(context: common.Context): Promise<void> {
     // 先恢复持久化的 formId（App 重启后内存注册表为空）
     await CardDataService.loadPersistedFormIds(context);
     if (CardDataService.formIds.length === 0) {
       return;
     }
+    // ⭐ 待办数据与 dayOffset 无关（待办不翻页），只构建一次
+    let todoData: CardData | null = null;
+    try {
+      todoData = await CardDataService.buildTodoCardData(context);
+    } catch (err) {
+      console.error(`待办卡片数据构建失败: ${(err as BusinessError).message}`);
+    }
     // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
     const cache: Map<number, formBindingData.FormBindingData> =
       new Map<number, formBindingData.FormBindingData>();
+    const fallbackData: CardData = await CardDataService.buildCardData(context, 0);
+    if (todoData !== null) {
+      CardDataService.mergeTodoInto(fallbackData, todoData);
+    }
     const fallback: formBindingData.FormBindingData =
-      formBindingData.createFormBindingData(await CardDataService.buildCardData(context, 0));
+      formBindingData.createFormBindingData(fallbackData);
     cache.set(0, fallback);
     const stale: string[] = [];
     for (const formId of CardDataService.formIds) {
       const off: number = CardDataService.getDayOffset(formId);
       let binding: formBindingData.FormBindingData | undefined = cache.get(off);
       if (binding === undefined) {
-        binding = formBindingData.createFormBindingData(
-          await CardDataService.buildCardData(context, off));
+        const d: CardData = await CardDataService.buildCardData(context, off);
+        if (todoData !== null) {
+          CardDataService.mergeTodoInto(d, todoData);
+        }
+        binding = formBindingData.createFormBindingData(d);
         cache.set(off, binding);
       }
       try {
@@ -327,14 +355,16 @@ export class CardDataService {
       // 今日日程条数：item.date === '今天' 的均为今天分组（含全天/跨天进行中）
       data.todayCount = items.filter((i: CardItem): boolean => i.date === '今天').length;
 
-      // ===== 2x4 卡片右侧：**当前时间之后最近的 2 条**日程 =====
+      // ===== 2x4 卡片右侧：**当前时间之后最近的若干条**日程（卡片可滚动，最多 15 条）=====
       // 规则：只取"还没开始"的有时间日程（startTime >= now），
       //      **排除全天 / 跨天**，按开始时间升序取前 2 条。
       //      不再区分"进行中 / 即将开始" —— 卡片上不再显示这些字样。
       const upcomingNext: DisplayEvent[] = upcoming
         .filter((e: DisplayEvent): boolean => !isDayLong(e) && e.startTime >= nowMs)
         .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
-      const ongoingPick: DisplayEvent[] = upcomingNext.slice(0, 2);
+      // ⭐ 上限 15 条：卡片可滚动，不必再为了"放得下"而截断到 2 条。
+      //    15 是经验值 —— 再多则用户更该进 App 看，而不是在卡片里翻。
+      const ongoingPick: DisplayEvent[] = upcomingNext.slice(0, 15);
       const ongoingItems: CardItem[] = [];
       for (const e of ongoingPick) {
         const dayLong: boolean = isDayLong(e);
@@ -404,8 +434,12 @@ export class CardDataService {
     return data;
   }
 
-  /** 卡片列表最多渲染多少条待办（4x4 用前 6 条、6x4 用前 10 条，卡片侧自行截断） */
-  private static readonly MAX_TODO_ITEMS: number = 20;
+  /**
+   * 卡片列表最多输出多少条待办。
+   * ⭐ 统一为 15：所有待办卡片都已改为可滚动（List + 虚拟化），
+   *    不必再为了"一屏放得下"而按卡片尺寸给不同上限。
+   */
+  private static readonly MAX_TODO_ITEMS: number = 15;
 
   /**
    * 构建**待办卡片**数据。

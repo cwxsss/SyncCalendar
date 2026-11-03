@@ -26,11 +26,10 @@ struct Widget4x2Card {
   /** 卡片当前显示的那一天 0 点毫秒 —— 点卡片进 App 时定位到这一天 */
   @LocalStorageProp('selectedDate') selectedDate: number = 0;
 
-  /** 右侧最多渲染 2 条（数据侧已裁剪，这里再兜底截断） */
+  /** 右侧列表数据（可滚动；数据侧已按时间升序并限制在 15 条内） */
   private parseOngoing(): CardItem2x4[] {
     try {
-      const all: CardItem2x4[] = JSON.parse(this.ongoingJson) as CardItem2x4[];
-      return all.slice(0, 2);
+      return JSON.parse(this.ongoingJson) as CardItem2x4[];
     } catch (err) {
       return [];
     }
@@ -102,7 +101,7 @@ struct Widget4x2Card {
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+    .padding({ left: 6, right: 8, top: 4, bottom: 4 })
     .borderRadius(8)
     .backgroundColor('#F5F7FA')
   }
@@ -183,19 +182,24 @@ struct Widget4x2Card {
         .strokeWidth(0.5)
         .color('#E5E5E5')
 
-      // ===== 右半：当前时间之后最近的两条日程（不滚动）=====
+      // ===== 右半：未来日程列表（可滚动，最多 15 条）=====
+      // ⭐ 原来固定 Column + 只取 2 条，用户想看后天的安排就看不到。
+      //    改为 List：自带虚拟化与滚动惯性，条目多也不占内存。
       Column() {
         if (this.parseOngoing().length === 0) {
           this.emptyHint()
         } else {
-          Column({ space: 6 }) {
+          List({ space: 4 }) {
             ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
-              this.ongoingRow(item)
-            }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}`)
+              ListItem() {
+                this.ongoingRow(item)
+              }
+            }, (item: CardItem2x4, idx: number) => `o${idx}_${item.time}_${item.title}`)
           }
           .width('100%')
           .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
+          .scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring)
         }
       }
       .layoutWeight(1)

@@ -83,39 +83,50 @@ struct TodoWidget6x4Card {
       .onClick(() => this.checkTodo(id))
   }
 
-  /** 单条待办（宽版）：勾选框 + 色条 + 标题 + 截止时间列 + 日历本名列 */
+  /**
+   * 单条待办：勾选框 + 色条 + 标题 + 副行（截止时间 · 日历本）。
+   *
+   * ⚠️ 与 TodoWidget4x4 的 todoRow **保持完全一致**（用户要求两个卡片显示效果一模一样）。
+   *    改这里必须同步改那边，否则又会不一致。
+   *    选这个结构而不是"独立列 + 固定宽度"：标题 layoutWeight(1) 能吃满剩余宽度，
+   *    在窄卡片里也不会被挤出屏幕。
+   */
   @Builder
   todoRow(item: TodoItem6x4) {
     Row({ space: 8 }) {
       this.checkbox(item.id)
       Column()
         .width(3)
-        .height(34)
+        .height(32)
         .borderRadius(2)
         .backgroundColor(item.color)
-      Text(item.title)
-        .fontSize(13)
-        .fontColor('#1A1A1A')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-      Text(item.dueText)
-        .fontSize(11)
-        .fontColor(item.dueText.indexOf('逾期') >= 0 ? '#FF3B30' : '#8A8A8A')
-        .maxLines(1)
-        .width(88)
-        .textAlign(TextAlign.End)
-      Text(item.calName)
-        .fontSize(10)
-        .fontColor(item.color)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width(80)
-        .textAlign(TextAlign.End)
+      Column({ space: 3 }) {
+        Text(item.title)
+          .fontSize(13)
+          .fontColor('#1A1A1A')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row({ space: 6 }) {
+          Text(item.dueText)
+            .fontSize(10)
+            .fontColor(item.dueText.indexOf('逾期') >= 0 ? '#FF3B30' : '#8A8A8A')
+            .maxLines(1)
+          if (item.calName !== '') {
+            Text(item.calName)
+              .fontSize(10)
+              .fontColor(item.color)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: '55%' })
+          }
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 4, right: 12, top: 6, bottom: 6 })
+    .padding({ left: 4, right: 10, top: 6, bottom: 6 })
     .borderRadius(10)
     .backgroundColor('#F5F7FA')
   }

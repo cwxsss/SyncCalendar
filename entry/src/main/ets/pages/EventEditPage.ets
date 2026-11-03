@@ -1746,11 +1746,21 @@ struct EventEditPage {
             //    用它而不是自绘按钮 + pasteboard.getData()，原因见 pastePlace() 注释：
             //    READ_PASTEBOARD 是受限权限，普通应用申请会被拒绝。
             //    PasteButton 无需声明权限、无需弹窗，权限仅在 onClick 内有效。
-            PasteButton()
+            // ⭐ PasteButton：安全控件，点击时临时获得剪贴板读权限
+            //    （无需申请 READ_PASTEBOARD —— 那是受限权限，普通应用申请会被拒）
+            //
+            // ⚠️ icon/text/buttonType **只能走构造参数**，写成链式属性会编译报错。
+            // ⚠️ 不要自定义背景色：SDK 明确把"字体颜色与背景相近"列为样式违规
+            //    （错误码 2），会让人字形灰淡难辨、甚至授权失败。
+            //    交给系统默认样式即可，只调尺寸与圆角。
+            PasteButton({
+              icon: PasteIconStyle.LINES,
+              text: PasteDescription.PASTE,
+              buttonType: ButtonType.Capsule
+            })
               .height(44)
-              .padding({ left: 8, right: 8 })
+              .padding({ left: 10, right: 14 })
               .borderRadius(12)
-              .backgroundColor($r('app.color.card_bg'))
               .onClick(() => {
                 this.pastePlace();
               })
