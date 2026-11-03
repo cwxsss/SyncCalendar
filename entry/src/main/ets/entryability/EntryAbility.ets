@@ -4,6 +4,7 @@ import { window } from '@kit.ArkUI';
 import { BackgroundSyncService } from '../common/BackgroundSyncService';
 import { NetworkSyncWatcher } from '../common/NetworkSyncWatcher';
 import { BackgroundSyncRunner } from '../common/BackgroundSyncRunner';
+import { CardDataService } from '../common/CardDataService';
 import { LogUtil } from '../common/LogUtil';
 
 const DOMAIN = 0x0000;
@@ -194,8 +195,9 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
-    // ⭐ 回到前台：① 归还短时任务配额 ② 立刻补同步一次（用户真正要看时数据必须最新）
+    // ⭐ 回到前台：① 归还短时任务配额 ② 立刻快速推一次卡片（杜绝夜间休眠未刷卡片在早晨显示昨天） ③ 立刻补同步一次
     BackgroundSyncService.cancelTransientSync();
+    CardDataService.pushToAllForms(this.context).catch(() => {});
     BackgroundSyncRunner.runOnce(this.context, 'foreground');
   }
 

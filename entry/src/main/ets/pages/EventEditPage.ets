@@ -15,6 +15,7 @@ import { CardDataService } from '../common/CardDataService';
 import { LogUtil } from '../common/LogUtil';
 import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
+import { CalendarDataService, DraftTransfer } from '../common/CalendarDataService';
 import { PlaceSuggest, PlaceItem } from '../common/PlaceSuggest';
 import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
 
@@ -291,6 +292,29 @@ struct EventEditPage {
     this.endMs = this.startMs + 3600000;
     if (choices.length > 0) {
       this.chosenKey = choices[0].calKey;
+    }
+
+    // 检查是否有从待办页切换转入的草稿
+    const draft: DraftTransfer | undefined = AppStorage.get<DraftTransfer>('editDraftTransfer');
+    if (draft !== undefined && draft !== null) {
+      AppStorage.setOrCreate<DraftTransfer | null>('editDraftTransfer', null);
+      this.title = draft.title;
+      this.smartInput = draft.smartInput;
+      this.description = draft.description;
+      if (draft.chosenKey !== '') {
+        this.chosenKey = draft.chosenKey;
+      }
+      if (draft.repeatMode !== '') {
+        this.repeatMode = draft.repeatMode;
+      }
+      if (draft.reminders.length > 0) {
+        this.reminderList = draft.reminders;
+      }
+      if (draft.startTime > 0) {
+        this.startMs = draft.startTime;
+        this.endMs = draft.endTime > draft.startTime ? draft.endTime : draft.startTime + 3600000;
+        this.allDay = draft.allDay;
+      }
     }
   }
 
@@ -1138,6 +1162,12 @@ struct EventEditPage {
       } catch (err) {
         // 刷新失败不影响保存
       }
+      // 联动刷新桌面及副屏服务卡片
+      try {
+        await CardDataService.pushToAllForms(context);
+      } catch (err) {
+        // 忽略
+      }
       this.getUIContext().getPromptAction().showToast({ message: '日程已保存' });
       router.back();
     } catch (err) {
@@ -1186,6 +1216,52 @@ struct EventEditPage {
    * 删除日程不可撤销，且会同时从本地库与服务器（DAV）移除，故破坏性操作前必须显式确认，
    * 避免"删除日程"按钮点击即删的误触。
    */
+  private askConvertToTodo(): void {
+    const targetId = this.event !== null ? this.event.id : (this.original !== null ? this.original.id : 0);
+    if (targetId <= 0 || this.isSaving) {
+      return;
+    }
+    const label: string = this.title.trim() === '' ? '该日程' : `「${this.title.trim()}」`;
+    this.getUIContext().showAlertDialog({
+      title: '转换为待办',
+      message: `确定要将${label}转换为待办事项吗？\n\n转换后该项将从日程视图移至待办清单中。`,
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '确定转换',
+        fontColor: $r('app.color.brand'),
+        action: (): void => {
+          this.doConvertToTodo(targetId);
+        }
+      }
+    });
+  }
+
+  private async doConvertToTodo(id: number): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    this.isSaving = true;
+    const ok = await CalendarDataService.convertEventToTodo(ctx, id);
+    if (ok) {
+      try {
+        await CardDataService.pushToAllForms(ctx);
+      } catch (err) {
+        // 忽略
+      }
+      this.getUIContext().getPromptAction().showToast({ message: '已成功转换为待办事项' });
+      router.back();
+    } else {
+      this.isSaving = false;
+      this.getUIContext().getPromptAction().showToast({ message: '转换失败' });
+    }
+  }
+
   private askRemoveEvent(): void {
     if (this.event === null || this.isSaving) {
       return;
@@ -1302,9 +1378,9 @@ struct EventEditPage {
       } catch (err) {
         // 忽略
       }
-      // 联动刷新桌面服务卡片
+      // 联动刷新桌面及副屏服务卡片
       try {
-        CardDataService.pushToAllForms(context);
+        await CardDataService.pushToAllForms(context);
       } catch (err) {
         // 忽略
       }
@@ -1358,6 +1434,17 @@ struct EventEditPage {
               .borderRadius(14)
               .padding({ left: 14, right: 14, top: 5, bottom: 5 })
               .onClick(() => {
+                const draft = new DraftTransfer();
+                draft.title = this.title;
+                draft.smartInput = this.smartInput;
+                draft.description = this.description;
+                draft.startTime = this.startMs;
+                draft.endTime = this.endMs;
+                draft.allDay = this.allDay;
+                draft.chosenKey = this.chosenKey;
+                draft.reminders = this.reminderList;
+                draft.repeatMode = this.repeatMode;
+                AppStorage.setOrCreate<DraftTransfer>('editDraftTransfer', draft);
                 router.replaceUrl({ url: 'pages/TodoEditPage' });
               })
           }
@@ -1379,7 +1466,7 @@ struct EventEditPage {
       .padding({ left: 16, right: 16 })
 
       Scroll(this.formScroller) {
-        Column({ space: 14 }) {
+        Column({ space: 8 }) {
           if (!this.isExisting) {
             Row({ space: 8 }) {
               TextInput({ text: this.smartInput, placeholder: '⚡ 粘贴整句智能识别，如：明天下午3点开会' })
@@ -1391,6 +1478,9 @@ struct EventEditPage {
                 .fontColor($r('app.color.text_primary'))
                 .onChange((val: string) => {
                   this.smartInput = val;
+                })
+                .onSubmit(() => {
+                  this.applySmartParse();
                 })
               Button('智能解析')
                 .fontSize(12)
@@ -1460,18 +1550,65 @@ struct EventEditPage {
               })
           }
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
-          // 时间卡片（单击任一行：底部弹层中日期+时间一次选完）
-          Column({ space: 10 }) {
-            this.timeRow('开始', true)
-            Divider().color($r('app.color.shadow_color'))
-            this.timeRow('结束', false)
+          // 时间卡片（开始与结束时间显示到一行，紧凑一点）
+          Row({ space: 8 }) {
+            // 开始时间
+            Column({ space: 2 }) {
+              Text('开始')
+                .fontSize(11)
+                .fontColor($r('app.color.text_secondary'))
+              Text(this.allDay
+                ? this.fmtDate(this.startMs)
+                : `${this.fmtDate(this.startMs)} ${this.fmtTime(this.startMs)}`)
+                .fontSize(13)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.brand'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            .padding({ left: 8, right: 6, top: 8, bottom: 8 })
+            .borderRadius(8)
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .onClick(() => {
+              this.openPicker(false);
+            })
+
+            Text('至')
+              .fontSize(12)
+              .fontColor($r('app.color.text_hint'))
+              .padding({ left: 2, right: 2 })
+
+            // 结束时间
+            Column({ space: 2 }) {
+              Text('结束')
+                .fontSize(11)
+                .fontColor($r('app.color.text_secondary'))
+              Text(this.allDay
+                ? this.fmtDate(this.endMs)
+                : `${this.fmtDate(this.endMs)} ${this.fmtTime(this.endMs)}`)
+                .fontSize(13)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.brand'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            .padding({ left: 8, right: 6, top: 8, bottom: 8 })
+            .borderRadius(8)
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .onClick(() => {
+              this.openPicker(true);
+            })
           }
           .width('100%')
-          .padding(6)
+          .padding({ left: 10, right: 10, top: 8, bottom: 8 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
           // 时间顺序错误时整卡描红，用户一眼能看到问题在这个卡片里
@@ -1489,35 +1626,44 @@ struct EventEditPage {
           }
 
           // 重复
-          Column({ space: 8 }) {
+          Column({ space: 6 }) {
             Text('重复')
               .fontSize(14)
               .fontColor($r('app.color.text_secondary'))
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              this.repeatChip('none', '不重复')
-              this.repeatChip('daily', '每天')
-              this.repeatChip('workday', '工作日')
-              this.repeatChip('weekly', '每周')
-              this.repeatChip('monthly', '每月')
-              this.repeatChip('yearly', '每年')
-              if (this.repeatMode === 'custom') {
-                // 服务器来的复杂规则（INTERVAL/COUNT 等）标记为自定义，保存时原样保留
-                this.repeatChip('custom', '自定义')
+            Scroll() {
+              Row({ space: 8 }) {
+                this.repeatChip('none', '不重复')
+                this.repeatChip('daily', '每天')
+                this.repeatChip('workday', '工作日')
+                this.repeatChip('weekly', '每周')
+                this.repeatChip('monthly', '每月')
+                this.repeatChip('yearly', '每年')
+                if (this.repeatMode === 'custom') {
+                  // 服务器来的复杂规则（INTERVAL/COUNT 等）标记为自定义，保存时原样保留
+                  this.repeatChip('custom', '自定义')
+                }
               }
             }
+            .scrollable(ScrollDirection.Horizontal)
+            .scrollBar(BarState.Off)
             .width('100%')
+
             // ⭐ 结束条件：永不结束 / 重复到某天 / 共重复几次
             //    （新建与编辑都可用；编辑时会回显服务器上已有的 COUNT / UNTIL）
             if (this.repeatMode !== 'none' && this.repeatMode !== 'custom') {
-              Divider().color($r('app.color.shadow_color'))
+              Divider().color($r('app.color.shadow_color')).margin({ top: 2, bottom: 2 })
               Text('结束条件')
-                .fontSize(14)
+                .fontSize(13)
                 .fontColor($r('app.color.text_secondary'))
-              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-                this.repeatEndChip('never', '永不结束')
-                this.repeatEndChip('until', '重复到某天')
-                this.repeatEndChip('count', '共几次')
+              Scroll() {
+                Row({ space: 8 }) {
+                  this.repeatEndChip('never', '永不结束')
+                  this.repeatEndChip('until', '重复到某天')
+                  this.repeatEndChip('count', '共几次')
+                }
               }
+              .scrollable(ScrollDirection.Horizontal)
+              .scrollBar(BarState.Off)
               .width('100%')
               if (this.repeatEnd === 'until') {
                 Row({ space: 8 }) {
@@ -1533,7 +1679,7 @@ struct EventEditPage {
                     .fontColor($r('app.color.text_hint'))
                 }
                 .width('100%')
-                .padding({ left: 8, right: 8, top: 10, bottom: 10 })
+                .padding({ left: 8, right: 8, top: 8, bottom: 8 })
                 .onClick(() => {
                   this.openRepeatUntilPicker();
                 })
@@ -1568,33 +1714,37 @@ struct EventEditPage {
                     .fontColor($r('app.color.text_secondary'))
                 }
                 .width('100%')
-                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
               }
             }
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
           // 提醒
-          Column({ space: 8 }) {
+          Column({ space: 6 }) {
             Text('提醒（可多选）')
               .fontSize(14)
               .fontColor($r('app.color.text_secondary'))
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              this.reminderChip(0)
-              this.reminderChip(-1)
-              this.reminderChip(5)
-              this.customReminderChip()
-              this.reminderChip(1440)
+            Scroll() {
+              Row({ space: 8 }) {
+                this.reminderChip(0)
+                this.reminderChip(-1)
+                this.reminderChip(5)
+                this.customReminderChip()
+                this.reminderChip(1440)
+              }
             }
+            .scrollable(ScrollDirection.Horizontal)
+            .scrollBar(BarState.Off)
             .width('100%')
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
@@ -1659,7 +1809,7 @@ struct EventEditPage {
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           // 日历本未选且用户点了保存 → 描红，提示"必填"
           .border({
@@ -1769,6 +1919,22 @@ struct EventEditPage {
               .width('100%')
           }
 
+          // 转换为待办事项
+          if (this.isExisting) {
+            Button('转换为待办事项')
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.brand'))
+              .backgroundColor($r('app.color.chip_off_bg'))
+              .width('100%')
+              .height(44)
+              .borderRadius(12)
+              .enabled(!this.isSaving)
+              .onClick(() => {
+                this.askConvertToTodo();
+              })
+          }
+
           // 删除
           if (this.isExisting) {
             Button('删除日程')
@@ -1786,7 +1952,7 @@ struct EventEditPage {
           }
         }
         .width('100%')
-        .padding({ left: 20, right: 20, bottom: 30 })
+        .padding({ left: 16, right: 16, bottom: 30 })
         .constraintSize({ minHeight: '100%' })
       }
       .layoutWeight(1)
@@ -1979,9 +2145,9 @@ struct EventEditPage {
       .fontSize(12)
       .fontColor(this.repeatMode === mode
         ? $r('app.color.button_text') : $r('app.color.text_primary'))
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .height(28)
+      .padding({ left: 10, right: 10 })
       .borderRadius(14)
-      .margin({ right: 8, bottom: 8 })
       .backgroundColor(this.repeatMode === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
       .onClick(() => {
         this.repeatMode = mode;
@@ -1999,9 +2165,9 @@ struct EventEditPage {
       .fontSize(12)
       .fontColor(this.repeatEnd === mode
         ? $r('app.color.button_text') : $r('app.color.text_primary'))
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .height(28)
+      .padding({ left: 10, right: 10 })
       .borderRadius(14)
-      .margin({ right: 8, bottom: 8 })
       .backgroundColor(this.repeatEnd === mode ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
       .onClick(() => {
         this.repeatEnd = mode;
@@ -2043,9 +2209,9 @@ struct EventEditPage {
       .fontSize(12)
       .fontColor(this.chipOn(minutes)
         ? $r('app.color.button_text') : $r('app.color.text_primary'))
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .height(28)
+      .padding({ left: 10, right: 10 })
       .borderRadius(14)
-      .margin({ right: 8, bottom: 8 })
       .backgroundColor(this.chipOn(minutes) ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
       .onClick(() => {
         this.toggleReminder(minutes);
@@ -2125,9 +2291,9 @@ struct EventEditPage {
         .fontColor(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
           ? $r('app.color.button_text') : $r('app.color.text_primary'))
     }
-    .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+    .height(28)
+    .padding({ left: 10, right: 10 })
     .borderRadius(14)
-    .margin({ right: 8, bottom: 8 })
     .backgroundColor(this.reminderList.some((m: number): boolean => m > 0 && m !== 5 && m !== 1440)
       ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
     .onClick(() => {

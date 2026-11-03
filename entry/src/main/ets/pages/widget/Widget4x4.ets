@@ -54,6 +54,7 @@ class LItem4 {
   calName: string = '';
   isNow: boolean = false;
   startMs: number = 0;
+  endMs: number = 0;
 }
 
 /** 冲突组：组内**贪心分列**，lanes[i] = 第 i 列（同列互不重叠） */
@@ -496,15 +497,24 @@ struct Widget4x4Card {
     }
   }
 
+  /** 判断单条日程此刻是否正在进行中（优先结合真实时间戳动态计算，防止静态缓存漂移） */
+  private isItemNow(item: LItem4): boolean {
+    if (item.time !== '全天' && item.startMs > 0 && item.endMs > 0) {
+      const now: number = Date.now();
+      return item.startMs <= now && now < item.endMs;
+    }
+    return item.isNow;
+  }
+
   /** 列表模式单条行：左侧日历色条（进行中变红）+ 时间 + 标题 + 所属日历本；不画红线 */
   @Builder
-  listRow(item: LItem4, fallbackDateMs: number = 0) {
+  listRow(item: LItem4, fallbackDateMs: number = 0, isNow: boolean = false) {
     Row({ space: 8 }) {
       Column()
         .width(3)
         .height(item.time === '全天' ? 16 : 38)
         .borderRadius(2)
-        .backgroundColor(item.isNow ? '#FF3B30' : item.color)
+        .backgroundColor(isNow ? '#FF3B30' : item.color)
       if (item.time === '全天') {
         Text(item.title)
           .fontSize(12)
@@ -523,7 +533,7 @@ struct Widget4x4Card {
           Text(item.time)
             .fontSize(10)
             .fontWeight(FontWeight.Medium)
-            .fontColor(item.isNow ? '#FF3B30' : '#333333')
+            .fontColor(isNow ? '#FF3B30' : '#333333')
           Text(item.endTime)
             .fontSize(10)
             .fontColor('#999999')
@@ -532,11 +542,11 @@ struct Widget4x4Card {
         .alignItems(HorizontalAlign.Center)
         Text(item.title)
           .fontSize(12)
-          .fontColor(item.isNow ? '#FF3B30' : '#1A1A1A')
+          .fontColor(isNow ? '#FF3B30' : '#1A1A1A')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .layoutWeight(1)
-        if (item.isNow) {
+        if (isNow) {
           Text('● 进行中')
             .fontSize(9)
             .fontColor('#FF3B30')
@@ -558,7 +568,7 @@ struct Widget4x4Card {
     .width('100%')
     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .borderRadius(8)
-    .backgroundColor(item.isNow ? '#FFF1F0' : '#F5F7FA')
+    .backgroundColor(isNow ? '#FFF1F0' : '#F5F7FA')
     .onClick(() => {
       const targetDate = item.startMs > 0 ? item.startMs : (fallbackDateMs > 0 ? fallbackDateMs : this.selectedDate);
       postCardAction(this, {
@@ -587,10 +597,10 @@ struct Widget4x4Card {
       List({ space: 4 }) {
         ForEach(this.parseList(), (item: LItem4) => {
           ListItem() {
-            this.listRow(item)
+            this.listRow(item, 0, this.isItemNow(item))
           }
           .width('100%')
-        }, (item: LItem4) => `${item.time}_${item.title}_${item.color}`)
+        }, (item: LItem4) => `${item.time}_${item.title}_${item.color}_${this.isItemNow(item)}`)
       }
       .width('100%')
       .layoutWeight(1)
@@ -688,8 +698,8 @@ struct Widget4x4Card {
               } else {
                 Column({ space: 4 }) {
                   ForEach(group.items, (item: LItem4) => {
-                    this.listRow(item, group.dateKey)
-                  }, (item: LItem4, idx: number) => `m_${group.dateKey}_${idx}_${item.time}_${item.title}`)
+                    this.listRow(item, group.dateKey, this.isItemNow(item))
+                  }, (item: LItem4, idx: number) => `m_${group.dateKey}_${idx}_${item.time}_${item.title}_${this.isItemNow(item)}`)
                 }
                 .width('100%')
               }

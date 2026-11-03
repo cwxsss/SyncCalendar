@@ -81,6 +81,13 @@ export class CardData {
   daysRangeText: string = ''; // '10月30日 - 11月1日' / '未来3天'
   rangeCount: number = 0;    // 当前所选天数范围内的全部日程总数
   multiDayJson: string = '[]'; // CardDayGroup[] JSON（供多日列表渲染）
+  nextRefreshMinutes: number = 30; // 智能计算的下次最佳刷新间隔（分钟，紧贴下一日程起止时刻）
+}
+
+interface FormOffsetInfo {
+  offset: number;
+  setAt: number;
+  dayStartMs: number;
 }
 
 export class CardDataService {
@@ -90,18 +97,95 @@ export class CardDataService {
   // formIds 持久化（App 重启后内存注册表会清空，从 preferences 恢复，保证推送不丢卡片）
   private static readonly PREF_STORE: string = 'card_form_ids';
   private static readonly PREF_KEY: string = 'form_ids';
-  // 每张卡片的"翻页偏移"（formId → 相对今天的天数）。卡片不能滚动，靠翻页看别的日期。
-  // 放在这里是为了让 FormExtension（按钮翻页）与 App 内刷新共用同一份状态。
-  private static offsets: Map<string, number> = new Map<string, number>();
+  // 每张卡片的"翻页偏移"（formId → 相对今天的天数）。带时间戳与所属日期，防跨天滞留显示昨天。
+  private static offsetMap: Map<string, FormOffsetInfo> = new Map<string, FormOffsetInfo>();
 
   static setDayOffset(formId: string, off: number): void {
-    CardDataService.offsets.set(formId, off);
+    if (off === 0) {
+      CardDataService.offsetMap.delete(formId);
+      return;
+    }
+    const now = Date.now();
+    CardDataService.offsetMap.set(formId, {
+      offset: off,
+      setAt: now,
+      dayStartMs: CardDataService.startOfDay(now)
+    });
   }
+
   static getDayOffset(formId: string): number {
-    return CardDataService.offsets.get(formId) ?? 0;
+    const info = CardDataService.offsetMap.get(formId);
+    if (info === undefined) {
+      return 0;
+    }
+    const now = Date.now();
+    const todayStart = CardDataService.startOfDay(now);
+    // 1. 如果已跨天，翻页偏移自动失效，重置回今天（避免隔天打开仍然显示"昨天"）
+    if (info.dayStartMs !== todayStart) {
+      CardDataService.offsetMap.delete(formId);
+      return 0;
+    }
+    // 2. 如果翻页不是今天（offset !== 0），超过 15 分钟无操作，自动归位回今天
+    if (now - info.setAt > 15 * 60 * 1000) {
+      CardDataService.offsetMap.delete(formId);
+      return 0;
+    }
+    return info.offset;
   }
+
   static clearDayOffset(formId: string): void {
-    CardDataService.offsets.delete(formId);
+    CardDataService.offsetMap.delete(formId);
+  }
+
+  /** 计算卡片下一次应当刷新的时间间隔（分钟）：紧贴下一个日程的开始、结束时刻或保底 30 分钟 / 跨天午夜 */
+  static calcNextRefreshMinutes(events: DisplayEvent[]): number {
+    const now = Date.now();
+    const dNow = new Date(now);
+    // 次日凌晨 00:00:30
+    const tomorrowMidnight = new Date(dNow.getFullYear(), dNow.getMonth(), dNow.getDate() + 1, 0, 0, 30).getTime();
+
+    // 默认保底：30 分钟后或午夜
+    let targetMs = Math.min(now + 30 * 60 * 1000, tomorrowMidnight);
+
+    for (const e of events) {
+      if (e.isAllDay) {
+        continue;
+      }
+      // 任何定时日程的开始时刻（即将变为"进行中"）
+      if (e.startTime > now && e.startTime < targetMs) {
+        targetMs = e.startTime;
+      }
+      // 任何定时日程的结束时刻（即将结束"进行中"）
+      if (e.endTime > now && e.endTime < targetMs) {
+        targetMs = e.endTime;
+      }
+    }
+
+    const diffMs = targetMs - now;
+    // 鸿蒙系统限制：formProvider.setFormNextRefreshTime 要求 waitMinutes >= 5
+    return Math.max(5, Math.ceil(diffMs / 60000));
+  }
+
+  /**
+   * 智能预约下一次卡片刷新时间点，确保在日程开始、日程结束、跨天或保底周期触发
+   */
+  static scheduleNextRefresh(formId: string, minutes: number = 30): void {
+    if (!formId || formId === '') {
+      return;
+    }
+    const waitMinutes = Math.max(5, minutes);
+    try {
+      formProvider.setFormNextRefreshTime(formId, waitMinutes).then((): void => {
+        LogUtil.write(`卡片 ${formId} 已预约智能刷新：${waitMinutes} 分钟后（预计 ${new Date(Date.now() + waitMinutes * 60000).toLocaleTimeString()}）`);
+      }).catch((err: BusinessError): void => {
+        LogUtil.write(`卡片 ${formId} 预约刷新异常: code=${err.code ?? ''} message=${err.message}`);
+        if (err.code === 16501001) {
+          CardDataService.formIds = CardDataService.formIds.filter((id: string): boolean => id !== formId);
+        }
+      });
+    } catch (err) {
+      // 容错
+    }
   }
 
   // 每张卡片的日程显示天数跨度（formId → 1 | 3 | 7）
@@ -168,26 +252,36 @@ export class CardDataService {
     // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
     const cache: Map<string, formBindingData.FormBindingData> =
       new Map<string, formBindingData.FormBindingData>();
+    const dataCache: Map<string, CardData> = new Map<string, CardData>();
+    const fallbackData: CardData = await CardDataService.buildCardData(context, 0);
     const fallback: formBindingData.FormBindingData =
-      formBindingData.createFormBindingData(await CardDataService.buildCardData(context, 0));
+      formBindingData.createFormBindingData(fallbackData);
     cache.set('0_1', fallback);
+    dataCache.set('0_1', fallbackData);
     const stale: string[] = [];
     for (const formId of CardDataService.formIds) {
       const off: number = CardDataService.getDayOffset(formId);
       const days: number = CardDataService.getCardDays(formId);
       const cacheKey: string = `${off}_${days}`;
       let binding: formBindingData.FormBindingData | undefined = cache.get(cacheKey);
-      if (binding === undefined) {
-        binding = formBindingData.createFormBindingData(
-          await CardDataService.buildCardData(context, off, days));
+      let cardDataObj: CardData | undefined = dataCache.get(cacheKey);
+      if (binding === undefined || cardDataObj === undefined) {
+        cardDataObj = await CardDataService.buildCardData(context, off, days);
+        binding = formBindingData.createFormBindingData(cardDataObj);
         cache.set(cacheKey, binding);
+        dataCache.set(cacheKey, cardDataObj);
       }
       try {
         await formProvider.updateForm(formId, binding);
+        CardDataService.scheduleNextRefresh(formId, cardDataObj.nextRefreshMinutes);
       } catch (err) {
         const e = err as BusinessError;
-        console.error(`卡片 ${formId} 刷新失败(移除注册): ${e.message}`);
-        stale.push(formId);
+        LogUtil.write(`卡片 ${formId} 刷新失败: code=${e.code ?? ''} message=${e.message}`);
+        // 只有错误码明确为 16501001 (卡片不存在/已被用户移除) 时才剔除注册；
+        // 其它临时错误（如锁屏、IPC连接超时 16500050/16500060、内部错误等）保留卡片注册，下次重试
+        if (e.code === 16501001) {
+          stale.push(formId);
+        }
       }
     }
     for (const id of stale) {
@@ -237,14 +331,21 @@ export class CardDataService {
       const end: number = (baseStart > todayStart ? baseStart : todayStart) + 60 * 86400000;
       const sources = await CalendarDataService.loadSources(context);
       const events: DisplayEvent[] = await CalendarDataService.loadEvents(context, start, end, sources);
+      const showTodos: boolean = await AppSettings.getShowTodosInCalendar(context);
+      if (showTodos) {
+        const todos: DisplayEvent[] = await CalendarDataService.loadTodos(context, sources);
+        for (const t of todos) {
+          if (t.startTime > 0 && !t.completed) {
+            events.push(t);
+          }
+        }
+      }
       // 1) 过滤：保留"今天 0 点以来"的日程（今天已结束的也显示，否则重复日程的
       //    第一次发生会被隐藏，表现为"第一次不显示、第二次及以后显示"）；
-      // 2) 按天分组，组内全天在前、有时间按开始时间排序；
-      // 3) 平铺输出并给每组第一条打 showDate 标记（日期头只跟在自己日期前面）
-      // 跨天日程：已开始未结束的归到"今天"、按全天显示，不再从开始那天重复显示
+      //    ⚠️ 必须严格 > todayKey，或者当天开始的日程。排他性结束于今天 00:00:00 的日程属于昨天，切勿混入今天！
       const todayKey: number = CardDataService.startOfDay(now.getTime());
       const upcoming: DisplayEvent[] = events
-        .filter((e: DisplayEvent): boolean => e.endTime >= todayKey);
+        .filter((e: DisplayEvent): boolean => e.endTime > todayKey || (e.startTime >= todayKey && e.endTime >= e.startTime));
 
       const dayKey = (ms: number): number => CardDataService.startOfDay(ms);
       const spansDays = (e: DisplayEvent): boolean =>
@@ -442,7 +543,8 @@ export class CardDataService {
         oi.startMs = e.startTime;
         oi.endMs = e.endTime;
         const eDayStart: number = CardDataService.startOfDay(e.startTime);
-        oi.dateTag = eDayStart === todayStart ? '今天' : (eDayStart === todayStart + 86400000 ? '明天' : (eDayStart === todayStart + 2 * 86400000 ? '后天' : `${ds.getMonth() + 1}/${ds.getDate()}`));
+        const isOngoingCrossDay = eDayStart < todayStart && e.endTime > todayStart;
+        oi.dateTag = isOngoingCrossDay ? '今天' : (eDayStart === todayStart ? '今天' : (eDayStart === todayStart + 86400000 ? '明天' : (eDayStart === todayStart + 2 * 86400000 ? '后天' : `${ds.getMonth() + 1}/${ds.getDate()}`)));
         oi.calName = e.calName;
         oi.location = e.location;
         oi.isNow = false;
@@ -497,7 +599,8 @@ export class CardDataService {
       data.listJson = JSON.stringify(dayList);
       // 显示方式：与 App 内设置联动（列表模式卡片不画当前时间红线）
       data.displayStyle = await AppSettings.getDisplayStyle(context);
-      LogUtil.write(`卡片数据刷新：${items.length} 条，跨度 ${data.cardDays} 天(${data.rangeCount} 条)，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，显示方式 ${data.displayStyle}`);
+      data.nextRefreshMinutes = CardDataService.calcNextRefreshMinutes(events);
+      LogUtil.write(`卡片数据刷新：${items.length} 条，跨度 ${data.cardDays} 天(${data.rangeCount} 条)，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，下次刷新 ${data.nextRefreshMinutes} 分钟后`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
     }

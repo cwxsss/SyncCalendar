@@ -24,10 +24,12 @@ export default class EntryFormAbility extends FormExtensionAbility {
     CardDataService.buildCardData(this.context, dayOffset, days).then((data: CardData): void => {
       const binding: formBindingData.FormBindingData =
         formBindingData.createFormBindingData(data);
-      formProvider.updateForm(formId, binding).catch((err: BusinessError): void => {
+      formProvider.updateForm(formId, binding).then((): void => {
+        CardDataService.scheduleNextRefresh(formId, data.nextRefreshMinutes);
+      }).catch((err: BusinessError): void => {
         LogUtil.write(`卡片 ${formId} 更新失败: ${err.message}`);
       });
-      LogUtil.write(`卡片 ${formId} 数据已推送（跨度 ${data.cardDays} 天，偏移 ${dayOffset}）`);
+      LogUtil.write(`卡片 ${formId} 数据已推送（跨度 ${data.cardDays} 天，偏移 ${dayOffset}，预约下一次 ${data.nextRefreshMinutes} 分钟后）`);
     }).catch((err: BusinessError): void => {
       LogUtil.write(`卡片数据构建失败: ${err.message}`);
     });

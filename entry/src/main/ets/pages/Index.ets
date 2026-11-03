@@ -156,10 +156,17 @@ struct Index {
         // 未同意：仅显示整页同意门禁（consentGate），不申请权限、不加载数据
       });
     }
-    // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进（同时刷新色块"进行中"标记）
+    // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进（同时刷新色块"进行中"标记与跨天检测）
     this.nowTimer = setInterval((): void => {
+      const prevMs = this.nowMs;
       this.nowMs = Date.now();
-      this.refreshNowMarks();
+      // 跨天检测（0点翻篇）：若日期变了，自动刷新全量数据并推送服务卡片
+      if (TimelineUtil.startOfDay(this.nowMs) !== TimelineUtil.startOfDay(prevMs)) {
+        LogUtil.write('应用内检测到跨天，自动刷新全部数据与服务卡片');
+        this.reloadAll().catch(() => {});
+      } else {
+        this.refreshNowMarks();
+      }
     }, 30000);
   }
 
@@ -447,6 +454,9 @@ struct Index {
       // 显示方式（时间轴 / 列表）可能在设置页被改过，每次回到前台都重新读一次
       this.displayStyle = await AppSettings.getDisplayStyle(context);
       await this.reloadEvents();
+      try {
+        await CardDataService.pushToAllForms(context);
+      } catch (err) {}
       this.startAutoSync();
     } finally {
       this.isLoadingAll = false;
@@ -1366,31 +1376,25 @@ struct Index {
         .align(Alignment.Top)
         .layoutWeight(1)
       }
-      // 可写日程：详情底部提供"删除"与"编辑"入口（系统/只读日程无此按钮）
+      // 可写日程：详情底部提供"转为待办"、"编辑"与"删除"入口（系统/只读日程无此按钮）
       if (this.detailEvent !== null && !this.detailEvent.isSystem && this.detailEvent.writable) {
-        Row({ space: 12 }) {
-          Button('删除日程')
+        Row({ space: 8 }) {
+          Button('转为待办')
             .layoutWeight(1)
             .height(44)
-            .fontSize(15)
+            .fontSize(14)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#E64545')
-            .backgroundColor($r('app.color.card_bg'))
+            .fontColor($r('app.color.brand'))
+            .backgroundColor($r('app.color.chip_off_bg'))
             .borderRadius(22)
             .onClick(() => {
-              if (this.detailEvent !== null) {
-                if (this.detailEvent.recurring) {
-                  this.detailSheetMode = 'scope';
-                } else {
-                  this.detailSheetMode = 'confirm';
-                }
-              }
+              this.askConvertDetailToTodo();
             })
 
           Button('编辑日程')
             .layoutWeight(1)
             .height(44)
-            .fontSize(15)
+            .fontSize(14)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.button_text'))
             .backgroundColor($r('app.color.brand'))
@@ -1405,6 +1409,25 @@ struct Index {
                 router.pushUrl({ url: 'pages/EventEditPage' });
               }
             })
+
+          Button('删除')
+            .width(68)
+            .height(44)
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#E64545')
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 1, color: '#E64545' })
+            .borderRadius(22)
+            .onClick(() => {
+              if (this.detailEvent !== null) {
+                if (this.detailEvent.recurring) {
+                  this.detailSheetMode = 'scope';
+                } else {
+                  this.detailSheetMode = 'confirm';
+                }
+              }
+            })
         }
         .width('100%')
         .padding({ top: 8, bottom: 4 })
@@ -1412,6 +1435,50 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+  }
+
+  /** 将详情弹层中的日程转换为待办事项 */
+  private askConvertDetailToTodo(): void {
+    if (this.detailEvent === null) {
+      return;
+    }
+    const target = this.detailEvent;
+    const label: string = target.title.trim() === '' ? '该日程' : `「${target.title.trim()}」`;
+    this.getUIContext().showAlertDialog({
+      title: '转换为待办',
+      message: `确定要将${label}转换为待办事项吗？\n\n转换后该项将从日程视图移至待办清单中。`,
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '确定转换',
+        fontColor: $r('app.color.brand'),
+        action: () => {
+          this.executeConvertDetailToTodo(target.id);
+        }
+      }
+    });
+  }
+
+  private async executeConvertDetailToTodo(eventId: number): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    this.detailShow = false;
+    const ok = await CalendarDataService.convertEventToTodo(ctx, eventId);
+    if (ok) {
+      try {
+        await CardDataService.pushToAllForms(ctx);
+      } catch (err) {}
+      this.getUIContext().getPromptAction().showToast({ message: '已成功转换为待办事项' });
+      await this.reloadAll();
+    } else {
+      this.getUIContext().getPromptAction().showToast({ message: '转换失败' });
+    }
   }
 
   private async executeDeleteDetail(scope: string): Promise<void> {
@@ -2377,7 +2444,7 @@ struct Index {
           Row() {
             if (cell.hasEvents) {
               Circle({ width: 4, height: 4 })
-                .fill(cell.dateMs === this.selectedDate ? '#0057C2' : '#FF3B30')
+                .fill(cell.dateMs === this.selectedDate ? $r('app.color.brand') : '#FF3B30')
             }
           }
           .height(4)
@@ -2983,7 +3050,7 @@ struct Index {
         Column({ space: 8 }) {
           ForEach(this.selectedDayEvents, (e: DisplayEvent) => {
             this.eventRow(e, this.isEventNow(e, this.topRangeMode === '3days' || this.topRangeMode === '7days' || this.selectedDate === this.startOfDay(this.nowMs)))
-          }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+          }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.completed ? '1' : '0'}_${e.startTime}_${e.title}`)
           if (this.selectedDayEvents.length === 0 && !this.loading) {
             Text(this.topRangeMode === '3days' ? '未来三天没有日程' : (this.topRangeMode === '7days' ? '未来七天没有日程' : '当天没有日程'))
               .fontSize(13)
@@ -3080,7 +3147,7 @@ struct Index {
               this.eventRow(e, this.isEventNow(e, day.isToday))
             }
             .width('100%')
-          }, (e: DisplayEvent) => `${e.isSystem ? 's' : 'l'}${e.id}_${e.startTime}_${e.title}`)
+          }, (e: DisplayEvent) => `${this.dataVersion}_${e.isSystem ? 's' : 'l'}${e.id}_${e.completed ? '1' : '0'}_${e.startTime}_${e.title}`)
         }, (day: AgendaTimelineGroup) => `day_${day.dateMs}`)
       }
       .width('100%')
@@ -3187,18 +3254,18 @@ struct Index {
         Row() {
           if (e.completed) {
             Text('✓')
-              .fontSize(12)
+              .fontSize(13)
               .fontColor($r('app.color.button_text'))
-              .width(20)
-              .height(20)
+              .width(22)
+              .height(22)
               .textAlign(TextAlign.Center)
-              .borderRadius(10)
+              .borderRadius(11)
               .backgroundColor(e.color)
           } else {
             Text('')
-              .width(20)
-              .height(20)
-              .borderRadius(10)
+              .width(22)
+              .height(22)
+              .borderRadius(11)
               .border({ width: 2, color: e.color })
           }
         }
@@ -3224,7 +3291,7 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
           if (e.kind === 'todo') {
-            Text('待办 · ' + (e.isAllDay ? '全天截止' : (e.startTime > 0 ? `截止 ${this.fmtTime(e.startTime)}` : '无截止时间')))
+            Text('待办 · ' + (e.isAllDay ? '全天截止' : (e.startTime > 0 ? `截止 ${this.fmtDue(e.startTime)}` : '无截止时间')))
               .fontSize(12)
               .fontColor($r('app.color.text_secondary'))
             if (e.rrule !== '' || e.recurring) {
@@ -3299,6 +3366,7 @@ struct Index {
     .borderRadius(12)
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
+    .opacity((e.kind === 'todo' && e.completed) ? 0.7 : 1)
     .onClick(() => {
       this.openEvent(e);
     })
@@ -3539,7 +3607,14 @@ struct Index {
       e.id = newId;
       this.quickTodoText = '';
       this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+      this.buildEventsByDay();
+      this.rebuildPages();
+      this.rebuildDayTimeline();
+      if (this.mode === 'agenda') {
+        this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+      }
       this.dataVersion++;
+      CardDataService.pushToAllForms(ctx).catch(() => {});
       const toastMsg = dueTime > 0 ? ('待办已添加（截止 ' + this.fmtDue(dueTime) + '）并同步') : '待办已添加并同步到云端';
       this.getUIContext().getPromptAction().showToast({ message: toastMsg });
 
@@ -3582,7 +3657,15 @@ struct Index {
     }
     await EventDb.markDeleted(ctx, t.id);
     this.todos = this.todos.filter((item: DisplayEvent): boolean => item.id !== t.id);
+    this.selectedDayEvents = this.selectedDayEvents.filter((item: DisplayEvent): boolean => !(item.id === t.id && item.kind === 'todo'));
+    this.buildEventsByDay();
+    this.rebuildPages();
+    this.rebuildDayTimeline();
+    if (this.mode === 'agenda') {
+      this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+    }
     this.dataVersion++;
+    CardDataService.pushToAllForms(ctx).catch(() => {});
     this.getUIContext().getPromptAction().showToast({ message: '待办已删除' });
     this.syncAll(false).catch((err: Error) => {
       LogUtil.write('同步删除待办失败: ' + err.message);
@@ -3620,7 +3703,36 @@ struct Index {
           }
           return item;
         });
+        // 瞬间同步更新选今日程列表
+        this.selectedDayEvents = this.selectedDayEvents.map((item: DisplayEvent): DisplayEvent => {
+          if (item.id === t.id && item.kind === 'todo') {
+            const copy = new DisplayEvent();
+            copy.id = item.id;
+            copy.isSystem = item.isSystem;
+            copy.title = item.title;
+            copy.description = item.description;
+            copy.location = item.location;
+            copy.startTime = nextOcc;
+            copy.endTime = nextOcc;
+            copy.isAllDay = item.isAllDay;
+            copy.calKey = item.calKey;
+            copy.calName = item.calName;
+            copy.color = item.color;
+            copy.completed = false;
+            copy.recurring = item.recurring;
+            copy.writable = item.writable;
+            copy.kind = item.kind;
+            copy.rrule = item.rrule;
+            return copy;
+          }
+          return item;
+        });
         this.buildEventsByDay();
+        this.rebuildPages();
+        this.rebuildDayTimeline();
+        if (this.mode === 'agenda') {
+          this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+        }
         this.dataVersion++;
 
         const nextDateStr: string = this.fmtDateCn(nextOcc);
@@ -3629,6 +3741,7 @@ struct Index {
         });
 
         if (ctx !== undefined) {
+          CardDataService.pushToAllForms(ctx).catch(() => {});
           await EventDb.advanceTodo(ctx, t.id, nextOcc);
           this.syncAll(false).catch((err: Error) => {
             LogUtil.write('待办后台同步失败: ' + err.message);
@@ -3663,7 +3776,36 @@ struct Index {
       }
       return item;
     });
+    // 瞬间同步更新选今日程列表，保证在日程视图中点击立即打勾或划线生效
+    this.selectedDayEvents = this.selectedDayEvents.map((item: DisplayEvent): DisplayEvent => {
+      if (item.id === t.id && item.kind === 'todo') {
+        const copy = new DisplayEvent();
+        copy.id = item.id;
+        copy.isSystem = item.isSystem;
+        copy.title = item.title;
+        copy.description = item.description;
+        copy.location = item.location;
+        copy.startTime = item.startTime;
+        copy.endTime = item.endTime;
+        copy.isAllDay = item.isAllDay;
+        copy.calKey = item.calKey;
+        copy.calName = item.calName;
+        copy.color = item.color;
+        copy.completed = nextCompleted;
+        copy.recurring = item.recurring;
+        copy.writable = item.writable;
+        copy.kind = item.kind;
+        copy.rrule = item.rrule;
+        return copy;
+      }
+      return item;
+    });
     this.buildEventsByDay();
+    this.rebuildPages();
+    this.rebuildDayTimeline();
+    if (this.mode === 'agenda') {
+      this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+    }
     this.dataVersion++;
 
     this.getUIContext().getPromptAction().showToast({
@@ -3671,6 +3813,7 @@ struct Index {
     });
 
     if (ctx !== undefined) {
+      CardDataService.pushToAllForms(ctx).catch(() => {});
       await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
       this.syncAll(false).catch((err: Error) => {
         LogUtil.write('待办后台同步失败: ' + err.message);
@@ -3731,17 +3874,31 @@ struct Index {
     }
   }
 
-  /** 待办事项左滑出现的删除按钮 */
+  /** 待办事项左滑出现的转日程与删除按钮 */
   @Builder
   todoSwipeAction(t: DisplayEvent) {
-    Row() {
+    Row({ space: 6 }) {
+      Button({ type: ButtonType.Normal }) {
+        Text('转日程')
+          .fontSize(13)
+          .fontColor($r('app.color.button_text'))
+          .fontWeight(FontWeight.Medium)
+      }
+      .width(68)
+      .height('100%')
+      .backgroundColor($r('app.color.brand'))
+      .borderRadius(12)
+      .onClick(() => {
+        this.quickConvertTodoToEvent(t);
+      })
+
       Button({ type: ButtonType.Normal }) {
         Text('删除')
-          .fontSize(14)
+          .fontSize(13)
           .fontColor('#FFFFFF')
           .fontWeight(FontWeight.Medium)
       }
-      .width(72)
+      .width(60)
       .height('100%')
       .backgroundColor('#E64545')
       .borderRadius(12)
@@ -3752,6 +3909,24 @@ struct Index {
     .padding({ left: 6 })
     .height('100%')
     .justifyContent(FlexAlign.Center)
+  }
+
+  /** 将待办快捷转换为日程 */
+  private async quickConvertTodoToEvent(t: DisplayEvent): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    const ok = await CalendarDataService.convertTodoToEvent(ctx, t.id);
+    if (ok) {
+      try {
+        await CardDataService.pushToAllForms(ctx);
+      } catch (err) {}
+      this.getUIContext().getPromptAction().showToast({ message: `「${t.title || '待办'}」已成功转换为日程` });
+      await this.reloadAll();
+    } else {
+      this.getUIContext().getPromptAction().showToast({ message: '转换失败' });
+    }
   }
 
   @Builder
@@ -3783,7 +3958,7 @@ struct Index {
         this.toggleTodo(t);
       })
 
-      // 中间文本内容（点击进入编辑页面，修改时间、描述、提醒等）
+      // 中间文本内容
       Column({ space: 3 }) {
         Text(t.title === '' ? '(无标题待办)' : t.title)
           .fontSize(15)
@@ -3792,7 +3967,7 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row({ space: 6 }) {
-          Text(t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间')
+          Text(t.isAllDay ? '全天截止' : (t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间'))
             .fontSize(12)
             .fontColor($r('app.color.text_secondary'))
           if (t.rrule !== '' || t.recurring) {
@@ -3807,19 +3982,29 @@ struct Index {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
-      .onClick(() => {
-        AppStorage.setOrCreate<number>('pendingTodoId', t.id);
-        router.pushUrl({ url: 'pages/TodoEditPage' });
-      })
 
-
+      // 所属日历本：最右侧、垂直居中，与日程行保持一致
+      if (t.calName !== '') {
+        Text(t.calName)
+          .fontSize(11)
+          .fontColor(this.colorOfCal(t.calKey))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '30%' })
+          .decoration({ type: t.writable ? TextDecorationType.None : TextDecorationType.LineThrough })
+      }
     }
+    .alignItems(VerticalAlign.Center)
     .width('100%')
     .padding(10)
     .borderRadius(12)
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
+    .onClick(() => {
+      AppStorage.setOrCreate<number>('pendingTodoId', t.id);
+      router.pushUrl({ url: 'pages/TodoEditPage' });
+    })
   }
 
   /** 是否跨天（结束日期晚于开始日期） */
@@ -3870,7 +4055,7 @@ struct Index {
         if (cell.hasEvents) {
           Circle({ width: 4, height: 4 })
             .fill(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text')
+              ? $r('app.color.brand')
               : (!cell.inMonth ? '#FFA080' : '#FF3B30'))
         }
       }

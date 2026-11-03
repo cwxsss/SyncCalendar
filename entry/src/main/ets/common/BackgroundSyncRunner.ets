@@ -189,7 +189,10 @@ export class BackgroundSyncRunner {
       const accounts: DavAccount[] = await AccountStore.loadAll(context);
       LogUtil.write(`后台同步[${tag}] 阶段：载入账号 ${accounts.length} 个 +${el()}ms`);
       if (accounts.length === 0) {
-        LogUtil.write(`后台同步[${tag}]：无账号，跳过`);
+        LogUtil.write(`后台同步[${tag}]：无账号，跳过账号同步`);
+        try {
+          await CardDataService.pushToAllForms(context);
+        } catch (err) {}
         return r;
       }
       // 备份模式：先导入系统本地日历（幂等），再随同步推送
@@ -254,6 +257,9 @@ export class BackgroundSyncRunner {
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`后台同步[${tag}] 流程异常: ${e.message}（已耗时 ${Math.round(el() / 1000)} 秒）`);
+      try {
+        await CardDataService.pushToAllForms(context);
+      } catch (cardErr) {}
     }
     return r;
   }

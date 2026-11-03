@@ -9,6 +9,22 @@ import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { RruleUtil } from './RruleUtil';
 import { IcsUtil } from './IcsUtil';
+import { SystemCalendarMirror } from './SystemCalendarMirror';
+import { SyncEngine } from './SyncEngine';
+import { DavClient } from './DavClient';
+
+/** 日程与待办草稿互相转换传递载体 */
+export class DraftTransfer {
+  title: string = '';
+  smartInput: string = '';
+  description: string = '';
+  startTime: number = 0;
+  endTime: number = 0;
+  allDay: boolean = false;
+  chosenKey: string = '';
+  reminders: number[] = [];
+  repeatMode: string = 'none';
+}
 
 /** 界面展示用事件 */
 export class DisplayEvent {
@@ -436,5 +452,119 @@ export class CalendarDataService {
       list.push(de);
     }
     return list;
+  }
+
+  /** 后台推送脏数据到对应账号 */
+  static async triggerPush(ctx: common.Context, targetHref: string): Promise<void> {
+    try {
+      const accounts: DavAccount[] = await AccountStore.loadAll(ctx);
+      const eNorm: string = DavClient.normalizeHref(targetHref);
+      const acc: DavAccount | undefined = accounts.find((a: DavAccount): boolean =>
+        a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === eNorm));
+      if (acc !== undefined) {
+        const auth: string = DavClient.authHeader(acc.username, acc.password);
+        await SyncEngine.pushDirtyForAccount(ctx, acc, auth);
+      }
+    } catch (err) {
+      LogUtil.write('后台推送失败: ' + (err as Error).message);
+    }
+  }
+
+  /** 将已有日程转换为待办事项 */
+  static async convertEventToTodo(context: common.Context, eventId: number): Promise<boolean> {
+    try {
+      const ev = await EventDb.getById(context, eventId);
+      if (ev === null) {
+        return false;
+      }
+      ev.kind = 'todo';
+      ev.completed = false;
+      // 日程转换为待办：以日程开始时间作为待办的截止时间
+      if (ev.startTime > 0) {
+        ev.endTime = ev.startTime;
+      }
+      ev.dirty = true;
+      await EventDb.updateLocal(context, ev);
+      LogUtil.write(`日程已转换为待办: id=${ev.id} title=${ev.title}`);
+
+      // 1. 同步系统日历镜像（待办不进入系统日历，syncNow 会自动从系统日历清理）
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`系统日历镜像同步失败(静默): ${err.message}`);
+          });
+        }
+      } catch (err) {
+        LogUtil.write(`清理镜像日程失败(静默): ${(err as Error).message}`);
+      }
+
+      // 2. 后台异步推送到 CalDAV 服务器
+      if (ev.href !== '') {
+        CalendarDataService.triggerPush(context, ev.href).catch((err: Error) => {
+          LogUtil.write(`推送转换后待办失败: ${err.message}`);
+        });
+      }
+      return true;
+    } catch (err) {
+      LogUtil.write(`日程转待办失败: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** 将已有待办事项转换为日程 */
+  static async convertTodoToEvent(context: common.Context, todoId: number): Promise<boolean> {
+    try {
+      const ev = await EventDb.getById(context, todoId);
+      if (ev === null) {
+        return false;
+      }
+      ev.kind = 'event';
+      ev.completed = false;
+      // 待办转换为日程：若有截止时间则作为日程开始时间，若无则设为当前时间下一整点
+      if (ev.startTime <= 0) {
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        now.setHours(now.getHours() + 1);
+        ev.startTime = now.getTime();
+        ev.endTime = ev.startTime + 3600000;
+        ev.isAllDay = false;
+      } else {
+        if (ev.isAllDay) {
+          const d = new Date(ev.startTime);
+          const startDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+          ev.startTime = startDay;
+          ev.endTime = startDay + 86400000 - 1000;
+          ev.isAllDay = true;
+        } else {
+          ev.endTime = ev.startTime + 3600000;
+          ev.isAllDay = false;
+        }
+      }
+      ev.dirty = true;
+      await EventDb.updateLocal(context, ev);
+      LogUtil.write(`待办已转换为日程: id=${ev.id} title=${ev.title}`);
+
+      // 1. 同步到系统日历镜像
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`系统日历镜像同步失败(静默): ${err.message}`);
+          });
+        }
+      } catch (err) {
+        LogUtil.write(`系统日历镜像同步失败(静默): ${(err as Error).message}`);
+      }
+
+      // 2. 后台异步推送到 CalDAV 服务器
+      if (ev.href !== '') {
+        CalendarDataService.triggerPush(context, ev.href).catch((err: Error) => {
+          LogUtil.write(`推送转换后日程失败: ${err.message}`);
+        });
+      }
+      return true;
+    } catch (err) {
+      LogUtil.write(`待办转日程失败: ${(err as Error).message}`);
+      return false;
+    }
   }
 }

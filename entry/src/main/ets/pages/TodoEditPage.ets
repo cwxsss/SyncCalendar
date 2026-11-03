@@ -1,12 +1,14 @@
 // entry/src/main/ets/pages/TodoEditPage.ets
 // 待办事项编辑页：新建 / 修改 / 删除待办事项（支持具体时间、详细描述、提醒功能与 CalDAV 同步）
-import { router } from '@kit.ArkUI';
+import { router, curves } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { DavAccount, AccountStore, CalSource } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
 import { SyncEngine } from '../common/SyncEngine';
 import { DavClient } from '../common/DavClient';
 import { ReminderService } from '../common/ReminderService';
+import { CardDataService } from '../common/CardDataService';
+import { CalendarDataService, DraftTransfer } from '../common/CalendarDataService';
 import { LogUtil } from '../common/LogUtil';
 import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
 
@@ -26,12 +28,12 @@ struct TodoEditPage {
   @State title: string = '';
   @State smartInput: string = '';
   @State description: string = '';
-  @State hasDueDate: boolean = false;
-  @State dueDateMs: number = 0; // 选中的年月日当天 00:00:00
+  @State hasDueDate: boolean = true; // 截止时间默认打开
+  @State dueDateMs: number = 0; // 选中的年月日当天 00:00:00，默认今天
   @State hasSpecificTime: boolean = false; // 是否精确到具体时间点
   @State dueHour: number = 18;
   @State dueMinute: number = 0;
-  @State reminderList: number[] = []; // 提醒提前分钟数：空=不提醒，-1=到期时，5/15/30/60/1440
+  @State reminderList: number[] = [-1]; // 提醒提前分钟数：默认到期时(-1)
   @State customReminderMinutes: number = 10;
   @State customReminderInput: string = '10';
   @State customSheetShow: boolean = false;
@@ -40,6 +42,7 @@ struct TodoEditPage {
   @State books: TodoBookChoice[] = [];
   @State chosenKey: string = '';
   @State isSaving: boolean = false;
+  @State errorField: string = '';
   @State bookSheetOpen: boolean = false;
 
   async aboutToAppear(): Promise<void> {
@@ -57,6 +60,7 @@ struct TodoEditPage {
 
     // 检查是否为编辑已有待办
     const todoId = AppStorage.get<number>('pendingTodoId') ?? 0;
+    AppStorage.setOrCreate<number>('pendingTodoId', 0);
     if (todoId > 0) {
       const loaded = await EventDb.getById(ctx, todoId);
       if (loaded !== null) {
@@ -75,6 +79,8 @@ struct TodoEditPage {
             this.dueHour = d.getHours();
             this.dueMinute = d.getMinutes();
           }
+        } else {
+          this.hasDueDate = false;
         }
 
         this.reminderList = loaded.reminders.length > 0 ? loaded.reminders : (loaded.reminder !== 0 ? [loaded.reminder] : []);
@@ -86,7 +92,66 @@ struct TodoEditPage {
         this.rrule = loaded.rrule;
         this.repeatMode = this.modeFromRrule(loaded.rrule);
       }
+    } else {
+      // 新建待办：截止时间默认打开，默认选择今天，默认提醒为到期时(-1)
+      this.hasDueDate = true;
+      this.dueDateMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      this.reminderList = [-1];
+
+      // 检查是否有草稿转换传入（从日程编辑页切换过来）
+      const draft: DraftTransfer | undefined = AppStorage.get<DraftTransfer>('editDraftTransfer');
+      if (draft !== undefined && draft !== null) {
+        AppStorage.setOrCreate<DraftTransfer | null>('editDraftTransfer', null);
+        this.title = draft.title;
+        this.smartInput = draft.smartInput;
+        this.description = draft.description;
+        if (draft.chosenKey !== '') {
+          this.chosenKey = draft.chosenKey;
+        }
+        if (draft.repeatMode !== '') {
+          this.repeatMode = draft.repeatMode;
+        }
+        if (draft.reminders.length > 0) {
+          this.reminderList = draft.reminders;
+        }
+        if (draft.startTime > 0) {
+          this.hasDueDate = true;
+          const d = new Date(draft.startTime);
+          this.dueDateMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+          if (!draft.allDay) {
+            this.hasSpecificTime = true;
+            this.dueHour = d.getHours();
+            this.dueMinute = d.getMinutes();
+          } else {
+            this.hasSpecificTime = false;
+          }
+        }
+      }
     }
+  }
+
+  /** 判断当前快捷截止日期是否处于选中状态（增加颜色提示） */
+  private isQuickDateActive(type: string): boolean {
+    if (!this.hasDueDate) {
+      return false;
+    }
+    const now = new Date();
+    const todayZero = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if (type === 'today') {
+      return this.dueDateMs === todayZero;
+    }
+    if (type === 'tomorrow') {
+      return this.dueDateMs === todayZero + 86400000;
+    }
+    if (type === 'after_tomorrow') {
+      return this.dueDateMs === todayZero + 86400000 * 2;
+    }
+    if (type === 'weekend') {
+      const day = now.getDay();
+      const diff = (6 - day + 7) % 7 || 7; // 周六
+      return this.dueDateMs === todayZero + 86400000 * diff;
+    }
+    return false;
   }
 
   /** 加载可用日历清单 */
@@ -218,7 +283,8 @@ struct TodoEditPage {
     }
     const trimmedTitle = this.title.trim();
     if (trimmedTitle === '') {
-      this.getUIContext().getPromptAction().showToast({ message: '请输入待办事项内容' });
+      this.errorField = 'title';
+      this.getUIContext().getPromptAction().showToast({ message: '请填写待办内容后再保存' });
       return;
     }
     const ctx = this.getUIContext().getHostContext();
@@ -292,6 +358,11 @@ struct TodoEditPage {
         await ReminderService.refreshReminders(ctx as common.UIAbilityContext);
       } catch (err) {}
 
+      // 联动刷新桌面及副屏小组件
+      try {
+        await CardDataService.pushToAllForms(ctx);
+      } catch (err) {}
+
       // 后台触发 CalDAV 实时推送
       this.triggerPush(ctx, targetHref);
 
@@ -300,6 +371,50 @@ struct TodoEditPage {
     } catch (err) {
       this.getUIContext().getPromptAction().showToast({ message: `保存失败: ${(err as Error).message}` });
       this.isSaving = false;
+    }
+  }
+
+  /** 转换为日程 */
+  private askConvertToEvent(): void {
+    if (!this.isExisting || this.original === null || this.original.id <= 0 || this.isSaving) {
+      return;
+    }
+    const label: string = this.title.trim() === '' ? '该待办事项' : `「${this.title.trim()}」`;
+    this.getUIContext().showAlertDialog({
+      title: '转换为日程',
+      message: `确定要将${label}转换为日程吗？\n\n转换后该项将显示在日历与日程视图中。`,
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '确定转换',
+        fontColor: $r('app.color.brand'),
+        action: () => {
+          this.doConvertToEvent(this.original!.id);
+        }
+      }
+    });
+  }
+
+  private async doConvertToEvent(id: number): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    this.isSaving = true;
+    const ok = await CalendarDataService.convertTodoToEvent(ctx, id);
+    if (ok) {
+      try {
+        await CardDataService.pushToAllForms(ctx);
+      } catch (err) {}
+      this.getUIContext().getPromptAction().showToast({ message: '已成功转换为日程' });
+      router.back();
+    } else {
+      this.isSaving = false;
+      this.getUIContext().getPromptAction().showToast({ message: '转换失败' });
     }
   }
 
@@ -325,6 +440,9 @@ struct TodoEditPage {
           if (ctx !== undefined && this.original !== null) {
             await EventDb.markDeleted(ctx, this.original.id);
             this.triggerPush(ctx, this.original.href);
+            try {
+              await CardDataService.pushToAllForms(ctx);
+            } catch (err) {}
             this.getUIContext().getPromptAction().showToast({ message: '待办已删除' });
             router.back();
           }
@@ -333,14 +451,24 @@ struct TodoEditPage {
     });
   }
 
+  /**
+   * 页面转场：淡入淡出（与 EventEditPage 保持一致，无跳动感）。
+   */
+  pageTransition() {
+    PageTransitionEnter({ type: RouteType.None, duration: 300, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+    PageTransitionExit({ type: RouteType.None, duration: 250, curve: curves.springMotion(0.35, 0.75) })
+      .opacity(0);
+  }
+
   build() {
-    Column() {
-      // 顶部导航栏
-      Row() {
+    Column({ space: 14 }) {
+      // 顶部导航栏（与日程编辑页左右、高度、按钮完全对齐）
+      Row({ space: 6 }) {
         Text('取消')
           .fontSize(16)
-          .fontColor($r('app.color.text_secondary'))
-          .padding({ left: 4, right: 8, top: 4, bottom: 4 })
+          .fontColor($r('app.color.brand'))
+          .padding({ left: 4, right: 4, top: 8, bottom: 8 })
           .onClick(() => {
             router.back();
           })
@@ -361,6 +489,28 @@ struct TodoEditPage {
               .borderRadius(14)
               .padding({ left: 14, right: 14, top: 5, bottom: 5 })
               .onClick(() => {
+                const draft = new DraftTransfer();
+                draft.title = this.title;
+                draft.smartInput = this.smartInput;
+                draft.description = this.description;
+                let finalStart = 0;
+                let isAllDay = true;
+                if (this.hasDueDate) {
+                  if (this.hasSpecificTime) {
+                    finalStart = this.dueDateMs + this.dueHour * 3600000 + this.dueMinute * 60000;
+                    isAllDay = false;
+                  } else {
+                    finalStart = this.dueDateMs;
+                    isAllDay = true;
+                  }
+                }
+                draft.startTime = finalStart;
+                draft.endTime = finalStart > 0 ? (isAllDay ? finalStart + 86400000 - 1000 : finalStart + 3600000) : 0;
+                draft.allDay = isAllDay;
+                draft.chosenKey = this.chosenKey;
+                draft.reminders = this.reminderList;
+                draft.repeatMode = this.repeatMode;
+                AppStorage.setOrCreate<DraftTransfer>('editDraftTransfer', draft);
                 router.replaceUrl({ url: 'pages/EventEditPage' });
               })
             Text('待办')
@@ -378,36 +528,31 @@ struct TodoEditPage {
 
         Blank()
 
-        Button(this.isSaving ? '保存中' : '保存')
-          .height(32)
-          .fontSize(14)
+        Text('保存')
+          .fontSize(16)
+          .fontColor(this.isSaving ? $r('app.color.text_hint') : $r('app.color.brand'))
           .fontWeight(FontWeight.Medium)
-          .backgroundColor($r('app.color.brand'))
-          .borderRadius(16)
-          .padding({ left: 16, right: 16 })
-          .enabled(!this.isSaving)
+          .padding({ left: 4, right: 4, top: 8, bottom: 8 })
           .onClick(() => {
             this.save();
           })
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      .padding({ left: 16, right: 16 })
 
       // 表单滚动区
       Scroll() {
-        Column({ space: 14 }) {
-          // ⚡ 智能解析条（仅新建待办时展示）
+        Column({ space: 8 }) {
+          // ⚡ 智能解析条（仅新建待办时展示，与日程编辑页样式统一）
           if (!this.isExisting) {
             Row({ space: 8 }) {
-              Text('⚡')
-                .fontSize(14)
-              TextInput({ text: this.smartInput, placeholder: '粘贴自然语言，如：明天下午3点提交报销' })
+              TextInput({ text: this.smartInput, placeholder: '⚡ 粘贴整句智能识别，如：明天下午3点提交报销' })
                 .layoutWeight(1)
-                .height(36)
+                .height(40)
                 .fontSize(13)
                 .backgroundColor(Color.Transparent)
-                .fontColor($r('app.color.text_primary'))
                 .placeholderColor($r('app.color.text_hint'))
+                .fontColor($r('app.color.text_primary'))
                 .onChange((v: string) => {
                   this.smartInput = v;
                 })
@@ -415,57 +560,61 @@ struct TodoEditPage {
                   this.applySmartParse();
                 })
 
-              Button('解析')
-                .height(28)
+              Button('智能解析')
                 .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.button_text'))
                 .backgroundColor($r('app.color.brand'))
-                .borderRadius(14)
+                .height(32)
+                .borderRadius(8)
                 .padding({ left: 10, right: 10 })
                 .onClick(() => {
                   this.applySmartParse();
                 })
             }
             .width('100%')
-            .padding({ left: 12, right: 10, top: 4, bottom: 4 })
+            .padding({ left: 10, right: 8, top: 4, bottom: 4 })
             .borderRadius(10)
-            .backgroundColor($r('app.color.chip_off_bg'))
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 1, color: $r('app.color.shadow_color') })
           }
 
-          // 待办标题卡片
-          Column() {
-            TextInput({ text: this.title, placeholder: '准备做什么？' })
+          // 待办标题卡片（高度与视觉与日程输入框对齐）
+          TextInput({ text: this.title, placeholder: '准备做什么？（必填）' })
+            .height(46)
+            .fontSize(16)
+            .backgroundColor($r('app.color.card_bg'))
+            .borderRadius(12)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_hint'))
+            .caretColor($r('app.color.brand'))
+            .padding({ left: 14, right: 14 })
+            .border({
+              width: this.errorField === 'title' ? 1.5 : 0,
+              color: $r('app.color.error')
+            })
+            .onChange((v: string) => {
+              this.title = v;
+              if (v.trim() !== '' && this.errorField === 'title') {
+                this.errorField = '';
+              }
+            })
+
+          if (this.errorField === 'title') {
+            Text('请填写待办内容后再保存')
+              .fontSize(12)
+              .fontColor($r('app.color.error'))
               .width('100%')
-              .fontSize(17)
-              .fontWeight(FontWeight.Medium)
-              .backgroundColor(Color.Transparent)
-              .fontColor($r('app.color.text_primary'))
-              .placeholderColor($r('app.color.text_hint'))
-              .onChange((v: string) => {
-                this.title = v;
-              })
+              .padding({ left: 4 })
           }
-          .width('100%')
-          .padding(14)
-          .borderRadius(12)
-          .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
 
           // 截止时间卡片（具体的时间）
-          Column({ space: 12 }) {
+          Column({ space: 8 }) {
             Row() {
-              Column({ space: 2 }) {
-                Text('截止时间')
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.text_primary'))
-                Text(this.hasDueDate ? (this.hasSpecificTime ? '精确到时分' : '全天') : '未设置截止时间')
-                  .fontSize(12)
-                  .fontColor($r('app.color.text_secondary'))
-              }
-              .alignItems(HorizontalAlign.Start)
-
+              Text('截止时间')
+                .fontSize(14)
+                .fontColor($r('app.color.text_secondary'))
               Blank()
-
               Toggle({ type: ToggleType.Switch, isOn: this.hasDueDate })
                 .selectedColor($r('app.color.brand'))
                 .onChange((isOn: boolean) => {
@@ -477,34 +626,34 @@ struct TodoEditPage {
             if (this.hasDueDate) {
               Divider().color($r('app.color.shadow_color'))
 
-              // 快捷日期选择
+              // 快捷日期选择（当选择今天、明天、后天时，增加颜色提示）
               Row({ space: 8 }) {
                 Button('今天')
                   .fontSize(12)
                   .height(28)
-                  .backgroundColor($r('app.color.chip_off_bg'))
-                  .fontColor($r('app.color.text_primary'))
+                  .backgroundColor(this.isQuickDateActive('today') ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                  .fontColor(this.isQuickDateActive('today') ? $r('app.color.button_text') : $r('app.color.text_primary'))
                   .borderRadius(14)
                   .onClick(() => { this.setQuickDate('today'); })
                 Button('明天')
                   .fontSize(12)
                   .height(28)
-                  .backgroundColor($r('app.color.chip_off_bg'))
-                  .fontColor($r('app.color.text_primary'))
+                  .backgroundColor(this.isQuickDateActive('tomorrow') ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                  .fontColor(this.isQuickDateActive('tomorrow') ? $r('app.color.button_text') : $r('app.color.text_primary'))
                   .borderRadius(14)
                   .onClick(() => { this.setQuickDate('tomorrow'); })
                 Button('后天')
                   .fontSize(12)
                   .height(28)
-                  .backgroundColor($r('app.color.chip_off_bg'))
-                  .fontColor($r('app.color.text_primary'))
+                  .backgroundColor(this.isQuickDateActive('after_tomorrow') ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                  .fontColor(this.isQuickDateActive('after_tomorrow') ? $r('app.color.button_text') : $r('app.color.text_primary'))
                   .borderRadius(14)
                   .onClick(() => { this.setQuickDate('after_tomorrow'); })
                 Button('本周末')
                   .fontSize(12)
                   .height(28)
-                  .backgroundColor($r('app.color.chip_off_bg'))
-                  .fontColor($r('app.color.text_primary'))
+                  .backgroundColor(this.isQuickDateActive('weekend') ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                  .fontColor(this.isQuickDateActive('weekend') ? $r('app.color.button_text') : $r('app.color.text_primary'))
                   .borderRadius(14)
                   .onClick(() => { this.setQuickDate('weekend'); })
               }
@@ -528,7 +677,7 @@ struct TodoEditPage {
               .padding({ top: 4, bottom: 4 })
               .onClick(() => {
                 const cur = new Date(this.dueDateMs);
-                DatePickerDialog.show({
+                this.getUIContext().showDatePickerDialog({
                   start: new Date(2020, 0, 1),
                   end: new Date(2035, 11, 31),
                   selected: cur,
@@ -572,7 +721,7 @@ struct TodoEditPage {
                 .width('100%')
                 .padding({ top: 4, bottom: 4 })
                 .onClick(() => {
-                  TimePickerDialog.show({
+                  this.getUIContext().showTimePickerDialog({
                     selected: new Date(2026, 0, 1, this.dueHour, this.dueMinute),
                     useMilitaryTime: true,
                     onAccept: (val: TimePickerResult) => {
@@ -587,178 +736,173 @@ struct TodoEditPage {
             }
           }
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
 
-          // 提醒功能卡片
-          Column({ space: 10 }) {
-            Row() {
-              Text('提醒')
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_primary'))
-              Blank()
-              Text(this.reminderList.length === 0 ? '不提醒' : `已设 ${this.reminderList.length} 项提醒`)
-                .fontSize(12)
-                .fontColor($r('app.color.text_secondary'))
-            }
-            .width('100%')
+          // 重复功能卡片（显示到一行，顺序与日程编辑页统一）
+          Column({ space: 6 }) {
+            Text('重复')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
 
-            Flex({ wrap: FlexWrap.Wrap, space: { main: { value: 8, unit: 1 }, cross: { value: 8, unit: 1 } } }) {
-              this.reminderChip(0, '不提醒')
-              this.reminderChip(-1, '到期时')
-              this.reminderChip(5, '提前5分钟')
-              this.customReminderChip()
-              this.reminderChip(1440, '提前1天')
-            }
-            .width('100%')
-          }
-          .width('100%')
-          .padding(14)
-          .borderRadius(12)
-          .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
-
-          // 重复功能卡片
-          Column({ space: 10 }) {
-            Row() {
-              Text('重复')
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_primary'))
-              Blank()
-              Text(this.repeatLabel(this.repeatMode))
-                .fontSize(12)
-                .fontColor($r('app.color.text_secondary'))
-            }
-            .width('100%')
-
-            Flex({ wrap: FlexWrap.Wrap, space: { main: { value: 8, unit: 1 }, cross: { value: 8, unit: 1 } } }) {
-              this.repeatChip('none', '不重复')
-              this.repeatChip('daily', '每天')
-              this.repeatChip('workday', '工作日')
-              this.repeatChip('weekly', '每周')
-              this.repeatChip('monthly', '每月')
-              this.repeatChip('yearly', '每年')
-              if (this.repeatMode === 'custom') {
-                this.repeatChip('custom', '自定义')
+            Scroll() {
+              Row({ space: 8 }) {
+                this.repeatChip('none', '不重复')
+                this.repeatChip('daily', '每天')
+                this.repeatChip('workday', '工作日')
+                this.repeatChip('weekly', '每周')
+                this.repeatChip('monthly', '每月')
+                this.repeatChip('yearly', '每年')
+                if (this.repeatMode === 'custom') {
+                  this.repeatChip('custom', '自定义')
+                }
               }
             }
+            .scrollable(ScrollDirection.Horizontal)
+            .scrollBar(BarState.Off)
             .width('100%')
           }
+          .alignItems(HorizontalAlign.Start)
           .width('100%')
-          .padding(14)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
 
-          // 所属日历本卡片
-          if (this.books.length > 0) {
-            Column({ space: 10 }) {
-              Row() {
-                Text('日历本')
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.text_primary'))
-                Blank()
-                Row({ space: 6 }) {
-                  Circle()
-                    .width(10)
-                    .height(10)
-                    .fill(this.chosenBookColor())
-                  Text(this.chosenBookName())
-                    .fontSize(14)
-                    .fontColor($r('app.color.text_primary'))
-                }
+          // 提醒功能卡片（显示到一行，顺序与日程编辑页统一）
+          Column({ space: 6 }) {
+            Text('提醒（可多选）')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+
+            Scroll() {
+              Row({ space: 8 }) {
+                this.reminderChip(0, '不提醒')
+                this.reminderChip(-1, '到期时')
+                this.reminderChip(5, '提前5分钟')
+                this.customReminderChip()
+                this.reminderChip(1440, '提前1天')
+              }
+            }
+            .scrollable(ScrollDirection.Horizontal)
+            .scrollBar(BarState.Off)
+            .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
+
+          // 所属日历本卡片（采用与日程编辑页相同的两列等宽48%卡片，风格完全统一）
+          Column({ space: 8 }) {
+            Row({ space: 6 }) {
+              Text('日历本')
+                .fontSize(14)
+                .fontColor($r('app.color.text_secondary'))
+              Text('同步到 CalDAV')
+                .fontSize(11)
+                .fontColor($r('app.color.text_hint'))
+            }
+            .width('100%')
+
+            if (this.books.length === 0) {
+              Text('没有可写入的 CalDAV 日历本。请先到「更多 → 账号管理」添加账号；'
+                + '这条待办需要同步到服务器。')
+                .fontSize(12)
+                .fontColor($r('app.color.error'))
+                .width('100%')
+            } else {
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                ForEach(this.books, (b: TodoBookChoice) => {
+                  Row({ space: 6 }) {
+                    Circle().width(8).height(8).fill(b.color)
+                    Text(b.name)
+                      .fontSize(12)
+                      .layoutWeight(1)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .fontColor(this.chosenKey === b.calKey
+                        ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                  }
+                  .width('48%')
+                  .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                  .borderRadius(14)
+                  .margin({ bottom: 8 })
+                  .backgroundColor(this.chosenKey === b.calKey ? b.color : $r('app.color.chip_off_bg'))
+                  .onClick(() => {
+                    this.chosenKey = b.calKey;
+                  })
+                }, (b: TodoBookChoice) => b.calKey)
               }
               .width('100%')
-
-              if (this.books.length > 1) {
-                Flex({ wrap: FlexWrap.Wrap, space: { main: { value: 8, unit: 1 }, cross: { value: 8, unit: 1 } } }) {
-                  ForEach(this.books, (b: TodoBookChoice) => {
-                    Row({ space: 4 }) {
-                      Circle().width(8).height(8).fill(b.color)
-                      Text(b.name)
-                        .fontSize(12)
-                        .fontColor(this.chosenKey === b.calKey ? $r('app.color.brand') : $r('app.color.text_secondary'))
-                    }
-                    .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                    .borderRadius(14)
-                    .backgroundColor(this.chosenKey === b.calKey ? Color.Transparent : $r('app.color.chip_off_bg'))
-                    .border({ width: 1, color: this.chosenKey === b.calKey ? $r('app.color.brand') : Color.Transparent })
-                    .onClick(() => {
-                      this.chosenKey = b.calKey;
-                    })
-                  })
-                }
-                .width('100%')
-              }
             }
-            .width('100%')
-            .padding(14)
-            .borderRadius(12)
-            .backgroundColor($r('app.color.card_bg'))
-            .border({ width: 1, color: $r('app.color.shadow_color') })
           }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+          .borderRadius(12)
+          .backgroundColor($r('app.color.card_bg'))
 
-          // 详细描述卡片
-          Column({ space: 8 }) {
-            Text('详细描述')
+          // 备注
+          TextArea({ text: this.description, placeholder: '备注（可选）' })
+            .height(90)
+            .fontSize(14)
+            .backgroundColor($r('app.color.card_bg'))
+            .borderRadius(12)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_hint'))
+            .caretColor($r('app.color.brand'))
+            .onChange((v: string) => {
+              this.description = v;
+            })
+
+          // 编辑已有待办时的转换为日程按钮
+          if (this.isExisting) {
+            Button('转换为日程')
               .fontSize(15)
               .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.text_primary'))
-            TextArea({ text: this.description, placeholder: '添加待办事项的详细说明、备忘要点…' })
+              .fontColor($r('app.color.brand'))
+              .backgroundColor($r('app.color.chip_off_bg'))
               .width('100%')
-              .height(100)
-              .fontSize(14)
-              .backgroundColor(Color.Transparent)
-              .fontColor($r('app.color.text_primary'))
-              .placeholderColor($r('app.color.text_hint'))
-              .onChange((v: string) => {
-                this.description = v;
+              .height(44)
+              .borderRadius(12)
+              .enabled(!this.isSaving)
+              .onClick(() => {
+                this.askConvertToEvent();
               })
           }
-          .width('100%')
-          .padding(14)
-          .borderRadius(12)
-          .backgroundColor($r('app.color.card_bg'))
-          .border({ width: 1, color: $r('app.color.shadow_color') })
 
           // 编辑已有待办时的删除按钮
           if (this.isExisting) {
             Button('删除待办事项')
+              .fontSize(15)
+              .fontColor($r('app.color.error'))
+              .backgroundColor($r('app.color.error_bg'))
               .width('100%')
               .height(44)
-              .fontSize(15)
-              .fontWeight(FontWeight.Medium)
-              .fontColor('#E64545')
-              .backgroundColor($r('app.color.card_bg'))
-              .borderRadius(22)
-              .border({ width: 1, color: '#E64545' })
-              .margin({ top: 10, bottom: 20 })
+              .borderRadius(12)
+              .enabled(!this.isSaving)
               .onClick(() => {
                 this.askDelete();
               })
           }
         }
         .width('100%')
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: 4, bottom: 40 })
+        .padding({ left: 16, right: 16, bottom: 30 })
+        .constraintSize({ minHeight: '100%' })
       }
       .layoutWeight(1)
       .width('100%')
       .align(Alignment.Top)
-      .scrollBar(BarState.Auto)
+      .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
     }
     .width('100%')
     .height('100%')
-    .justifyContent(FlexAlign.Start)
-    .alignItems(HorizontalAlign.Start)
+    .padding({ top: 12 })
     .backgroundColor($r('app.color.page_bg'))
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .bindSheet($$this.customSheetShow, this.customReminderSheet(), {
       height: 360,
       showClose: false,
