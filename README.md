@@ -2,9 +2,38 @@
 
 一款以**同步为核心**的鸿蒙原生日历应用，基于 HarmonyOS NEXT（ArkTS / Stage 模型）开发。对接标准 CalDAV 服务器（群晖、Nextcloud、Radicale、Baikal 等），让你的日程真正掌握在自己手里——不经过第三方云服务，数据始终同步在你自己的 NAS 上。
 
-- 应用市场送审版本：**0.1.0** ｜ 仓库当前：**0.1.0**（versionCode 10000）
+- 应用市场送审版本：**0.2.0** ｜ 仓库当前：**0.2.0**（versionCode 10200）
 - 官网：<https://synccalendar.yangyq.net> ｜ 问题反馈：<https://feedlite.yangyq.net/?sw=synccalendar>
 - 开源协议：Apache License 2.0
+
+---
+
+## 📝 最近更新
+
+### v0.2.0（2026-11）
+
+**待办（VTODO）从只读升级为完整双向同步**
+- 新增 `TodoService`：新建 / 编辑 / 打勾完成 / 删除待办，全部推送回服务器
+- 打过勾会改写 `STATUS:COMPLETED` + `PERCENT-COMPLETE:100` 并 PUT
+- 修改前先 GET 原始 `.ics`，原地改写而不是整份重建 —— 保留服务器上本应用不认识的属性
+- 日历本按类型区分「日历」与「待办」，待办在专属 Tab 中管理
+
+**同步核心修复（3 项高危）**
+- **删除 404**：`remotePath` 改为保存服务器真实资源文件名。此前一直用
+  `encodeURIComponent(uid) + '.ics'` 去猜，遇到「文件名 ≠ UID」的服务器
+  （如用 `preg_replace` 改名的家书）会 DELETE 到不存在的路径 → 404 → 服务器上删不掉。
+  修复覆盖三条取值链路：REPORT 补拉、etag 未变的复用路径、以及 unchanged 分支的存量回填。
+- **防复活**：`applyRemote` 增加 `dirtyKeyed` / `dirtyDeletedUids` 白名单。
+  此前只把 dirty 行排除出索引，远端数据查不到就走"新增"分支又插一行，
+  导致同一事件出现两条、或"删了又回来"。
+- **404/410 物理清库**：删除请求返回 404/410 时视为服务器上已不存在，
+  继续清理本地行而不是直接 return —— 否则用户会看到"怎么删都删不掉"的日程。
+
+**反馈渠道迁移**
+- 从自建 PHP 论坛迁至多软件共用的 **FeedLite**，按软件分栏管理
+
+### v0.1.0（首个送审版本）
+- CalDAV 全链路同步、月/周/列表视图、重复日程展开、系统日历镜像、桌面卡片、后台上层同步
 
 ---
 
@@ -15,7 +44,10 @@
 - 完整协议链路：**PROPFIND** 发现日历本 → **REPORT** 全量拉取 → **ETag** 增量比对 → **PUT / DELETE** 双向推送
 - 一个账号可挂载多个日历本，按需勾选同步范围；支持在线编辑账号、重选日历本、删除账号
 - 解析 **VEVENT / VTODO / VALARM / RRULE / EXDATE / RECURRENCE-ID**，重复日程的**单次覆盖实例**也能正确还原
-- 支持 VTODO 待办同步（只读展示，不参与推送）
+- 完整 **VTODO 待办**支持：新建 / 编辑 / 打勾完成 / 删除，均可双向推送回服务器
+  - 待办与日程分列：日历本按类型区分「日历」与「待办」，待办在专属 Tab 中管理
+  - 打勾完成会改写 `STATUS:COMPLETED` + `PERCENT-COMPLETE:100` 并 PUT 回服务器
+  - 修改时先 GET 原始 `.ics` 再原地改写，保留服务器上本应用不认识的属性
 - 「重建日程数据」可强制整表重拉，用于修复提醒丢失等本地数据问题
 
 ### 日历视图与交互
@@ -82,7 +114,27 @@
 
 ### 设置项一览
 
-系统日历处理方式（仅显示 / 备份到 CalDAV）· 镜像到系统日历 · 选择要镜像的日历本 · 回写开关 · 默认视图 · 日程显示方式 · 自动同步间隔 · 后台自动同步 · 通知权限 · 混合显示系统日历 · 日历本只读 / 静音 · 重建日程数据 · 重置账号库 · 软件特性 · 使用帮助 · 隐私政策与用户协议
+**系统日历**
+- 镜像到系统日历（含「选择要镜像的日历本」）
+- 把系统日历的改动回写
+- 系统日历中的显示名称（三种命名格式可选）
+- 混合显示系统日历（关闭后只显示 DAV 账号的日程）
+- 清除系统日历数据（卸载前清理镜像数据，防止残留孤儿账户）
+
+**通用**
+- 默认视图（月 / 周 / 列表）
+- 日程显示方式（竖向时间轴 / 列表）
+- 自动同步间隔（1 / 5 / 15 / 30 分钟）
+- 后台自动同步
+- 通知权限
+
+**数据**
+- 重建日程数据（强制整表重拉）
+- 重置账号库
+- 日历本只读 / 静音（逐本设置）
+
+**关于**
+- 软件特性 · 使用帮助 · 问题反馈 · 隐私政策与用户协议
 
 ---
 
@@ -111,7 +163,81 @@
 - **权限**：INTERNET / READ_CALENDAR / READ_WHOLE_CALENDAR / WRITE_CALENDAR（仅镜像）/ PUBLISH_AGENT_REMINDER
   - ⚠️ **LOCATION 已于 0.1.0 移除**：`geoLocationManager.getAddressesFromLocationName`（地址→坐标）无 @permission 标注，地理编码不需要定位权限；应用也从不调用 `getCurrentLocation`。
     隐私政策/隐私标签里**不得**再声称读取位置。
-  - ⚠️ **READ_WHOLE_CALENDAR 是受限权限**：用于读取系统日历中非本应用创建的日程以实现混合展示。上架时需在 AGC 单独申请 ACL 并说明用途，否则审核不通过。
+
+## 🔐 权限清单与用途
+
+| 权限 | 类型 | 用途 | 何时申请 |
+|---|---|---|---|
+| `ohos.permission.INTERNET` | 系统授权 | 访问你填写的 CalDAV 服务器 | 安装即授予 |
+| `ohos.permission.READ_CALENDAR` | user_grant | 读取本应用写入系统日历的日程 | 打开「混合显示」时 |
+| `ohos.permission.READ_WHOLE_CALENDAR` | **受限（需 ACL）** | 读取系统日历中**非本应用创建**的日程，实现混合展示 | 同上 |
+| `ohos.permission.WRITE_CALENDAR` | user_grant | 把 CalDAV 日历本镜像到系统日历 | 开启「镜像到系统日历」时 |
+| `ohos.permission.PUBLISH_AGENT_REMINDER` | 系统授权 | 发送日程提醒通知 | 保存带提醒的日程时 |
+
+> 所有 user_grant 权限都**只在用户主动操作对应功能时**才弹窗，启动 / 首启 / 同意隐私政策时一律不申请。
+> 拒绝后功能默认关闭，可随时在系统设置或本应用设置页重新开启。
+
+---
+
+## 🔑 自行编译并上架：权限要怎么处理
+
+> 如果你 fork 本项目、修改后想上架华为应用市场，**仅修改 `module.json5` 是不够的**。
+> 下面这些权限需要额外动作，否则审核会被驳回、或安装后权限静默失效。
+
+### 一、必须自己去申请的（本项目无法代劳）
+
+以下权限绑定在**华为开发者账号**上，与本仓库代码无关。你必须用自己的账号重新走一遍：
+
+| 权限 | 需要做什么 | 审核周期 | 被拒风险 |
+|---|---|---|---|
+| `READ_WHOLE_CALENDAR` | 在 **AGC → 我的应用 → 权限管理** 提交 **ACL 申请**，说明为什么必须读取非本应用创建的日程 | 数个工作日 ~ 2 周 | 中。用途说明不充分会被驳回 |
+| `PUBLISH_AGENT_REMINDER` | 属受限开放权限，需在 AGC 申请 | 数个工作日 | 低 |
+
+**本项目已获批的 ACL 只对 `bundleName = synccalendar.yangyq.net` 生效。**
+一旦你改了 `bundleName`（几乎必然要改，否则会与本项目冲突），ACL 立即失效，必须用新包名重新申请。
+
+### 二、ACL 是怎么落地的
+
+ACL **不写在 `module.json5` 里**，而是由 AGC 在审核通过后签发进 **签名 Profile（`.p7b`）**。
+
+想确认手上这份 Profile 有没有带 ACL，可以这样查：
+
+```bash
+# 解出 profile 明文（p7b 本质是 PKCS#7 包裹的 JSON）
+openssl smime -verify -inform DER -in your.release.p7b -noverify -out profile.json
+
+# 查看 allowed-acls
+python3 -c "import json;d=json.load(open('profile.json'));print(d.get('acls'))"
+```
+
+正常应输出类似：
+
+```json
+{"allowed-acls": ["ohos.permission.READ_WHOLE_CALENDAR"]}
+```
+
+**若 `acls` 为空或缺失，说明该 Profile 未获批 ACL** —— 此时即使 `module.json5` 声明了权限，
+装到普通用户手机上也会被系统拒绝，功能静默失效。
+
+### 三、不想申请 ACL 怎么办
+
+如果你不想走 ACL 流程（例如只是自用、或嫌审核慢），可以把 `READ_WHOLE_CALENDAR` 从
+`module.json5` 中删掉，代价是：
+
+- 「混合显示系统日历」只能看到**本应用自己写入**的日历（`READ_CALENDAR` 足够）
+- 看不到华为账号自带日历、其他 App 写入的日历
+
+功能仍然可用，只是视图里少了其他来源的日程。这是一种被社区实践过的合规绕行方案。
+
+### 四、其他与审核相关的注意点
+
+- **应用图标**：AGC 要求分层图标的后景图（`background.png`）为 **100% 不透明、无圆角**（规范 7.1.1.4.3）。
+  本项目 `AppScope/resources/base/media/background.png` 已满足；若你要换图，务必重新校验 alpha 通道。
+  另外 `app_icon.png` 目前含透明像素，某些场景（如应用内展示）不受影响，但如要提交商店素材建议先转为不透明。
+- **Demo / 免账号体验**：审核员通常没有你的 CalDAV 账号，无法测试核心功能，这是常见的驳回原因。
+  建议提供一个「一键载入演示数据」入口，或在上架备注中提供测试账号。
+- **隐私政策一致性**：隐私政策里声明的权限、数据流向必须与 `module.json5` 完全一致。
+  本项目已移除 LOCATION，隐私政策中**不得**再出现"读取位置"之类表述。
 
 ### 目录结构
 
