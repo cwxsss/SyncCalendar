@@ -118,7 +118,11 @@ export default class EntryFormAbility extends FormExtensionAbility {
       const localId: number = m !== null ? parseInt(m[1], 10) : 0;
       LogUtil.write(`卡片打勾待办: formId=${formId} localId=${localId} msg=${message}`);
       if (localId > 0) {
-        this.completeTodoFromCard(formId, localId);
+        // onFormEvent 是同步回调，这里异步执行但必须兜住 reject，
+        // 否则未捕获的 Promise 会让进程异常（FormExtension 生命周期只有 10 秒）
+        this.completeTodoFromCard(formId, localId).catch((err: BusinessError): void => {
+          LogUtil.write('卡片打勾未捕获异常: ' + err.message);
+        });
       }
       return;
     }
@@ -153,18 +157,27 @@ export default class EntryFormAbility extends FormExtensionAbility {
    *   FormExtensionAbility 生命周期回调只有 10 秒窗口，
    *   GET+PUT 两步网络在慢网下可能 10 秒以上，卡片会先"卡住不动"再消失，体验很差。
    */
-  private completeTodoFromCard(formId: string, localId: number): void {
-    // ① 乐观移除：立即推送不含该条的列表
-    this.pushDataExcludingTodo(formId, localId);
-    // ② 真正落库 + 推送服务器
-    TodoService.setCompleted(this.context, localId, true).then((ok: boolean): void => {
-      LogUtil.write(`卡片打勾结果: localId=${localId} ${ok ? '成功' : '失败'}`);
-      // ③ 无论成败都推一次真实数据：成功则列表已无该条；失败则该条重新出现
-      this.pushData(formId);
-    }).catch((err: BusinessError): void => {
-      LogUtil.write(`卡片打勾异常: localId=${localId} ${err.message}`);
-      this.pushData(formId);
-    });
+  private async completeTodoFromCard(formId: string, localId: number): Promise<void> {
+    // ⭐ 关键：推给**所有**卡片，不只 formId 这一张。
+    //    原来只推 formId ⇒ 用户在 A 卡片打勾后，B 卡片仍显示那条待办，
+    //    必须在 B 上再点一次才刷新（用户实测反馈）。
+    //    每张卡片是独立实例、各持一份数据，必须逐个 updateForm。
+
+    // ① 乐观移除：所有卡片立即不含该条（先给视觉反馈，不等网络）
+    await CardDataService.pushToAllForms(this.context, localId);
+    // ② 真正落库 + 推送服务器（GET 原 ics → 改写 → PUT）
+    let ok: boolean = false;
+    try {
+      ok = await TodoService.setCompleted(this.context, localId, true);
+      LogUtil.write('卡片打勾结果: localId=' + localId + ' ' + (ok ? '成功' : '失败'));
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write('卡片打勾异常: localId=' + localId + ' ' + e.message);
+    }
+    // ③ 无论成败都再推一次真实数据：
+    //    成功 → 该条已 completed，本就不在未完成列表里，各卡片保持一致
+    //    失败 → 该条重新出现，用户能看出没成功，可重试
+    await CardDataService.pushToAllForms(this.context);
   }
 
   /** 推送"排除某条待办"的卡片数据（乐观更新用，只改卡片视图，不动数据库） */

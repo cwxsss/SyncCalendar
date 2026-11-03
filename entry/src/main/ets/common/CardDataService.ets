@@ -168,7 +168,11 @@ export class CardDataService {
     ev.todoTodayCount = td.todoTodayCount;
   }
 
-  static async pushToAllForms(context: common.Context): Promise<void> {
+  /**
+   * @param excludeTodoId 乐观更新用：临时把该待办从**所有卡片**的列表与计数中排除
+   *                      （只影响卡片显示，不动数据库）。0 表示不排除。
+   */
+  static async pushToAllForms(context: common.Context, excludeTodoId: number = 0): Promise<void> {
     // 先恢复持久化的 formId（App 重启后内存注册表为空）
     await CardDataService.loadPersistedFormIds(context);
     if (CardDataService.formIds.length === 0) {
@@ -177,7 +181,7 @@ export class CardDataService {
     // ⭐ 待办数据与 dayOffset 无关（待办不翻页），只构建一次
     let todoData: CardData | null = null;
     try {
-      todoData = await CardDataService.buildTodoCardData(context);
+      todoData = await CardDataService.buildTodoCardData(context, excludeTodoId);
     } catch (err) {
       console.error(`待办卡片数据构建失败: ${(err as BusinessError).message}`);
     }
