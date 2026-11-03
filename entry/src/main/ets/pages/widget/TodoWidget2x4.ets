@@ -8,6 +8,8 @@ class TodoItem2x4 {
   id: number = 0;
   title: string = '';
   dueText: string = '';
+  /** 副行：截止时间 · 日历本 */
+  subText: string = '';
   color: string = '#007DFF';
   calName: string = '';
   completed: boolean = false;
@@ -78,45 +80,46 @@ struct TodoWidget2x4Card {
     });
   }
 
-  /** 圆形勾选框（未完成状态：空心圆） */
-  @Builder
-  checkbox(id: number) {
-    // 同 4x4：不用 SDK 26 的 Circle().stroke()，改用 border 圆角
-    Column()
-      .width(18)
-      .height(18)
-      .borderRadius(9)
-      .border({ width: 1.5, color: '#B0B0B0' })
-      .backgroundColor(Color.Transparent)
-      .onClick(() => this.checkTodo(id))
-  }
-
   /** 右侧单条待办：勾选框 + 标题 + 截止时间 */
+  /**
+   * 单条待办：与 4×4 / 6×4 同款结构（圆圈用日历本色 + 标题 + 副行），
+   * 尺寸再收一档 —— 2×4 只有 2 格高，圈 16 / 标题 12 / 副行 9。
+   */
   @Builder
   todoRow(item: TodoItem2x4) {
     Row({ space: 6 }) {
-      this.checkbox(item.id)
+      // 勾选圈：颜色用日历本色，点击即完成
+      Row() {
+        Text('')
+          .width(16)
+          .height(16)
+          .borderRadius(8)
+          .border({ width: 2, color: item.color })
+      }
+      .padding({ right: 2 })
+      .onClick(() => {
+        this.checkTodo(item.id);
+      })
+
       Column({ space: 1 }) {
-        // 标题限 1 行：2x4 高度只有 2 格，2 行会让一屏只放得下 1 条多，滑动失去意义
         Text(item.title)
           .fontSize(12)
           .fontColor('#1A1A1A')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text(item.dueText)
+        Text(item.subText)
           .fontSize(9)
-          .fontColor(item.dueText.indexOf('逾期') >= 0 ? '#FF3B30' : '#8A8A8A')
+          .fontColor('#8A8A8A')
           .maxLines(1)
-          .width('100%')
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 2, right: 6, top: 4, bottom: 4 })
-    .borderRadius(8)
+    .padding({ left: 4, right: 8, top: 5, bottom: 5 })
+    .borderRadius(9)
     .backgroundColor('#F5F7FA')
   }
 

@@ -1750,16 +1750,17 @@ struct EventEditPage {
             //    （无需申请 READ_PASTEBOARD —— 那是受限权限，普通应用申请会被拒）
             //
             // ⚠️ icon/text/buttonType **只能走构造参数**，写成链式属性会编译报错。
-            // ⚠️ 不要自定义背景色：SDK 明确把"字体颜色与背景相近"列为样式违规
-            //    （错误码 2），会让人字形灰淡难辨、甚至授权失败。
-            //    交给系统默认样式即可，只调尺寸与圆角。
+            //    文字内容由系统枚举决定（PasteDescription 只有 PASTE 一个值，即「粘贴」）。
+            // 外观与右边的「地图」按钮保持一致：同字号、同色、同底色、同圆角、同高度。
             PasteButton({
-              icon: PasteIconStyle.LINES,
               text: PasteDescription.PASTE,
               buttonType: ButtonType.Capsule
             })
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .backgroundColor($r('app.color.card_bg'))
               .height(44)
-              .padding({ left: 10, right: 14 })
+              .padding({ left: 12, right: 12 })
               .borderRadius(12)
               .onClick(() => {
                 this.pastePlace();

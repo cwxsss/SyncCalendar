@@ -8,6 +8,8 @@ class TodoItem4x4 {
   id: number = 0;
   title: string = '';
   dueText: string = '';
+  /** 副行：截止时间 · 日历本 */
+  subText: string = '';
   color: string = '#007DFF';
   calName: string = '';
   completed: boolean = false;
@@ -83,43 +85,48 @@ struct TodoWidget4x4Card {
       .onClick(() => this.checkTodo(id))
   }
 
-  /** 单条待办：勾选框 + 左色竖条 + 标题/截止时间 + 日历本名 */
+  /**
+   * 单条待办：与 App 内 Index.todoRow 同款结构 ——
+   *   圆圈（颜色跟随日历本）+ 标题 + 副行「截止时间 · 日历本」
+   *
+   * ⚠️ 未完成=空心环、已完成=实心+✓，这套语义与 App 内一致；
+   *    卡片上只显示未完成，所以这里主要是空心环。
+   * ⚠️ 4×4 与 6×4 的 todoRow 必须**完全一致**（用户要求），改一处要同步另一处。
+   */
   @Builder
   todoRow(item: TodoItem4x4) {
     Row({ space: 8 }) {
-      this.checkbox(item.id)
-      Column()
-        .width(3)
-        .height(32)
-        .borderRadius(2)
-        .backgroundColor(item.color)
-      Column({ space: 3 }) {
+      // 勾选圈：颜色用日历本色（与 App 内一致），点击即完成
+      Row() {
+        Text('')
+          .width(18)
+          .height(18)
+          .borderRadius(9)
+          .border({ width: 2, color: item.color })
+      }
+      .padding({ right: 2 })
+      .onClick(() => {
+        this.checkTodo(item.id);
+      })
+
+      Column({ space: 2 }) {
         Text(item.title)
           .fontSize(13)
           .fontColor('#1A1A1A')
-          .maxLines(2)
+          .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Row({ space: 6 }) {
-          Text(item.dueText)
-            .fontSize(10)
-            .fontColor(item.dueText.indexOf('逾期') >= 0 ? '#FF3B30' : '#8A8A8A')
-            .maxLines(1)
-          if (item.calName !== '') {
-            Text(item.calName)
-              .fontSize(10)
-              .fontColor(item.color)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .constraintSize({ maxWidth: '55%' })
-          }
-        }
+        Text(item.subText)
+          .fontSize(10)
+          .fontColor('#8A8A8A')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 4, right: 10, top: 6, bottom: 6 })
+    .padding({ left: 6, right: 8, top: 6, bottom: 6 })
     .borderRadius(10)
     .backgroundColor('#F5F7FA')
   }

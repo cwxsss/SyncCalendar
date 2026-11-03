@@ -43,6 +43,11 @@ export class TodoCardItem {
   title: string = '';
   /** 截止时间文字：'今天 18:00' / '明天' / '无日期' */
   dueText: string = '';
+  /**
+   * 副行文字：截止时间 · 日历本（与 App 内 todoSubtitle 同款呈现）。
+   * 在数据侧拼好，卡片侧直接显示，避免各卡片各拼一遍导致不一致。
+   */
+  subText: string = '';
   color: string = '#007DFF';
   calName: string = '';
   /** 是否已完成（已完成的不出现在待办卡片列表里，此字段留作扩展） */
@@ -521,6 +526,8 @@ export class CardDataService {
             it.dueText = `${due.getMonth() + 1}/${due.getDate()}${timePart}`;
           }
         }
+        // 副行：截止时间 · 日历本（本名为空时只显示截止时间）
+        it.subText = it.calName !== '' ? `${it.dueText} · ${it.calName}` : it.dueText;
         items.push(it);
       }
 
