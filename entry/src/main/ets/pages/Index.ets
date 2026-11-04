@@ -3034,6 +3034,12 @@ struct Index {
         }
         .width('100%')
 
+        // ⭐ 中间字段区可滚动（#46）：原来整块 Column 直接铺开，
+        //    字段一多就顶出屏幕且滑不动 → 底部按钮点不到。
+        //    这里参照新建日程页：固定头 + Scroll 承载字段 + 固定底部按钮。
+        Scroll() {
+          Column({ space: 12 }) {
+
         // 日历本区：新建时**铺开全部可写本供选择**（与新建日程一致的交互），
         // 编辑时只读显示归属本（改归属等于搬家，不支持原地改）
         if (this.todoCreating) {
@@ -3358,6 +3364,15 @@ struct Index {
             this.todoEditDesc = v;
           })
 
+          }
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .align(Alignment.Top)
+
+        // 底部按钮固定在 Scroll 之外，滚动时始终可见（#46）
         Row({ space: 10 }) {
           Button('取消')
             .layoutWeight(1)
@@ -3382,6 +3397,8 @@ struct Index {
         .width('100%')
       }
       .width('100%')
+      // ⭐ 高度上限 88%（#46）：内容少时自动收缩，内容多时不再顶出屏幕
+      .constraintSize({ maxHeight: '88%' })
       .padding(18)
       .borderRadius({ topLeft: 18, topRight: 18 })
       .backgroundColor($r('app.color.card_bg'))
