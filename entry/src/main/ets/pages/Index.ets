@@ -44,6 +44,35 @@ class MonthCell {
  * 用 class 而不是 Map/匿名对象：ArkUI 的 ForEach 需要稳定结构，
  * 用带类型的类更不容易在 ArkTS 严格模式下出错。
  */
+/**
+ * 待办列表的扁平行。
+ *
+ * 为什么需要：ListItemGroup 会把剩余空间按比例再分给组内 ListItem，
+ * 导致行高无法由内容决定（实测不设高度=176px，设 height(96) 反而=300px）。
+ * 改用扁平 List 后，必须把「大标题 / 分组头 / 条目」摊平成一维数组，
+ * 由这个类承载每行的角色。
+ */
+class TodoFlatRow {
+  /** caption=大标题（未完成/已完成） header=分组头 item=待办条目 */
+  role: string = '';
+  text: string = '';
+  group: TodoGroup | undefined = undefined;
+  event: DisplayEvent | undefined = undefined;
+  /** 大标题额外上边距（"已完成"前留白） */
+  extraTop: number = 0;
+
+  /** ForEach key：各角色用各自稳定标识，避免刷新时错位 */
+  keyOf(idx: number): string {
+    if (this.role === 'item' && this.event !== undefined) {
+      return `i${this.event.id}_${this.event.completed}`;
+    }
+    if (this.role === 'header' && this.group !== undefined) {
+      return `h${this.group.calKey}`;
+    }
+    return `c${idx}`;
+  }
+}
+
 class TodoGroup {
   calKey: string = '';
   name: string = '';
@@ -2672,64 +2701,90 @@ struct Index {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
-  /** 待办页：与日历视图完全分开，只读展示服务器端 VTODO */
-  @Builder
-  // ⭐ TODO_GROUPED 待办视图：未完成 / 已完成 两大段，段内再按**日历本**分组。
-  //    用户要求"按日历本分类显示，未完成里也能按家庭、生活分开，要有区分度"。
-  //    分组标题前带该本的颜色圆点 —— 这才是"区分度"的来源。
-  todoBody() {
-    // ⭐ 外层由 Scroll 改为 List：`swipeAction` 只能挂在 ListItem 上，
-    //    而 ListItem 必须是 List 的直接子节点（#39 左滑删除）。
-    //    分组用 ListItemGroup 实现 —— 它天生支持分组头，正好放"色点 + 本名 + 条数"。
-    List({ space: 6 }) {
-      ListItem() {
-        Text(`未完成（${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length}）`)
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
+  /**
+   * 待办列表的扁平行（摊平后渲染）。
+   *
+   * ⚠️ 这是**普通方法**，不能挂 @Builder —— 里面是普通语句（new/赋值/循环），
+   *    @Builder 内只允许 UI 组件语法。
+   */
+  private todoFlatRows(): TodoFlatRow[] {
+    const rows: TodoFlatRow[] = [];
+    const undone: TodoGroup[] = this.todoGroups(false);
+    const r0 = new TodoFlatRow();
+    r0.role = 'caption';
+    r0.text = `未完成（${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length}）`;
+    rows.push(r0);
+    for (const g of undone) {
+      const rh = new TodoFlatRow();
+      rh.role = 'header';
+      rh.group = g;
+      rows.push(rh);
+      for (const t of g.items) {
+        const rt = new TodoFlatRow();
+        rt.role = 'item';
+        rt.event = t;
+        rows.push(rt);
       }
-      .width('100%')
-
-      ForEach(this.todoGroups(false), (g: TodoGroup) => {
-        ListItemGroup({ header: this.todoGroupHeader(g) }) {
-          ForEach(g.items, (t: DisplayEvent) => {
-            ListItem() {
-              this.todoRow(t)
-            }
-            .width('100%')
-            .swipeAction({ end: this.todoSwipeDelete(t) })
-          }, (t: DisplayEvent) => `u${t.id}_${t.completed}`)
+    }
+    if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+      const r1 = new TodoFlatRow();
+      r1.role = 'caption';
+      r1.text = `已完成（${this.todos.filter((t: DisplayEvent): boolean => t.completed).length}）`;
+      r1.extraTop = 10;
+      rows.push(r1);
+      for (const g of this.todoGroups(true)) {
+        const rh = new TodoFlatRow();
+        rh.role = 'header';
+        rh.group = g;
+        rows.push(rh);
+        for (const t of g.items) {
+          const rt = new TodoFlatRow();
+          rt.role = 'item';
+          rt.event = t;
+          rows.push(rt);
         }
-        .width('100%')
-      }, (g: TodoGroup) => `g0_${g.calKey}`)
+      }
+    }
+    return rows;
+  }
 
-      if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
-        ListItem() {
-          Text(`已完成（${this.todos.filter((t: DisplayEvent): boolean => t.completed).length}）`)
-            .fontSize(13)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-            .margin({ top: 10 })
-        }
-        .width('100%')
-
-        ForEach(this.todoGroups(true), (g: TodoGroup) => {
-          ListItemGroup({ header: this.todoGroupHeader(g) }) {
-            ForEach(g.items, (t: DisplayEvent) => {
-              ListItem() {
-                this.todoRow(t)
-              }
+  @Builder
+  todoBody() {
+    // ⭐ 用扁平 List 而非 ListItemGroup：
+    //    ListItemGroup 会把剩余空间按比例再分给组内 ListItem，
+    //    实测「不设高度=176px、设 height(96)=300px」（越限越高），
+    //    无法得到"由内容决定"的行高。扁平化后行高自然贴合内容。
+    //    分组视觉不受影响 —— 分组头就是一行普通 ListItem。
+    List({ space: 4 }) {
+      ForEach(this.todoFlatRows(), (row: TodoFlatRow) => {
+        if (row.role === 'caption') {
+          ListItem() {
+            Text(row.text)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_secondary'))
               .width('100%')
-              .swipeAction({ end: this.todoSwipeDelete(t) })
-            }, (t: DisplayEvent) => `c${t.id}_${t.completed}`)
+              .textAlign(TextAlign.Start)
+              .margin({ top: row.extraTop })
           }
           .width('100%')
-        }, (g: TodoGroup) => `g1_${g.calKey}`)
-      }
+        } else if (row.role === 'header') {
+          ListItem() {
+            if (row.group !== undefined) {
+              this.todoGroupHeader(row.group)
+            }
+          }
+          .width('100%')
+        } else if (row.event !== undefined) {
+          ListItem() {
+            this.todoRow(row.event as DisplayEvent)
+          }
+          .width('100%')
+          // 高度由内容自然决定（实测两行文字 ≈ 56vp，正常）。
+          // ⚠️ 绝不能给内部内容区加 height('100%') —— 那会把行撑到 573vp。
+          .swipeAction({ end: this.todoSwipeDelete(row.event as DisplayEvent) })
+        }
+      }, (row: TodoFlatRow, idx: number) => row.keyOf(idx))
 
       if (this.todos.length === 0 && !this.loading) {
         ListItem() {
@@ -2763,7 +2818,7 @@ struct Index {
     .edgeEffect(EdgeEffect.Spring)
   }
 
-  /** 分组头：色点 + 本名（条数） —— 与原 Column 版一致 */
+  /** 分组头：色点 + 本名（条数） */
   @Builder
   todoGroupHeader(g: TodoGroup) {
     Row({ space: 6 }) {
@@ -2781,9 +2836,8 @@ struct Index {
   /**
    * 左滑露出的「删除」按钮。
    *
-   * 复用现有 `askDeleteTodo`（二次确认）→ `doDeleteTodo`（本地软删 + 服务器 DELETE），
-   * 不新写删除逻辑，保证与编辑弹层里的删除走同一条路径。
-   * 删除前先把目标存进 todoEditId，因为 askDeleteTodo 用的是这个字段。
+   * ⚠️ 不要用 height('100%')：swipeAction 的 end 组件参与行高测量，
+   *    百分比会造成放大循环。用固定高度。
    */
   @Builder
   todoSwipeDelete(t: DisplayEvent) {
@@ -2794,19 +2848,23 @@ struct Index {
         .textAlign(TextAlign.Center)
     }
     .width(72)
+    // 用 100% 与 ListItem 同高：ListItem 高度由内容决定，
+    // 按钮跟随即可（官方文档：swipeAction builder 高度默认不匹配内容，
+    // 需要显式撑满才不会只占一半）。
     .height('100%')
     .justifyContent(FlexAlign.Center)
     .backgroundColor($r('app.color.error'))
     .borderRadius(12)
     .margin({ left: 6 })
     .onClick(() => {
-      // askDeleteTodo 依赖 todoEditId 定位要删哪一条
       this.todoEditId = t.id;
       this.todoEditTitle = t.title;
       this.todoEditWritable = t.writable;
       this.askDeleteTodo();
     })
   }
+
+
 
   /**
    * 待办编辑覆盖层。
@@ -3254,9 +3312,10 @@ struct Index {
       .alignItems(HorizontalAlign.Start)
       .justifyContent(FlexAlign.Center)
       .layoutWeight(1)
-      // ⭐ 撑满行高：原来高度只到文字高度，行内上下留白点不到，
-      //    用户觉得"只有点标题才有反应"（#42）。撑满后整块内容区都可点。
-      .height('100%')
+      // ⚠️ 不要用 .height('100%')：ListItem 里百分比会参照被拉伸的可用高度，
+      //    实测让单条变成 1790px（几乎占满整屏）。
+      //    热区扩大改由外层 Row 的 padding 承担（见下方 .padding(10)），
+      //    内容区自身不再加 padding，避免内外叠加把行撑高。
       // ⭐ 内容区点击 → 打开编辑（不改变完成状态）
       .onClick(() => {
         this.openTodoEditor(t);
