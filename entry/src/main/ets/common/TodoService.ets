@@ -44,7 +44,8 @@ export class TodoService {
    * @param dueMs 0 = 清除截止时间（删除 DUE 行）
    */
   static async updateTodo(context: common.Context, localId: number, title: string,
-    desc: string, dueMs: number): Promise<boolean> {
+    desc: string, dueMs: number, priority: number = -1, categories: string = '',
+    location: string = '', reminders: number[] = []): Promise<boolean> {
     const row: LocalEvent | null = await EventDb.queryById(context, localId);
     if (row === null || row.kind !== 'todo') {
       LogUtil.write(`待办更新失败：行不存在或不是待办 id=${localId}`);
@@ -74,10 +75,13 @@ export class TodoService {
         LogUtil.write(`待办更新失败：服务器内容不是 VTODO id=${localId}`);
         return false;
       }
-      const updated: string = IcsUtil.rewriteTodoFields(original, row.uid, title, desc, dueMs);
+      const updated: string = IcsUtil.rewriteTodoFields(original, row.uid, title, desc, dueMs,
+        priority, categories, location, reminders);
       const newEtag: string = await DavClient.putEvent(url, auth, updated);
       await EventDb.updateTodoFields(context, localId, title, desc,
         dueMs > 0 ? dueMs : 0, newEtag);
+      // 提醒单独落库（updateTodoFields 只处理三个字段）
+      await EventDb.setTodoReminders(context, localId, reminders);
       LogUtil.write(`待办更新成功 id=${localId}（标题已脱敏）`);
       return true;
     } catch (err) {
@@ -101,7 +105,9 @@ export class TodoService {
    * @returns 成功返回新行 id（>0），失败返回 0
    */
   static async createTodo(context: common.Context, href: string, title: string,
-    desc: string, dueMs: number, dueIsDateOnly: boolean): Promise<number> {
+    desc: string, dueMs: number, dueIsDateOnly: boolean, priority: number = 0,
+    categories: string = '', location: string = '',
+    reminders: number[] = []): Promise<number> {
     const t: string = title.trim();
     if (t === '' || href === '') {
       LogUtil.write(`待办新建失败：标题或日历本为空`);
@@ -131,7 +137,8 @@ export class TodoService {
 
     try {
       // 4) 先推服务器：成功才落库，避免产生"本地有、服务器没有"的孤儿
-      const ics: string = IcsUtil.buildTodo(uid, t, desc, dueMs, dueIsDateOnly);
+      const ics: string = IcsUtil.buildTodo(uid, t, desc, dueMs, dueIsDateOnly,
+        priority, categories, location, reminders);
       const etag: string = await DavClient.putEvent(url, auth, ics);
 
       // 5) 落本地库（insertLocal 会置 dirty=true，但 etag 已写回故不会被重复推送）
@@ -148,6 +155,11 @@ export class TodoService {
       e.endTime = dueMs > 0 ? dueMs : 0;
       e.isAllDay = dueIsDateOnly;
       e.completed = false;
+      e.priority = priority;
+      e.categories = categories;
+      e.location = location;
+      e.reminders = reminders;
+      e.reminder = reminders.length > 0 ? reminders[0] : 0;
       e.dirty = false;  // 已经推成功了，无需再推
       e.deleted = false;
       const newId: number = await EventDb.insertLocal(context, e);

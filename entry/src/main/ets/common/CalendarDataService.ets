@@ -30,6 +30,12 @@ export class DisplayEvent {
   recurRule: string = '';
   /** 待办的 DTSTART（重复基准，毫秒；0 = 无） */
   dtstart: number = 0;
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
+  /** 提醒提前分钟数（多选），空 = 不提醒 */
+  reminders: number[] = [];
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
@@ -373,6 +379,9 @@ export class CalendarDataService {
         d.calName = nameOf(e.calKey);
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
+        d.priority = e.priority;
+        d.categories = e.categories;
+        d.reminders = e.reminders;
         d.recurRule = e.rrule;
         d.dtstart = e.dtstart;
         d.recurring = e.rrule !== '';

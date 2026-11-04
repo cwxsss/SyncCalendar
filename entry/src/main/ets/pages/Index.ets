@@ -84,6 +84,14 @@ struct Index {
   @State todoEditBook: string = '';      // 所属本名（只读展示）
   @State todoEditWritable: boolean = true;
   @State todoEditRecur: string = '';   // 当前循环（'' = 不循环），存 FREQ 值如 WEEKLY
+  /** 优先级：iCal 原生值 1=高 5=中 9=低，0=未设置 */
+  @State todoEditPriority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  @State todoEditCategories: string = '';
+  /** 地点（复用 VTODO 的 LOCATION） */
+  @State todoEditLocation: string = '';
+  /** 提醒：提前分钟数（多选），空 = 不提醒 */
+  @State todoEditReminders: number[] = [];
   @State todoEditHasDue: boolean = false;
   @State todoEditPickShow: boolean = false;  // 截止时间选择器
   @State todoEditPickDate: Date = new Date();
@@ -2670,61 +2678,61 @@ struct Index {
   //    用户要求"按日历本分类显示，未完成里也能按家庭、生活分开，要有区分度"。
   //    分组标题前带该本的颜色圆点 —— 这才是"区分度"的来源。
   todoBody() {
-    Scroll() {
-      Column({ space: 8 }) {
+    // ⭐ 外层由 Scroll 改为 List：`swipeAction` 只能挂在 ListItem 上，
+    //    而 ListItem 必须是 List 的直接子节点（#39 左滑删除）。
+    //    分组用 ListItemGroup 实现 —— 它天生支持分组头，正好放"色点 + 本名 + 条数"。
+    List({ space: 6 }) {
+      ListItem() {
         Text(`未完成（${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length}）`)
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
-        ForEach(this.todoGroups(false), (g: TodoGroup) => {
-          Column({ space: 6 }) {
-            Row({ space: 6 }) {
-              Circle({ width: 8, height: 8 }).fill(g.color)
-              Text(`${g.name}（${g.items.length}）`)
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_secondary'))
-              Blank()
+          .textAlign(TextAlign.Start)
+      }
+      .width('100%')
+
+      ForEach(this.todoGroups(false), (g: TodoGroup) => {
+        ListItemGroup({ header: this.todoGroupHeader(g) }) {
+          ForEach(g.items, (t: DisplayEvent) => {
+            ListItem() {
+              this.todoRow(t)
             }
             .width('100%')
-            .padding({ top: 4 })
-            ForEach(g.items, (t: DisplayEvent) => {
-              this.todoRow(t)
-            }, (t: DisplayEvent) => `u${t.id}_${t.completed}`)
-          }
-          .alignItems(HorizontalAlign.Start)
-          .width('100%')
-        }, (g: TodoGroup) => `g0_${g.calKey}`)
+            .swipeAction({ end: this.todoSwipeDelete(t) })
+          }, (t: DisplayEvent) => `u${t.id}_${t.completed}`)
+        }
+        .width('100%')
+      }, (g: TodoGroup) => `g0_${g.calKey}`)
 
-        if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+      if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+        ListItem() {
           Text(`已完成（${this.todos.filter((t: DisplayEvent): boolean => t.completed).length}）`)
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.text_secondary'))
             .width('100%')
+            .textAlign(TextAlign.Start)
             .margin({ top: 10 })
-          ForEach(this.todoGroups(true), (g: TodoGroup) => {
-            Column({ space: 6 }) {
-              Row({ space: 6 }) {
-                Circle({ width: 8, height: 8 }).fill(g.color)
-                Text(`${g.name}（${g.items.length}）`)
-                  .fontSize(12)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.text_secondary'))
-                Blank()
+        }
+        .width('100%')
+
+        ForEach(this.todoGroups(true), (g: TodoGroup) => {
+          ListItemGroup({ header: this.todoGroupHeader(g) }) {
+            ForEach(g.items, (t: DisplayEvent) => {
+              ListItem() {
+                this.todoRow(t)
               }
               .width('100%')
-              .padding({ top: 4 })
-              ForEach(g.items, (t: DisplayEvent) => {
-                this.todoRow(t)
-              }, (t: DisplayEvent) => `c${t.id}_${t.completed}`)
-            }
-            .alignItems(HorizontalAlign.Start)
-            .width('100%')
-          }, (g: TodoGroup) => `g1_${g.calKey}`)
-        }
-        if (this.todos.length === 0 && !this.loading) {
+              .swipeAction({ end: this.todoSwipeDelete(t) })
+            }, (t: DisplayEvent) => `c${t.id}_${t.completed}`)
+          }
+          .width('100%')
+        }, (g: TodoGroup) => `g1_${g.calKey}`)
+      }
+
+      if (this.todos.length === 0 && !this.loading) {
+        ListItem() {
           Column({ space: 8 }) {
             Text('☑')
               .fontSize(34)
@@ -2745,15 +2753,59 @@ struct Index {
           .width('100%')
           .padding(32)
         }
+        .width('100%')
       }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 8, bottom: 24 })
-      .constraintSize({ minHeight: '100%' })
     }
+    .width('100%')
     .layoutWeight(1)
+    .padding({ left: 20, right: 20, top: 8, bottom: 24 })
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
-    .align(Alignment.Top)
+  }
+
+  /** 分组头：色点 + 本名（条数） —— 与原 Column 版一致 */
+  @Builder
+  todoGroupHeader(g: TodoGroup) {
+    Row({ space: 6 }) {
+      Circle({ width: 8, height: 8 }).fill(g.color)
+      Text(`${g.name}（${g.items.length}）`)
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+    }
+    .width('100%')
+    .padding({ top: 6, bottom: 2 })
+  }
+
+  /**
+   * 左滑露出的「删除」按钮。
+   *
+   * 复用现有 `askDeleteTodo`（二次确认）→ `doDeleteTodo`（本地软删 + 服务器 DELETE），
+   * 不新写删除逻辑，保证与编辑弹层里的删除走同一条路径。
+   * 删除前先把目标存进 todoEditId，因为 askDeleteTodo 用的是这个字段。
+   */
+  @Builder
+  todoSwipeDelete(t: DisplayEvent) {
+    Row() {
+      Text('删除')
+        .fontSize(14)
+        .fontColor(Color.White)
+        .textAlign(TextAlign.Center)
+    }
+    .width(72)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.error'))
+    .borderRadius(12)
+    .margin({ left: 6 })
+    .onClick(() => {
+      // askDeleteTodo 依赖 todoEditId 定位要删哪一条
+      this.todoEditId = t.id;
+      this.todoEditTitle = t.title;
+      this.todoEditWritable = t.writable;
+      this.askDeleteTodo();
+    })
   }
 
   /**
@@ -2924,6 +2976,105 @@ struct Index {
                 this.todoEditRecur = this.todoEditRecur === opt.v ? '' : opt.v;
               })
           }, (opt: Record<string, string>): string => `rr_${opt.v}`)
+        }
+        .width('100%')
+
+        // ⭐ 优先级（iCal 原生值 1/5/9，再点一次取消）
+        Row({ space: 8 }) {
+          Text('优先级')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          ForEach([
+            { v: 1, label: '高' },
+            { v: 5, label: '中' },
+            { v: 9, label: '低' }
+          ], (opt: Record<string, Object>): void => {
+            Text(opt.label as string)
+              .fontSize(13)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor(this.todoEditPriority === (opt.v as number)
+                ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.todoEditPriority === (opt.v as number)
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .onClick(() => {
+                // 再点一次 = 取消优先级
+                const v: number = opt.v as number;
+                this.todoEditPriority = this.todoEditPriority === v ? 0 : v;
+              })
+          }, (opt: Record<string, Object>): string => `pri_${opt.v}`)
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+
+        // ⭐ 提醒（#38）：与日程同一套选项；待办的提醒基准是 DUE 到期时刻
+        Row({ space: 8 }) {
+          Text('提醒')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          Flex({ wrap: FlexWrap.Wrap }) {
+            ForEach([
+              { v: 0, label: '不提醒' },
+              { v: 5, label: '提前5分钟' },
+              { v: 15, label: '提前15分钟' },
+              { v: 30, label: '提前30分钟' },
+              { v: 60, label: '提前1小时' },
+              { v: 1440, label: '提前1天' }
+            ], (opt: Record<string, Object>): void => {
+              Text(opt.label as string)
+                .fontSize(12)
+                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                .margin({ right: 6, bottom: 6 })
+                .borderRadius(13)
+                .backgroundColor(this.todoReminderActive(opt.v as number)
+                  ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                .fontColor(this.todoReminderActive(opt.v as number)
+                  ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                .onClick(() => {
+                  this.toggleTodoReminder(opt.v as number);
+                })
+            }, (opt: Record<string, Object>): string => `tr_${opt.v}`)
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+
+        // ⭐ 分类标签（逗号分隔，对应 CATEGORIES）
+        Row({ space: 8 }) {
+          Text('标签')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          TextInput({ text: this.todoEditCategories, placeholder: '多个用逗号分隔' })
+            .fontSize(14)
+            .height(40)
+            .layoutWeight(1)
+            .borderRadius(10)
+            .backgroundColor($r('app.color.page_bg'))
+            .onChange((v: string) => {
+              this.todoEditCategories = v;
+            })
+        }
+        .width('100%')
+
+        // ⭐ 地点（复用 location 字段）
+        Row({ space: 8 }) {
+          Text('地点')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          TextInput({ text: this.todoEditLocation, placeholder: '可选' })
+            .fontSize(14)
+            .height(40)
+            .layoutWeight(1)
+            .borderRadius(10)
+            .backgroundColor($r('app.color.page_bg'))
+            .onChange((v: string) => {
+              this.todoEditLocation = v;
+            })
         }
         .width('100%')
 
@@ -3101,7 +3252,11 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .alignItems(HorizontalAlign.Start)
+      .justifyContent(FlexAlign.Center)
       .layoutWeight(1)
+      // ⭐ 撑满行高：原来高度只到文字高度，行内上下留白点不到，
+      //    用户觉得"只有点标题才有反应"（#42）。撑满后整块内容区都可点。
+      .height('100%')
       // ⭐ 内容区点击 → 打开编辑（不改变完成状态）
       .onClick(() => {
         this.openTodoEditor(t);
@@ -3240,6 +3395,10 @@ struct Index {
     this.todoEditWritable = true;
     this.todoEditBook = '';
     this.todoEditRecur = '';
+    this.todoEditPriority = 0;
+    this.todoEditCategories = '';
+    this.todoEditLocation = '';
+    this.todoEditReminders = [];
     this.todoEditPickShow = false;
     this.todoEditShow = true;
   }
@@ -3255,6 +3414,11 @@ struct Index {
     this.todoEditBook = t.calName;
     this.todoEditWritable = t.writable;
     this.todoEditRecur = t.recurRule !== '' ? IcsUtil.freqOfRrule(t.recurRule) : '';
+    // 优先级 / 标签 / 地点（DisplayEvent 已带这些字段）
+    this.todoEditPriority = t.priority > 0 ? t.priority : 0;
+    this.todoEditCategories = t.categories;
+    this.todoEditLocation = t.location;
+    this.todoEditReminders = t.reminders.slice();
     // 默认值给"明天 09:00"，与新建日程的口径一致（非今天用 9 点）
     const base: Date = new Date();
     this.todoEditPickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
@@ -3305,7 +3469,9 @@ struct Index {
     try {
       const ok: boolean = await TodoService.updateTodo(ctx, this.todoEditId,
         this.todoEditTitle, this.todoEditDesc,
-        this.todoEditHasDue ? this.todoEditDueMs : 0);
+        this.todoEditHasDue ? this.todoEditDueMs : 0,
+        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation,
+        this.todoEditReminders);
       if (ok) {
         // ⭐ 循环规则单独写：它与"改内容"是两回事，
         //    而且要先有截止时间才有意义（没有 DUE 的循环任务无法算下一次）
@@ -3318,6 +3484,9 @@ struct Index {
         this.getUIContext().getPromptAction().showToast({ message: '已保存' });
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
         this.rebuildPages();
+        // ⭐ 卡片是独立实例，必须显式推送；提醒随标题/截止/提醒项变化需重排
+        await CardDataService.pushToAllForms(ctx);
+        await ReminderService.refreshReminders(ctx);
       } else {
         this.getUIContext().getPromptAction().showToast({
           message: '保存失败：需联网，且该日历本需可写'
@@ -3327,6 +3496,28 @@ struct Index {
       this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
     } finally {
       this.todoBusy = false;
+    }
+  }
+
+  /** 提醒是否选中（0 表示"不提醒"，即列表为空） */
+  private todoReminderActive(v: number): boolean {
+    if (v === 0) {
+      return this.todoEditReminders.length === 0;
+    }
+    return this.todoEditReminders.indexOf(v) >= 0;
+  }
+
+  /** 切换提醒：0=清空（不提醒），其余=多选切换 */
+  private toggleTodoReminder(v: number): void {
+    if (v === 0) {
+      this.todoEditReminders = [];
+      return;
+    }
+    const idx: number = this.todoEditReminders.indexOf(v);
+    if (idx >= 0) {
+      this.todoEditReminders = this.todoEditReminders.filter((x: number): boolean => x !== v);
+    } else {
+      this.todoEditReminders = this.todoEditReminders.concat([v]);
     }
   }
 
@@ -3348,13 +3539,16 @@ struct Index {
       // 截止时间只到日（00:00 视为"当天"）→ 用 DATE 值，避免服务器上显示 00:00
       const dateOnly: boolean = dueMs > 0 && this.todoEditDueMs % 86400000 === 0;
       const newId: number = await TodoService.createTodo(ctx, href, title,
-        this.todoEditDesc, dueMs, dateOnly);
+        this.todoEditDesc, dueMs, dateOnly,
+        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation);
       if (newId > 0) {
         this.todoEditShow = false;
         this.todoCreating = false;
         this.getUIContext().getPromptAction().showToast({ message: '待办已创建' });
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
         this.rebuildPages();
+        await CardDataService.pushToAllForms(ctx);
+        await ReminderService.refreshReminders(ctx);
       } else {
         this.getUIContext().getPromptAction().showToast({
           message: '创建失败：需联网，且该日历本需可写'
@@ -3401,6 +3595,9 @@ struct Index {
         this.getUIContext().getPromptAction().showToast({ message: '已删除' });
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
         this.rebuildPages();
+        await CardDataService.pushToAllForms(ctx);
+        // 删除后必须重排，否则已删待办的提醒还会响
+        await ReminderService.refreshReminders(ctx);
       } else {
         this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
       }
@@ -3473,6 +3670,10 @@ struct Index {
         }
         // 重新读库刷新列表（服务层已更新 completed）
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        // ⭐ 桌面卡片是独立实例，必须显式推送，否则停在旧数据
+        await CardDataService.pushToAllForms(ctx);
+        // 完成/取消完成会改变"该不该提醒"，需要重排
+        await ReminderService.refreshReminders(ctx);
       } else {
         this.getUIContext().getPromptAction().showToast({
           message: '更新失败：需联网，且该日历本需可写'

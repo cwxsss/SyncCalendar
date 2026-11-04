@@ -33,6 +33,13 @@ export class LocalEvent {
    *  只改标题时它等于 startTime；**把某次发生改期**时它才是原始时刻——
    *  排除主事件对应发生时必须用它，否则原时间会残留成"幽灵日程"。 */
   recurrenceId: number = 0;
+  /**
+   * 优先级，用 **iCal 原生值**：1=最高 … 9=最低，0=未设置。
+   * 直接存原生值，写回时零转换，也不会与服务器上其他客户端写下的值语义不一致。
+   */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 iCal CATEGORIES，多值用逗号连接） */
+  categories: string = '';
   reminder: number = 0;     // 主提醒提前分钟数（第一个提醒，兼容旧字段），0 = 不提醒
   reminders: number[] = []; // 全部提醒提前分钟数（多选），按添加顺序
 }
@@ -44,6 +51,10 @@ export class RemoteEvent {
   title: string = '';
   description: string = '';
   location: string = '';
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
   startTime: number = 0;
   endTime: number = 0;
   isAllDay: boolean = false;
@@ -139,6 +150,16 @@ export class EventDb {
       // 列已存在
     }
     try {
+      await store.executeSql('ALTER TABLE events ADD COLUMN priority INTEGER DEFAULT 0');
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN categories TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
       await store.executeSql('ALTER TABLE events ADD COLUMN dtstart INTEGER DEFAULT 0');
     } catch (err) {
       // 列已存在
@@ -207,6 +228,9 @@ export class EventDb {
     e.title = rs.getString(rs.getColumnIndex('title'));
     e.description = rs.getString(rs.getColumnIndex('description'));
     e.location = rs.getString(rs.getColumnIndex('location'));
+    e.priority = rs.getLong(rs.getColumnIndex('priority'));
+    const cats: string = rs.getString(rs.getColumnIndex('categories'));
+    e.categories = cats === undefined || cats === null ? '' : cats;
     e.startTime = rs.getLong(rs.getColumnIndex('start_time'));
     e.endTime = rs.getLong(rs.getColumnIndex('end_time'));
     e.isAllDay = rs.getLong(rs.getColumnIndex('is_all_day')) === 1;
@@ -254,7 +278,9 @@ export class EventDb {
       'exdate': e.exdate,
       'recurrence_id': e.recurrenceId,
       'reminder': e.reminders.length > 0 ? e.reminders[0] : 0,
-      'reminders': e.reminders.map((n: number): string => String(n)).join(',')
+      'reminders': e.reminders.map((n: number): string => String(n)).join(','),
+      'priority': e.priority,
+      'categories': e.categories
     };
     return bucket;
   }
@@ -481,6 +507,49 @@ export class EventDb {
   }
 
   /** 未来 7 天内需要提醒的日程（reminder > 0），按开始时间升序 */
+  /**
+   * 查"未来窗口内需要提醒的未完成待办"（#38）。
+   *
+   * 与 queryRemindable（日程）的区别：
+   *   - `kind='todo'` 而不是 'event'
+   *   - **必须 `completed=0`** —— 已完成的待办不该再响
+   *   - 待办的提醒基准同样是 start_time（loadTodos 把 DUE 存进 startTime）
+   */
+  /** 单独更新待办的提醒列表（updateTodoFields 只管标题/备注/截止三字段） */
+  static async setTodoReminders(context: common.Context, id: number,
+    reminders: number[]): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'reminder': reminders.length > 0 ? reminders[0] : 0,
+      'reminders': reminders.map((n: number): string => String(n)).join(',')
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  static async queryRemindableTodos(context: common.Context, from: number,
+    to: number): Promise<LocalEvent[]> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('deleted', 0).and().equalTo('kind', 'todo')
+      .and().equalTo('completed', 0)
+      .and().greaterThan('reminder', 0)
+      .and().greaterThanOrEqualTo('start_time', from)
+      .and().lessThanOrEqualTo('start_time', to)
+      .orderByAsc('start_time').limitAs(50);
+    const rs = await store.query(predicates);
+    const list: LocalEvent[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        list.push(EventDb.fromRow(rs));
+      }
+    } finally {
+      rs.close();
+    }
+    return list;
+  }
+
   static async queryRemindable(context: common.Context, from: number, to: number): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');

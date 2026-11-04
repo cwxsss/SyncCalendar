@@ -7,6 +7,10 @@ class ParsedEvent {
   uid: string = '';
   title: string = '';
   description: string = '';
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
   location: string = '';
   startTime: number = 0;
   endTime: number = 0;
@@ -341,7 +345,13 @@ export class IcsUtil {
    *   ② 再在块内替换/删除目标字段，缺失的在 END:VTODO 前补齐
    */
   static rewriteTodoFields(ics: string, uid: string, title: string,
-    desc: string, dueMs: number): string {
+    desc: string, dueMs: number, priority: number = -1, categories: string = '',
+    location: string = '', reminders: number[] = []): string {
+    // priority === -1 表示"本次不改优先级"；0 表示"清空优先级"。
+    // 用 -1 而不是 0 做哨兵，因为 0 本身是合法语义（无优先级）。
+    const touchPriority: boolean = priority >= 0;
+    const touchCategories: boolean = categories !== '';
+    const touchLocation: boolean = location !== '';
     const crlf: string = '\r\n';
     const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
     const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
@@ -383,6 +393,10 @@ export class IcsUtil {
     let sawSummary: boolean = false;
     let sawDesc: boolean = false;
     let sawDue: boolean = false;
+    let inAlarm: boolean = false;
+    let sawPriority: boolean = false;
+    let sawCategories: boolean = false;
+    let sawLocation: boolean = false;
     for (let i = 0; i < lines.length; i++) {
       const line: string = lines[i];
       const u: string = upperOf(line);
@@ -412,6 +426,30 @@ export class IcsUtil {
         }
         continue;
       }
+      // 提醒：整段丢弃旧 VALARM，末尾按新列表重建（比逐行改 TRIGGER 简单且不会漏 ACTION/DESCRIPTION）
+      if (reminders.length > 0 && (u.startsWith('BEGIN:VALARM') || inAlarm)) {
+        if (u.startsWith('BEGIN:VALARM')) { inAlarm = true; }
+        if (u.startsWith('END:VALARM')) { inAlarm = false; }
+        continue;
+      }
+      if (u.startsWith('PRIORITY') && touchPriority) {
+        sawPriority = true;
+        if (priority >= 1 && priority <= 9) {
+          out.push('PRIORITY:' + priority);
+        }
+        // priority===0 → 清空，不 push（等于删除该行）
+        continue;
+      }
+      if (u.startsWith('CATEGORIES') && touchCategories) {
+        sawCategories = true;
+        out.push('CATEGORIES:' + IcsUtil.escape(categories));
+        continue;
+      }
+      if (u.startsWith('LOCATION') && touchLocation) {
+        sawLocation = true;
+        out.push('LOCATION:' + IcsUtil.escape(location));
+        continue;
+      }
       out.push(line);
     }
 
@@ -425,6 +463,27 @@ export class IcsUtil {
     }
     if (!sawDue && dueMs > 0) {
       extra.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+    }
+    if (!sawPriority && touchPriority && priority >= 1 && priority <= 9) {
+      extra.push('PRIORITY:' + priority);
+    }
+    if (!sawCategories && touchCategories) {
+      extra.push('CATEGORIES:' + IcsUtil.escape(categories));
+    }
+    if (!sawLocation && touchLocation) {
+      extra.push('LOCATION:' + IcsUtil.escape(location));
+    }
+    // 提醒整体重建（上面已把旧 VALARM 整段跳过）
+    if (reminders.length > 0) {
+      const alarms: string = IcsUtil.valarms(reminders);
+      if (alarms !== '') {
+        // 去掉末尾的 CRLF（extra 每项会由 join(crlf) 拼接，带尾部换行会多一个空行）
+        let a: string = alarms;
+        while (a.length >= 2 && a.charAt(a.length - 2) === '\r' && a.charAt(a.length - 1) === '\n') {
+          a = a.substring(0, a.length - 2);
+        }
+        extra.push(a);
+      }
     }
     if (extra.length === 0) {
       const plain: string = out.join(crlf);
@@ -764,6 +823,14 @@ export class IcsUtil {
         current.description = IcsUtil.unescape(value);
       } else if (propName === 'LOCATION') {
         current.location = IcsUtil.unescape(value);
+      } else if (propName === 'PRIORITY') {
+        // iCal 原生值：1=最高 … 9=最低，0/缺失=未设置。直接存，不二次映射。
+        const pv: number = parseInt(value, 10);
+        current.priority = isNaN(pv) ? 0 : pv;
+      } else if (propName === 'CATEGORIES') {
+        // 多标签用逗号分隔；iCal 允许多个 CATEGORIES 行，这里取最后一行即可
+        // （本应用写回时只写一行，读别人的多行时最后一行足够用）
+        current.categories = IcsUtil.unescape(value);
       } else if (propName === 'RRULE') {
         current.recurring = true;
         // ⭐ 保存规则原文：原来只置了 recurring 标志，规则本身被丢掉，
@@ -825,7 +892,8 @@ export class IcsUtil {
    * @param dueIsDateOnly 截止时间是否"只有日期无时刻"（true 写 `DUE;VALUE=DATE`）
    */
   static buildTodo(uid: string, title: string, desc: string, dueMs: number,
-    dueIsDateOnly: boolean): string {
+    dueIsDateOnly: boolean, priority: number = 0, categories: string = '',
+    location: string = '', reminders: number[] = []): string {
     const now: string = IcsUtil.fmtUtcNow();
     let out: string = 'BEGIN:VCALENDAR\r\n' +
       'VERSION:2.0\r\n' +
@@ -847,8 +915,36 @@ export class IcsUtil {
     }
     // 新建待办一律"未开始"，完成态由 setCompleted 切换到 COMPLETED
     out += 'STATUS:NEEDS-ACTION\r\n';
+    out += IcsUtil.todoExtras(priority, categories, location);
+    // VALARM：VTODO 的 TRIGGER 相对 DUE（RFC 5545 §3.8.6.3），
+    // 所以复用现有 valarm() 生成的 -PT5M 就是"到期前 5 分钟"
+    out += IcsUtil.valarmsPublic(reminders);
     out += 'END:VTODO\r\n';
     out += 'END:VCALENDAR\r\n';
+    return out;
+  }
+
+  /**
+   * 生成 VTODO 的扩展属性行（PRIORITY / CATEGORIES / LOCATION）。
+   *
+   * 抽成方法的原因：新建（buildTodo）与改写（rewriteTodoFields）都要写这三行，
+   * 逻辑必须一致，否则新建的和改过的会生成不同结构。
+   *
+   * @param priority  iCal 原生值 1(最高)…9(最低)；0 或非法值 = 不写
+   * @param categories 逗号分隔的标签；空 = 不写
+   * @param location   地点文本；空 = 不写
+   */
+  static todoExtras(priority: number, categories: string, location: string): string {
+    let out: string = '';
+    if (priority >= 1 && priority <= 9) {
+      out += `PRIORITY:${priority}\r\n`;
+    }
+    if (categories !== '') {
+      out += `CATEGORIES:${IcsUtil.escape(categories)}\r\n`;
+    }
+    if (location !== '') {
+      out += `LOCATION:${IcsUtil.escape(location)}\r\n`;
+    }
     return out;
   }
 
@@ -999,6 +1095,11 @@ export class IcsUtil {
   }
 
   /** 由提醒分钟数组生成多个 VALARM（已规范化去重） */
+  /** 供待办侧复用的公开包装（VTODO 的 VALARM 与 VEVENT 格式相同） */
+  static valarmsPublic(minutes: number[]): string {
+    return IcsUtil.valarms(minutes);
+  }
+
   private static valarms(minutes: number[]): string {
     let out: string = '';
     for (const m of minutes) {
