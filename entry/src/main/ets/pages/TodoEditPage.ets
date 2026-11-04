@@ -842,7 +842,11 @@ struct TodoEditPage {
     }
     .width('100%')
     .height('100%')
+    .padding({ top: 12 })
     .backgroundColor($r('app.color.page_bg'))
+    // ⭐ 沉浸式：背景延伸到状态栏/导航条区域（与 EventEditPage 一致）
+    //    只扩绘制范围、不移动子组件 → 状态栏区域同色，不再是割裂的白条
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 
   /** 字段小标题 */
