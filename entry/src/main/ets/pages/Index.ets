@@ -3616,105 +3616,19 @@ struct Index {
    * 找不到就选第一个可写的本 —— 让用户少点一步，但仍可改。
    */
   private async openTodoCreator(): Promise<void> {
-    const ctx = this.getUIContext().getHostContext();
-    if (ctx === undefined) {
-      return;
-    }
-    // 只取可写的 CalDAV 本（'dav' 来源）；只读本推上去必 403，不该出现在选项里
-    // 注意：CalSource 没有 href 字段，需从账号里按 calKey 反解
-    const accounts: DavAccount[] = await AccountStore.loadAll(ctx);
-    this.todoBookHrefs.clear();
-    const writable: CalSource[] = [];
-    for (const s of this.sources) {
-      if (!s.writable || s.source !== 'dav') {
-        continue;
-      }
-      // ⭐ 只列**能放待办**的本：纯日历本（COMP_SET 只有 VEVENT）写不进 VTODO。
-      //    'both' / 'unknown' 都保留 —— unknown 是服务器未声明或旧数据，不能武断排除。
-      if (s.comps === 'event') {
-        continue;
-      }
-      // calKey 形如 "<accountId>_<index>"
-      const us: number = s.calKey.lastIndexOf('_');
-      if (us <= 0) {
-        continue;
-      }
-      const accId: string = s.calKey.substring(0, us);
-      const idx: number = parseInt(s.calKey.substring(us + 1), 10);
-      if (isNaN(idx)) {
-        continue;
-      }
-      const acc: DavAccount | undefined = accounts.find(
-        (a: DavAccount): boolean => String(a.id) === accId);
-      if (acc === undefined || idx < 0 || idx >= acc.calendarHrefs.length) {
-        continue;
-      }
-      this.todoBookHrefs.set(s.calKey, acc.calendarHrefs[idx]);
-      writable.push(s);
-    }
-    if (writable.length === 0) {
-      this.getUIContext().getPromptAction().showToast({
-        message: '还没有可写入的 CalDAV 日历本，请先添加账号'
-      });
-      return;
-    }
-    this.todoBooks = writable;
-    // 默认选中：名字里含 inbox/收件箱 的本优先，否则第一个
-    let pick: string = writable[0].calKey;
-    for (const s of writable) {
-      const n: string = s.name.toLowerCase();
-      if (n.indexOf('inbox') >= 0 || s.name.indexOf('收件箱') >= 0) {
-        pick = s.calKey;
-        break;
-      }
-    }
-    this.todoCreateBookKey = pick;
-    // 清空编辑态数据，进入"新建"
-    this.todoCreating = true;
-    this.todoEditId = 0;
-    this.todoEditTitle = '';
-    this.todoEditDesc = '';
-    this.todoEditDueMs = 0;
-    this.todoEditHasDue = false;
-    this.todoEditWritable = true;
-    this.todoEditBook = '';
-    this.todoEditRecur = '';
-    this.todoEditPriority = 0;
-    this.todoEditCategories = '';
-    this.todoEditLocation = '';
-    this.todoEditReminders = [];
-    this.todoEditParentUid = '';
-    this.todoEditAttachments = '';
-    this.todoEditPickShow = false;
-    this.todoEditShow = true;
+    // ⭐ 改为独立页面（与新建日程一致）：预置参数后跳转
+    AppStorage.setOrCreate<number>('pendingTodoId', 0);
+    AppStorage.setOrCreate<number>('pendingTodoDate', this.selectedDate);
+    router.pushUrl({ url: 'pages/TodoEditPage' });
   }
 
-  /** 打开待办编辑弹框（点内容区触发；不会改变完成状态） */
+  /** 打开待办编辑页（点内容区触发；不会改变完成状态） */
   private openTodoEditor(t: DisplayEvent): void {
-    this.todoCreating = false;
-    this.todoEditId = t.id;
-    this.todoEditTitle = t.title;
-    this.todoEditDesc = t.description;
-    this.todoEditDueMs = t.startTime > 0 ? t.startTime : 0;
-    this.todoEditHasDue = t.startTime > 0;
-    this.todoEditBook = t.calName;
-    this.todoEditWritable = t.writable;
-    this.todoEditRecur = t.recurRule !== '' ? IcsUtil.freqOfRrule(t.recurRule) : '';
-    // 优先级 / 标签 / 地点（DisplayEvent 已带这些字段）
-    this.todoEditPriority = t.priority > 0 ? t.priority : 0;
-    this.todoEditCategories = t.categories;
-    this.todoEditLocation = t.location;
-    this.todoEditReminders = t.reminders.slice();
-    // 子任务与附件
-    this.todoEditParentUid = t.parentUid;
-    this.todoEditAttachments = t.attachments;
-    // 默认值给"明天 09:00"，与新建日程的口径一致（非今天用 9 点）
-    const base: Date = new Date();
-    this.todoEditPickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
-    this.todoEditPickHour = 9;
-    this.todoEditPickMin = 0;
-    this.todoEditPickShow = false;
-    this.todoEditShow = true;
+    // ⭐ 改为独立页面（与编辑日程一致）：把 id 预置后跳转
+    AppStorage.setOrCreate<number>('pendingTodoId', t.id);
+    AppStorage.setOrCreate<number>('pendingTodoDate', 0);
+    router.pushUrl({ url: 'pages/TodoEditPage' });
+    return;
   }
 
   /** 打开截止时间选择器（把当前值灌进滚轮初值） */
