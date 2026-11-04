@@ -3,6 +3,9 @@
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
 import { curves, display, router, window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
@@ -17,7 +20,7 @@ import { TipsPanel } from '../common/TipsPanel';
 import { DocViewer } from '../common/DocViewer';
 import { EventDb, LocalEvent, RemoteEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
-import { IcsUtil } from '../common/IcsUtil';
+import { IcsUtil, AttachMeta } from '../common/IcsUtil';
 import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
@@ -121,6 +124,14 @@ struct Index {
   @State todoEditLocation: string = '';
   /** 提醒：提前分钟数（多选），空 = 不提醒 */
   @State todoEditReminders: number[] = [];
+  /** 当前编辑待办的父任务 UID（空 = 顶层任务） */
+  @State todoEditParentUid: string = '';
+  /** 附件 JSON（格式与数据层一致：[{name,mime,size,base64}]） */
+  @State todoEditAttachments: string = '';
+  /** 父任务选择弹层 */
+  @State todoParentPickShow: boolean = false;
+  /** 附件选择中（防连点，文件选择器打开期间） */
+  @State todoAttachBusy: boolean = false;
   @State todoEditHasDue: boolean = false;
   @State todoEditPickShow: boolean = false;  // 截止时间选择器
   @State todoEditPickDate: Date = new Date();
@@ -1269,6 +1280,11 @@ struct Index {
       // ⭐ TODO_EDITOR_UI 待办编辑弹框（覆盖层方案：同一组件只能挂一个 bindSheet）
       if (this.todoEditShow) {
         this.todoEditorOverlay()
+      }
+
+      // ⭐ 父任务选择弹层（子任务支持）
+      if (this.todoParentPickShow) {
+        this.todoParentPickerOverlay()
       }
 
       // 功能引导：整页覆盖层，放根 Stack 最后一层（盖住主界面与悬浮按钮）
@@ -2874,6 +2890,95 @@ struct Index {
    *   再挂一个会被覆盖（EventEditPage 顶部也记过这个坑）。
    *   覆盖层跟 tipsOverlay / consentGate 是同一套路，已验证可用。
    */
+  /**
+   * 父任务选择覆盖层（子任务支持）。
+   * 候选 = 未完成的顶层任务（不能选自己或自己的后代，防成环）。
+   */
+  @Builder
+  todoParentPickerOverlay() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.todoParentPickShow = false;
+        })
+
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text('选择父任务')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+          Blank()
+          Text('无父任务')
+            .fontSize(14)
+            .fontColor($r('app.color.brand_text'))
+            .onClick(() => {
+              this.todoEditParentUid = '';
+              this.todoParentPickShow = false;
+            })
+        }
+        .width('100%')
+
+        if (this.todoParentCandidates().length === 0) {
+          Text('没有可选的顶层任务')
+            .fontSize(13)
+            .fontColor($r('app.color.text_hint'))
+            .padding(20)
+        } else {
+          List({ space: 6 }) {
+            ForEach(this.todoParentCandidates(), (c: DisplayEvent) => {
+              ListItem() {
+                Row({ space: 6 }) {
+                  Circle({ width: 8, height: 8 }).fill(c.color)
+                  Text(c.title === '' ? '(无标题待办)' : c.title)
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_primary'))
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .layoutWeight(1)
+                  if (this.todoEditParentUid === c.uid) {
+                    Text('✓')
+                      .fontSize(14)
+                      .fontColor($r('app.color.brand_text'))
+                  }
+                }
+                .width('100%')
+                .padding(10)
+              }
+              .width('100%')
+              .onClick(() => {
+                this.todoEditParentUid = c.uid;
+                this.todoParentPickShow = false;
+              })
+            }, (c: DisplayEvent) => `pc_${c.uid}`)
+          }
+          .width('100%')
+          .constraintSize({ maxHeight: 340 })
+        }
+
+        Button('取消')
+          .width('100%')
+          .height(44)
+          .borderRadius(12)
+          .fontSize(15)
+          .fontColor($r('app.color.text_primary'))
+          .backgroundColor($r('app.color.chip_off_bg'))
+          .onClick(() => {
+            this.todoParentPickShow = false;
+          })
+      }
+      .width('100%')
+      .padding(20)
+      .backgroundColor($r('app.color.card_bg'))
+      .borderRadius({ topLeft: 16, topRight: 16 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   @Builder
   todoEditorOverlay() {
     Stack({ alignContent: Alignment.Bottom }) {
@@ -3136,6 +3241,84 @@ struct Index {
         }
         .width('100%')
 
+        // ⭐ 父任务（子任务支持，对应 RELATED-TO）
+        Row({ space: 8 }) {
+          Text('父任务')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          Blank()
+          Text(this.parentName(this.todoEditParentUid))
+            .fontSize(14)
+            .fontColor(this.todoEditParentUid === ''
+              ? $r('app.color.text_hint') : $r('app.color.text_primary'))
+          if (this.todoEditParentUid !== '') {
+            Text('清除')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.todoEditParentUid = '';
+              })
+          } else {
+            Text('选择')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.openTodoParentPicker();
+              })
+          }
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+        .onClick(() => {
+          this.openTodoParentPicker();
+        })
+
+        // ⭐ 附件（内联 base64，随待办同步）
+        Column({ space: 6 }) {
+          Row({ space: 8 }) {
+            Text('附件')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+              .width(52)
+            if (this.attachList().length < 3) {
+              Text('添加文件')
+                .fontSize(13)
+                .fontColor($r('app.color.brand_text'))
+                .onClick(() => {
+                  const ctx = this.getUIContext().getHostContext();
+                  if (ctx !== undefined) {
+                    this.pickAttachment(ctx);
+                  }
+                })
+            }
+            Blank()
+          }
+          .width('100%')
+
+          ForEach(this.attachList(), (m: AttachMeta, idx: number) => {
+            Row({ space: 8 }) {
+              Text(m.name)
+                .fontSize(13)
+                .fontColor($r('app.color.text_primary'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+              Text('✕')
+                .fontSize(13)
+                .fontColor($r('app.color.text_hint'))
+                .onClick(() => {
+                  this.removeAttach(idx);
+                })
+            }
+            .width('100%')
+            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+            .borderRadius(8)
+            .backgroundColor($r('app.color.chip_off_bg'))
+          }, (m: AttachMeta, idx: number) => `att_${idx}_${m.name}`)
+        }
+        .width('100%')
+
         if (this.todoEditRecur !== '' && !this.todoEditHasDue) {
           Text('提示：循环任务需要有截止时间，才能算出下一次')
             .fontSize(11)
@@ -3271,6 +3454,7 @@ struct Index {
     //    · 其余部分 → 打开编辑弹框
     //    旧版把 onClick 挂在整行上，点标题、点截止时间、点空白都会改完成状态，
     //    用户反馈"点任何地方都是完成"，是明确的交互缺陷。
+    // 子任务缩进：顶层不缩，子任务缩 24vp
     Row({ space: 10 }) {
       // 勾选框（颜色跟随日历本）—— **只有这块触发完成切换**
       Row() {
@@ -3297,13 +3481,13 @@ struct Index {
       })
 
       Column({ space: 3 }) {
-        Text(t.title === '' ? '(无标题待办)' : t.title)
+        Text((t.parentUid !== '' ? '∟ ' : '') + (t.title === '' ? '(无标题待办)' : t.title))
           .fontSize(15)
           .fontColor(t.completed ? $r('app.color.text_hint') : $r('app.color.text_primary'))
           .decoration({ type: t.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.todoSubtitle(t))
+        Text(this.todoSubtitle(t) + this.subtaskProgress(t))
           .fontSize(12)
           .fontColor($r('app.color.text_secondary'))
           .maxLines(1)
@@ -3322,7 +3506,9 @@ struct Index {
       })
     }
     .width('100%')
-    .padding(10)
+    .padding(t.parentUid !== ''
+      ? { left: 34, right: 10, top: 10, bottom: 10 }
+      : { left: 10, right: 10, top: 10, bottom: 10 })
     .borderRadius(12)
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
@@ -3458,6 +3644,8 @@ struct Index {
     this.todoEditCategories = '';
     this.todoEditLocation = '';
     this.todoEditReminders = [];
+    this.todoEditParentUid = '';
+    this.todoEditAttachments = '';
     this.todoEditPickShow = false;
     this.todoEditShow = true;
   }
@@ -3478,6 +3666,9 @@ struct Index {
     this.todoEditCategories = t.categories;
     this.todoEditLocation = t.location;
     this.todoEditReminders = t.reminders.slice();
+    // 子任务与附件
+    this.todoEditParentUid = t.parentUid;
+    this.todoEditAttachments = t.attachments;
     // 默认值给"明天 09:00"，与新建日程的口径一致（非今天用 9 点）
     const base: Date = new Date();
     this.todoEditPickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
@@ -3526,11 +3717,14 @@ struct Index {
     }
     this.todoBusy = true;
     try {
+      // 父任务/附件：编辑页显示什么就保存什么（touch 恒 true，
+      // 值来自弹层状态，用户点保存的意图就是让它们生效）
       const ok: boolean = await TodoService.updateTodo(ctx, this.todoEditId,
         this.todoEditTitle, this.todoEditDesc,
         this.todoEditHasDue ? this.todoEditDueMs : 0,
         this.todoEditPriority, this.todoEditCategories, this.todoEditLocation,
-        this.todoEditReminders);
+        this.todoEditReminders, this.todoEditParentUid, this.todoEditAttachments,
+        true, true);
       if (ok) {
         // ⭐ 循环规则单独写：它与"改内容"是两回事，
         //    而且要先有截止时间才有意义（没有 DUE 的循环任务无法算下一次）
@@ -3580,6 +3774,210 @@ struct Index {
     }
   }
 
+  /**
+   * 选择附件：DocumentViewPicker → 读二进制 → base64 → 存入 todoEditAttachments。
+   *
+   * 限制：最多 3 个、单文件 ≤ 5MB。内联 base64 会让 .ics 膨胀，
+   * 限制是为了防爆服务器与同步性能。
+   */
+  private async pickAttachment(ctx: common.Context): Promise<void> {
+    if (this.todoAttachBusy) {
+      return;
+    }
+    this.todoAttachBusy = true;
+    try {
+      const pickerv = new picker.DocumentViewPicker(ctx);
+      const uris: string[] = await pickerv.select({
+        maxSelectNumber: 3
+      });
+      if (uris.length === 0) {
+        return;
+      }
+      // 已有附件数 + 新选数不得超过 3
+      const existing: AttachMeta[] = IcsUtil.jsonToAttachMeta(this.todoEditAttachments);
+      if (existing.length + uris.length > 3) {
+        this.getUIContext().getPromptAction().showToast({ message: '最多 3 个附件' });
+        uris.splice(0); // 丢弃，不超过限制时已读的部分也不该要
+        return;
+      }
+      const merged: AttachMeta[] = existing.slice();
+      for (const uri of uris) {
+        const meta: AttachMeta | null = this.readAttach(uri);
+        if (meta === null) {
+          continue;
+        }
+        if (meta.base64.length > 5 * 1024 * 1024) {
+          this.getUIContext().getPromptAction().showToast({ message: '单文件不超过 5MB' });
+          continue;
+        }
+        merged.push(meta);
+      }
+      this.todoEditAttachments = IcsUtil.attachMetaToJson(merged);
+      if (merged.length > existing.length) {
+        this.getUIContext().getPromptAction().showToast({ message: `已添加 ${merged.length - existing.length} 个附件` });
+      }
+    } catch (err) {
+      // 用户取消选择也会走这里（返回空/抛错），不提示错误
+      LogUtil.write(`选择附件取消或失败: ${(err as BusinessError).message ?? ''}`);
+    } finally {
+      this.todoAttachBusy = false;
+    }
+  }
+
+  /** 读一个文件 URI → AttachMeta（文件名/mime/size/base64）。失败返回 null。 */
+  private readAttach(uri: string): AttachMeta | null {
+    try {
+      const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      const stat = fs.statSync(file.fd);
+      const size: number = stat.size;
+      if (size <= 0 || size > 5 * 1024 * 1024) {
+        fs.closeSync(file.fd);
+        return null;
+      }
+      // 最多 5MB，一次性读完
+      const buf: ArrayBuffer = new ArrayBuffer(size);
+      const readLen: number = fs.readSync(file.fd, buf);
+      fs.closeSync(file.fd);
+      if (readLen <= 0) {
+        return null;
+      }
+      // ArrayBuffer → base64
+      const u8 = new Uint8Array(buf);
+      let bin: string = '';
+      for (let i = 0; i < u8.length; i++) {
+        bin += String.fromCharCode(u8[i]);
+      }
+      const base64: string = new util.Base64Helper().encodeToStringSync(
+        new Uint8Array(buf));
+      // 文件名：从 URI 末尾解析（去掉 querystring），拿不到就占位
+      let name: string = uri.substring(uri.lastIndexOf('/') + 1);
+      const q: number = name.indexOf('?');
+      if (q >= 0) {
+        name = name.substring(0, q);
+      }
+      if (name === '') {
+        name = '附件';
+      }
+      // mime：按扩展名粗略推断，其余 application/octet-stream
+      const m = new AttachMeta();
+      m.name = name;
+      m.mime = this.mimeOfName(name);
+      m.base64 = base64;
+      return m;
+    } catch (err) {
+      LogUtil.write(`读附件失败: ${(err as BusinessError).message ?? ''}`);
+      return null;
+    }
+  }
+
+  /** 按扩展名推断 mime，能覆盖常见文档/图片即可。 */
+  private mimeOfName(name: string): string {
+    const lower: string = name.toLowerCase();
+    if (lower.endsWith('.pdf')) { return 'application/pdf'; }
+    if (lower.endsWith('.png')) { return 'image/png'; }
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) { return 'image/jpeg'; }
+    if (lower.endsWith('.gif')) { return 'image/gif'; }
+    if (lower.endsWith('.txt')) { return 'text/plain'; }
+    if (lower.endsWith('.csv')) { return 'text/csv'; }
+    if (lower.endsWith('.zip')) { return 'application/zip'; }
+    if (lower.endsWith('.doc') || lower.endsWith('.docx')) {
+      return 'application/msword';
+    }
+    if (lower.endsWith('.xls') || lower.endsWith('.xlsx')) {
+      return 'application/vnd.ms-excel';
+    }
+    return 'application/octet-stream';
+  }
+
+  /** 父任务的子任务进度文案「 N/M」，无子任务返回空串。 */
+  private subtaskProgress(t: DisplayEvent): string {
+    const children: DisplayEvent[] = this.todos.filter(
+      (x: DisplayEvent): boolean => x.parentUid === t.uid && x.parentUid !== '');
+    if (children.length === 0) {
+      return '';
+    }
+    const done: number = children.filter((x: DisplayEvent): boolean => x.completed).length;
+    return ` · ${done}/${children.length}`;
+  }
+
+  /** 是否有子任务（按父 uid 找）。 */
+  private hasChildren(uid: string): boolean {
+    return this.todos.some((x: DisplayEvent): boolean => x.parentUid === uid);
+  }
+
+  /** 父任务显示名：按 uid 在 todos 里找；找不到显示「无」。 */
+  private parentName(uid: string): string {
+    if (uid === '') {
+      return '无';
+    }
+    for (const t of this.todos) {
+      if (t.uid === uid) {
+        return t.title === '' ? '(无标题)' : t.title;
+      }
+    }
+    return '（已不存在）';
+  }
+
+  /** 解析附件 JSON → AttachMeta[]。 */
+  private attachList(): AttachMeta[] {
+    return IcsUtil.jsonToAttachMeta(this.todoEditAttachments);
+  }
+
+  /** 删除第 idx 个附件，回写 JSON。 */
+  private removeAttach(idx: number): void {
+    const list: AttachMeta[] = this.attachList();
+    if (idx < 0 || idx >= list.length) {
+      return;
+    }
+    list.splice(idx, 1);
+    this.todoEditAttachments = IcsUtil.attachMetaToJson(list);
+  }
+
+  /** 打开父任务选择弹层。候选 = 未完成的顶层任务，且不能是自己或自己的后代。 */
+  private openTodoParentPicker(): void {
+    this.todoParentPickShow = true;
+  }
+
+  /** 当前编辑待办的 uid（自己） */
+  private todoEditUid(): string {
+    for (const t of this.todos) {
+      if (t.id === this.todoEditId) {
+        return t.uid;
+      }
+    }
+    return '';
+  }
+
+  /** 父任务候选（未完成、顶层、非自身/后代）。 */
+  private todoParentCandidates(): DisplayEvent[] {
+    const selfUid: string = this.todoEditUid();
+    // 收集"自己"及其所有后代的 uid，选父时排除（防成环）
+    const selfAndDesc: Set<string> = new Set<string>();
+    if (selfUid !== '') {
+      selfAndDesc.add(selfUid);
+      const queue: string[] = [selfUid];
+      let guard = 0;
+      while (queue.length > 0 && guard < 200) {
+        const cur: string = queue.shift() as string;
+        for (const t of this.todos) {
+          if (t.parentUid === cur && !selfAndDesc.has(t.uid)) {
+            selfAndDesc.add(t.uid);
+            queue.push(t.uid);
+          }
+        }
+        guard++;
+      }
+    }
+    const out: DisplayEvent[] = [];
+    for (const t of this.todos) {
+      if (t.completed) { continue; }
+      if (t.parentUid !== '') { continue; } // 只选顶层任务做父
+      if (selfAndDesc.has(t.uid)) { continue; } // 不能选自己或后代
+      out.push(t);
+    }
+    return out;
+  }
+
   /** 保存新建的待办 */
   private async saveNewTodo(ctx: common.Context): Promise<void> {
     const title: string = this.todoEditTitle.trim();
@@ -3599,7 +3997,8 @@ struct Index {
       const dateOnly: boolean = dueMs > 0 && this.todoEditDueMs % 86400000 === 0;
       const newId: number = await TodoService.createTodo(ctx, href, title,
         this.todoEditDesc, dueMs, dateOnly,
-        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation);
+        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation,
+        this.todoEditReminders, this.todoEditParentUid, this.todoEditAttachments);
       if (newId > 0) {
         this.todoEditShow = false;
         this.todoCreating = false;
@@ -3716,6 +4115,10 @@ struct Index {
         ok = nextDue > 0;
       } else {
         ok = await TodoService.setCompleted(ctx, t.id, !t.completed);
+        // ⭐ 父任务级联完成子任务（勾父任务→所有子任务一并完成）
+        if (ok && !t.completed && this.hasChildren(t.uid)) {
+          await TodoService.completeChildren(ctx, t.uid);
+        }
       }
       if (ok) {
         if (isRecurring && !t.completed) {

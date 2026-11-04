@@ -42,6 +42,12 @@ export class LocalEvent {
   categories: string = '';
   reminder: number = 0;     // 主提醒提前分钟数（第一个提醒，兼容旧字段），0 = 不提醒
   reminders: number[] = []; // 全部提醒提前分钟数（多选），按添加顺序
+  /** 父任务 UID（空 = 顶层任务）。对应 VTODO 的 RELATED-TO:RELTYPE=PARENT。
+   *  用 UID 而非本地 id：父子关系是服务器资源属性，跨设备同步时 UID 才稳定。 */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串：[{name,mime,size,base64}]，空 = 无附件。
+   *  base64 直接存库，同步时拼 ATTACH 行零转换。 */
+  attachments: string = '';
 }
 
 /** 远端事件条目（REPORT 解析结果） */
@@ -67,6 +73,10 @@ export class RemoteEvent {
   recurrenceId: number = 0;   // 原始 RECURRENCE-ID（毫秒；0 = 无）
   reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
   reminders: number[] = [];   // 全部提醒提前分钟数（多选）
+  /** 父任务 UID（空 = 顶层任务）。 */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串（含 base64），空 = 无附件。 */
+  attachments: string = '';
   /**
    * ⭐ REMOTE_PATH 服务器上的真实资源文件名（REPORT 返回的 href 末段，已含 URL 编码）。
    *
@@ -146,6 +156,16 @@ export class EventDb {
     }
     try {
       await store.executeSql("ALTER TABLE events ADD COLUMN rrule TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN parent_uid TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN attachments TEXT DEFAULT ''");
     } catch (err) {
       // 列已存在
     }
@@ -246,6 +266,10 @@ export class EventDb {
     e.recurrenceId = rs.getLong(rs.getColumnIndex('recurrence_id'));
     e.reminder = rs.getLong(rs.getColumnIndex('reminder'));
     // 多提醒（逗号分隔分钟数）；旧数据无该列时回退单提醒
+    const pUid: string = rs.getString(rs.getColumnIndex('parent_uid'));
+    e.parentUid = (pUid === undefined || pUid === null) ? '' : pUid;
+    const att: string = rs.getString(rs.getColumnIndex('attachments'));
+    e.attachments = (att === undefined || att === null) ? '' : att;
     const remStr: string = rs.getString(rs.getColumnIndex('reminders'));
     if (remStr !== '') {
       e.reminders = remStr.split(',').map((s: string): number => Number(s))
@@ -280,7 +304,9 @@ export class EventDb {
       'reminder': e.reminders.length > 0 ? e.reminders[0] : 0,
       'reminders': e.reminders.map((n: number): string => String(n)).join(','),
       'priority': e.priority,
-      'categories': e.categories
+      'categories': e.categories,
+      'parent_uid': e.parentUid,
+      'attachments': e.attachments
     };
     return bucket;
   }
@@ -515,6 +541,29 @@ export class EventDb {
    *   - **必须 `completed=0`** —— 已完成的待办不该再响
    *   - 待办的提醒基准同样是 start_time（loadTodos 把 DUE 存进 startTime）
    */
+  /**
+   * 单独更新待办的子任务/附件属性（updateTodoFields 只管标题/备注/截止）。
+   * @param touchParent true=写 parent_uid（空串=清空），false=不动
+   * @param touchAttach true=写 attachments（空串=清空），false=不动
+   */
+  static async setTodoHierarchy(context: common.Context, id: number, parentUid: string,
+    attachments: string, touchParent: boolean, touchAttach: boolean): Promise<void> {
+    if (!touchParent && !touchAttach) {
+      return;
+    }
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {};
+    if (touchParent) {
+      (bucket as Record<string, string>)['parent_uid'] = parentUid;
+    }
+    if (touchAttach) {
+      (bucket as Record<string, string>)['attachments'] = attachments;
+    }
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
   /** 单独更新待办的提醒列表（updateTodoFields 只管标题/备注/截止三字段） */
   static async setTodoReminders(context: common.Context, id: number,
     reminders: number[]): Promise<void> {
@@ -675,11 +724,17 @@ export class EventDb {
         e.recurrenceId = r.recurrenceId;
         e.reminder = r.reminder;
         e.reminders = r.reminders;
+        e.priority = r.priority;
+        e.categories = r.categories;
+        e.parentUid = r.parentUid;
+        e.attachments = r.attachments;
         await store.insert('events', EventDb.toBucket(e));
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
         || found.reminder !== r.reminder || found.recurring !== r.recurring
         || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
+        || found.priority !== r.priority || found.categories !== r.categories
+        || found.parentUid !== r.parentUid || found.attachments !== r.attachments
         || found.href !== href) {
         // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填；
         // href 变化也要更新——服务器上日历本被删除重建后集合 URL 变了，
@@ -707,6 +762,10 @@ export class EventDb {
         found.recurrenceId = r.recurrenceId;
         found.reminder = r.reminder;
         found.reminders = r.reminders;
+        found.priority = r.priority;
+        found.categories = r.categories;
+        found.parentUid = r.parentUid;
+        found.attachments = r.attachments;
         const up = new relationalStore.RdbPredicates('events');
         up.equalTo('id', found.id);
         await store.update(EventDb.toBucket(found), up);

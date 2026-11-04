@@ -2,6 +2,13 @@
 // iCalendar 解析与生成
 import { LocalEvent, RemoteEvent } from './EventDb';
 
+/** 解析 ATTACH 行得到的单个附件元数据（Index.ets 弹层也会用到，故 export） */
+export class AttachMeta {
+  name: string = '';
+  mime: string = '';
+  base64: string = '';
+}
+
 /** 解析出的远端日程（内部中间结构） */
 class ParsedEvent {
   uid: string = '';
@@ -346,7 +353,9 @@ export class IcsUtil {
    */
   static rewriteTodoFields(ics: string, uid: string, title: string,
     desc: string, dueMs: number, priority: number = -1, categories: string = '',
-    location: string = '', reminders: number[] = []): string {
+    location: string = '', reminders: number[] = [], parentUid: string = '',
+    attachments: string = '', touchParent: boolean = false,
+    touchAttach: boolean = false): string {
     // priority === -1 表示"本次不改优先级"；0 表示"清空优先级"。
     // 用 -1 而不是 0 做哨兵，因为 0 本身是合法语义（无优先级）。
     const touchPriority: boolean = priority >= 0;
@@ -432,6 +441,26 @@ export class IcsUtil {
         if (u.startsWith('END:VALARM')) { inAlarm = false; }
         continue;
       }
+      // 父任务：touched 时才改写，否则原样保留（不误删别人写的 RELATED-TO）
+      if (u.startsWith('RELATED-TO')) {
+        if (touchParent) {
+          if (parentUid !== '') {
+            out.push(IcsUtil.parentLine(parentUid));
+          }
+          // parentUid 空 → 删除该行
+          continue;
+        }
+        out.push(line);
+        continue;
+      }
+      // 附件：touched 时整段重建（删所有旧 ATTACH，末尾统一写新的）
+      if (u.startsWith('ATTACH')) {
+        if (touchAttach) {
+          continue; // 丢弃旧 ATTACH，末尾统一写
+        }
+        out.push(line);
+        continue;
+      }
       if (u.startsWith('PRIORITY') && touchPriority) {
         sawPriority = true;
         if (priority >= 1 && priority <= 9) {
@@ -472,6 +501,15 @@ export class IcsUtil {
     }
     if (!sawLocation && touchLocation) {
       extra.push('LOCATION:' + IcsUtil.escape(location));
+    }
+    if (touchParent && parentUid !== '') {
+      extra.push(IcsUtil.parentLine(parentUid));
+    }
+    if (touchAttach) {
+      const metas: AttachMeta[] = IcsUtil.jsonToAttachMeta(attachments);
+      for (const m of metas) {
+        extra.push(IcsUtil.attachLine(m));
+      }
     }
     // 提醒整体重建（上面已把旧 VALARM 整段跳过）
     if (reminders.length > 0) {
@@ -791,15 +829,21 @@ export class IcsUtil {
     const lines: string[] = unfolded.split(/\r?\n/);
     const parsed: RemoteEvent[] = [];
     let current: RemoteEvent | null = null;
+    let curAttaches: AttachMeta[] = [];
     for (const line of lines) {
       const upper: string = line.toUpperCase();
       if (upper.startsWith('BEGIN:VTODO')) {
         current = new RemoteEvent();
         current.isTodo = true;
+        curAttaches = [];
         continue;
       }
       if (upper.startsWith('END:VTODO')) {
         if (current !== null && current.uid !== '') {
+          // 附件：把收集到的 AttachMeta 序列化成 JSON 存进 RemoteEvent
+          if (curAttaches.length > 0) {
+            current.attachments = IcsUtil.attachMetaToJson(curAttaches);
+          }
           parsed.push(current);
         }
         current = null;
@@ -857,6 +901,20 @@ export class IcsUtil {
         if (value.toUpperCase() === 'COMPLETED') {
           current.completed = true;
         }
+      } else if (propName === 'RELATED-TO') {
+        // 父任务 UID。RELTYPE 参数默认 PARENT（本应用的语义）；
+        // 其他客户端可能不带参数，值就是父 UID，直接取。
+        current.parentUid = value;
+      } else if (propName === 'ATTACH') {
+        // 只收集内联 base64；URI 形式（ATTACH:http://...）暂不落库（服务器不支持托管，
+        // 且外部链接意义不大）。别人客户端写入的 URI 附件这里跳过、不报错。
+        if (propPart.toUpperCase().includes('ENCODING=BASE64')) {
+          const meta = new AttachMeta();
+          meta.base64 = value;
+          meta.mime = IcsUtil.paramValue(propPart, 'FMTTYPE');
+          meta.name = IcsUtil.paramValue(propPart, 'X-FILENAME');
+          curAttaches.push(meta);
+        }
       }
     }
     return parsed;
@@ -893,7 +951,8 @@ export class IcsUtil {
    */
   static buildTodo(uid: string, title: string, desc: string, dueMs: number,
     dueIsDateOnly: boolean, priority: number = 0, categories: string = '',
-    location: string = '', reminders: number[] = []): string {
+    location: string = '', reminders: number[] = [], parentUid: string = '',
+    attachments: string = ''): string {
     const now: string = IcsUtil.fmtUtcNow();
     let out: string = 'BEGIN:VCALENDAR\r\n' +
       'VERSION:2.0\r\n' +
@@ -916,6 +975,14 @@ export class IcsUtil {
     // 新建待办一律"未开始"，完成态由 setCompleted 切换到 COMPLETED
     out += 'STATUS:NEEDS-ACTION\r\n';
     out += IcsUtil.todoExtras(priority, categories, location);
+    if (parentUid !== '') {
+      out += IcsUtil.parentLine(parentUid) + '\r\n';
+    }
+    // 附件：内联 base64，可多条
+    const metas: AttachMeta[] = IcsUtil.jsonToAttachMeta(attachments);
+    for (const m of metas) {
+      out += IcsUtil.attachLine(m) + '\r\n';
+    }
     // VALARM：VTODO 的 TRIGGER 相对 DUE（RFC 5545 §3.8.6.3），
     // 所以复用现有 valarm() 生成的 -PT5M 就是"到期前 5 分钟"
     out += IcsUtil.valarmsPublic(reminders);
@@ -934,6 +1001,86 @@ export class IcsUtil {
    * @param categories 逗号分隔的标签；空 = 不写
    * @param location   地点文本；空 = 不写
    */
+  /** 从属性串里取参数值（如 propPart = "ATTACH;FMTTYPE=text/plain;X-FILENAME=报告.pdf"）。 */
+  private static paramValue(propPart: string, paramName: string): string {
+    const parts: string[] = propPart.split(';');
+    for (let i = 1; i < parts.length; i++) {
+      const seg: string = parts[i];
+      const eq: number = seg.indexOf('=');
+      if (eq > 0 && seg.substring(0, eq).toUpperCase() === paramName.toUpperCase()) {
+        return seg.substring(eq + 1).replace(/^"|"$/g, '');
+      }
+    }
+    return '';
+  }
+
+  /** AttachMeta[] → JSON 字符串（存库用）。 */
+  static attachMetaToJson(list: AttachMeta[]): string {
+    if (list.length === 0) {
+      return '';
+    }
+    const arr: string[] = [];
+    for (const a of list) {
+      arr.push(JSON.stringify({ name: a.name, mime: a.mime, base64: a.base64 }));
+    }
+    return '[' + arr.join(',') + ']';
+  }
+
+  /** JSON 字符串 → AttachMeta[]（解析库值用）。 */
+  static jsonToAttachMeta(json: string): AttachMeta[] {
+    if (json === '') {
+      return [];
+    }
+    try {
+      const arr = JSON.parse(json) as Record<string, string>[];
+      const out: AttachMeta[] = [];
+      for (const o of arr) {
+        const m = new AttachMeta();
+        m.name = o.name ?? '';
+        m.mime = o.mime ?? 'application/octet-stream';
+        m.base64 = o.base64 ?? '';
+        if (m.base64 !== '') {
+          out.push(m);
+        }
+      }
+      return out;
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 生成一条内联 base64 的 ATTACH 行（已折行）。 */
+  private static attachLine(meta: AttachMeta): string {
+    let head: string = 'ATTACH';
+    if (meta.mime !== '') {
+      head += `;FMTTYPE=${meta.mime}`;
+    }
+    head += ';ENCODING=BASE64;VALUE=BINARY';
+    if (meta.name !== '') {
+      // 逗号/分号属性值里要转义；文件名通常是中文或普通字符，稳妥起见转义
+      head += `;X-FILENAME=${meta.name}`;
+    }
+    return IcsUtil.foldLine(head + ':' + meta.base64);
+  }
+
+  /** 生成 RELATED-TO 行（父任务）。 */
+  private static parentLine(parentUid: string): string {
+    return `RELATED-TO;RELTYPE=PARENT:${parentUid}`;
+  }
+
+  /**
+   * RFC 5545 折行：本工程**有意不折**，直通返回。
+   *
+   * 为什么不做折行：
+   * 1. 现有 SUMMARY/DESCRIPTION/LOCATION/CATEGORIES 一贯整行输出，未做折行；
+   * 2. 目标服务器（群晖）实测 3792 字符整行 ATTACH 也能 PUT→201、GET 原样保留；
+   * 3. 折行是 RFC 5545 的 SHOULD 而非 MUST；一致性优先；
+   * 4. 折行若按 75 字符硬切，会把 UTF-8 中文名（如「报告.pdf」）拦腰切断成乱码。
+   */
+  static foldLine(line: string): string {
+    return line;
+  }
+
   static todoExtras(priority: number, categories: string, location: string): string {
     let out: string = '';
     if (priority >= 1 && priority <= 9) {

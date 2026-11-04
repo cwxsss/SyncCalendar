@@ -45,7 +45,9 @@ export class TodoService {
    */
   static async updateTodo(context: common.Context, localId: number, title: string,
     desc: string, dueMs: number, priority: number = -1, categories: string = '',
-    location: string = '', reminders: number[] = []): Promise<boolean> {
+    location: string = '', reminders: number[] = [], parentUid: string = '',
+    attachments: string = '', touchParent: boolean = false,
+    touchAttach: boolean = false): Promise<boolean> {
     const row: LocalEvent | null = await EventDb.queryById(context, localId);
     if (row === null || row.kind !== 'todo') {
       LogUtil.write(`待办更新失败：行不存在或不是待办 id=${localId}`);
@@ -76,12 +78,18 @@ export class TodoService {
         return false;
       }
       const updated: string = IcsUtil.rewriteTodoFields(original, row.uid, title, desc, dueMs,
-        priority, categories, location, reminders);
+        priority, categories, location, reminders, parentUid, attachments,
+        touchParent, touchAttach);
       const newEtag: string = await DavClient.putEvent(url, auth, updated);
       await EventDb.updateTodoFields(context, localId, title, desc,
         dueMs > 0 ? dueMs : 0, newEtag);
       // 提醒单独落库（updateTodoFields 只处理三个字段）
       await EventDb.setTodoReminders(context, localId, reminders);
+      // 子任务与附件：只有 touch 时才更新本地库（否则保留原值，避免覆盖）
+      if (touchParent || touchAttach) {
+        await EventDb.setTodoHierarchy(context, localId, parentUid, attachments,
+          touchParent, touchAttach);
+      }
       LogUtil.write(`待办更新成功 id=${localId}（标题已脱敏）`);
       return true;
     } catch (err) {
@@ -107,7 +115,8 @@ export class TodoService {
   static async createTodo(context: common.Context, href: string, title: string,
     desc: string, dueMs: number, dueIsDateOnly: boolean, priority: number = 0,
     categories: string = '', location: string = '',
-    reminders: number[] = []): Promise<number> {
+    reminders: number[] = [], parentUid: string = '',
+    attachments: string = ''): Promise<number> {
     const t: string = title.trim();
     if (t === '' || href === '') {
       LogUtil.write(`待办新建失败：标题或日历本为空`);
@@ -138,7 +147,7 @@ export class TodoService {
     try {
       // 4) 先推服务器：成功才落库，避免产生"本地有、服务器没有"的孤儿
       const ics: string = IcsUtil.buildTodo(uid, t, desc, dueMs, dueIsDateOnly,
-        priority, categories, location, reminders);
+        priority, categories, location, reminders, parentUid, attachments);
       const etag: string = await DavClient.putEvent(url, auth, ics);
 
       // 5) 落本地库（insertLocal 会置 dirty=true，但 etag 已写回故不会被重复推送）
@@ -160,6 +169,8 @@ export class TodoService {
       e.location = location;
       e.reminders = reminders;
       e.reminder = reminders.length > 0 ? reminders[0] : 0;
+      e.parentUid = parentUid;
+      e.attachments = attachments;
       e.dirty = false;  // 已经推成功了，无需再推
       e.deleted = false;
       const newId: number = await EventDb.insertLocal(context, e);
@@ -342,6 +353,32 @@ export class TodoService {
       }
       return 0;
     }
+  }
+
+  /**
+   * 级联完成：把 parentUid 指向某父任务的所有**未完成**子任务全部置完成。
+   *
+   * 用于父任务勾选完成时。只完成未完成的（已完成的跳过，幂等）。
+   * 逐条调用 setCompleted（它本身幂等 + 会 GET/PUT 服务器 + 更新本地）。
+   */
+  static async completeChildren(context: common.Context, parentUid: string): Promise<number> {
+    if (parentUid === '') {
+      return 0;
+    }
+    const rows: LocalEvent[] = await EventDb.queryTodos(context);
+    let done: number = 0;
+    for (const r of rows) {
+      if (r.parentUid === parentUid && !r.completed) {
+        const ok: boolean = await TodoService.setCompleted(context, r.id, true);
+        if (ok) {
+          done++;
+        }
+      }
+    }
+    if (done > 0) {
+      LogUtil.write(`级联完成 ${done} 个子任务（父 ${parentUid}）`);
+    }
+    return done;
   }
 
   static async setCompleted(context: common.Context, localId: number, done: boolean): Promise<boolean> {

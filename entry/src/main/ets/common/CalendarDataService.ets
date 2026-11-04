@@ -13,6 +13,7 @@ import { IcsUtil } from './IcsUtil';
 /** 界面展示用事件 */
 export class DisplayEvent {
   id: number = 0;          // 本地库 id 或系统日历事件 id
+  uid: string = '';        // 服务器 UID（待办父子关系用它匹配 parentUid）
   isSystem: boolean = false;
   title: string = '';
   description: string = '';
@@ -36,6 +37,10 @@ export class DisplayEvent {
   categories: string = '';
   /** 提醒提前分钟数（多选），空 = 不提醒 */
   reminders: number[] = [];
+  /** 父任务 UID（空 = 顶层任务），对应 RELATED-TO */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串（含 base64），空 = 无附件 */
+  attachments: string = '';
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
@@ -368,6 +373,7 @@ export class CalendarDataService {
         }
         const d = new DisplayEvent();
         d.id = e.id;
+        d.uid = e.uid;
         d.isSystem = false;
         d.title = e.title;
         d.description = e.description;
@@ -382,6 +388,8 @@ export class CalendarDataService {
         d.priority = e.priority;
         d.categories = e.categories;
         d.reminders = e.reminders;
+        d.parentUid = e.parentUid;
+        d.attachments = e.attachments;
         d.recurRule = e.rrule;
         d.dtstart = e.dtstart;
         d.recurring = e.rrule !== '';
