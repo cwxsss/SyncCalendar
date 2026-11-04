@@ -36,6 +36,8 @@ export class DayTimeline {
   allDay: DisplayEvent[] = [];    // 全天 / 跨天（画在 0 点之前）
   blocks: TimelineBlock[] = [];   // 时间轴色块
   hasTimed: boolean = false;      // 当天是否有有时间日程
+  /** 当天截止、尚未完成的待办（画在时间轴顶部、全天区之上，带勾选框） */
+  todos: DisplayEvent[] = [];
 }
 
 /** 冲突分组：一组时间上互相重叠的日程（用于横向平分宽度） */

@@ -654,13 +654,27 @@ struct Index {
     this.rebuildDayTimeline();
   }
 
+  /**
+   * 当天截止、尚未完成的待办（#45 待办投射到日历）。
+   * 待办的 DUE 存在 startTime；只有未完成且有截止时间的才显示。
+   */
+  private todosDueOn(dateMs: number): DisplayEvent[] {
+    const day: number = this.startOfDay(dateMs);
+    const out: DisplayEvent[] = this.todos.filter(
+      (t: DisplayEvent): boolean => !t.completed && t.startTime > 0
+        && this.startOfDay(t.startTime) === day);
+    out.sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+    return out;
+  }
+
   /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
   private rebuildDayTimeline(): void {
     const dayEvents: DisplayEvent[] = this.eventsOfDate(this.selectedDate);
     const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
+    tl.todos = this.todosDueOn(this.selectedDate);
     TimelineUtil.markNow(tl.blocks, this.nowMs);
     this.dayTimeline = tl;
-    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
+    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条，待办 ${tl.todos.length} 条`);
   }
 
   /** 选中日期变化（点月格/周条）→ 重算该日时间轴 */
@@ -680,6 +694,7 @@ struct Index {
     d.allDay = this.dayTimeline.allDay;
     d.blocks = this.dayTimeline.blocks;
     d.hasTimed = this.dayTimeline.hasTimed;
+    d.todos = this.dayTimeline.todos;
     this.dayTimeline = d;
     this.agendaTimelines = this.agendaTimelines.slice();
   }
@@ -2382,7 +2397,10 @@ struct Index {
           nowMs: this.nowMs,
           showNowLine: this.selectedDate === this.startOfDay(this.nowMs),
           scrollable: true,
-          onPick: (e: DisplayEvent): void => this.openEvent(e)
+          onPick: (e: DisplayEvent): void => this.openEvent(e),
+          onToggleTodo: (t: DisplayEvent): void => {
+            this.toggleTodo(t);
+          }
         })
         if (!this.dayTimeline.hasTimed && this.dayTimeline.allDay.length === 0 && !this.loading) {
           Text('当天没有日程')
@@ -2513,7 +2531,10 @@ struct Index {
                 nowMs: this.nowMs,
                 showNowLine: day.isToday,
                 scrollable: false,
-                onPick: (e: DisplayEvent): void => this.openEvent(e)
+                onPick: (e: DisplayEvent): void => this.openEvent(e),
+                onToggleTodo: (t: DisplayEvent): void => {
+                  this.toggleTodo(t);
+                }
               })
             }
             .width('100%')
@@ -2698,6 +2719,7 @@ struct Index {
       g.label = key === today ? '今天' : this.fmtDateCn(key);
       g.isToday = key === today;
       const tl: DayTimeline = TimelineUtil.build(map.get(key) ?? [], key);
+      tl.todos = this.todosDueOn(key);
       TimelineUtil.markNow(tl.blocks, this.nowMs);
       g.timeline = tl;
       out.push(g);
@@ -4132,6 +4154,11 @@ struct Index {
         }
         // 重新读库刷新列表（服务层已更新 completed）
         this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        // ⭐ 时间轴上的待办区是快照，勾选后必须重建，否则不消失/不划线（#45）
+        this.rebuildDayTimeline();
+        if (this.mode === 'agenda') {
+          this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+        }
         // ⭐ 桌面卡片是独立实例，必须显式推送，否则停在旧数据
         await CardDataService.pushToAllForms(ctx);
         // 完成/取消完成会改变"该不该提醒"，需要重排
@@ -4353,6 +4380,7 @@ struct DayTimelineView {
   private twoLineVp: number = 30;    // 能放下"标题 + 时间/地点"两行的高度门槛
   private threeLineVp: number = 46;  // 能放下"标题 / 时间 / 地址"三行的高度门槛
   onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {};
+  onToggleTodo: (t: DisplayEvent) => void = (t: DisplayEvent): void => {}; // 勾选待办回调
   private scroller: Scroller = new Scroller();
   @State private viewportH: number = 0; // 滚动视口高度（由 Scroll 实测，用于把"当前时刻"居中）
   @State private allDayH: number = 0;   // 顶部"全天/跨天"区高度（它现在随内容滚动，居中定位要加上）
@@ -4629,6 +4657,45 @@ struct DayTimelineView {
   @Builder
   private timelineBody() {
     Column() {
+      // ⭐ 当天截止待办区（#45）：画在最顶，全天/跨天之上，随内容一起滚动。
+      if (this.timeline.todos.length > 0) {
+        Column({ space: 4 }) {
+          ForEach(this.timeline.todos, (td: DisplayEvent) => {
+            Row({ space: 8 }) {
+              // 勾选圈：点击切换完成（与待办列表同一回调）
+              Text(td.completed ? '✓' : '')
+                .fontSize(12)
+                .fontColor(td.completed ? '#FFFFFF' : 'rgba(0,0,0,0)')
+                .width(18)
+                .height(18)
+                .textAlign(TextAlign.Center)
+                .borderRadius(9)
+                .backgroundColor(td.completed ? td.color : 'rgba(0,0,0,0)')
+                .border({ width: 1.5, color: td.color })
+                .onClick(() => {
+                  this.onToggleTodo(td);
+                })
+              Text(td.title === '' ? '(无标题待办)' : td.title)
+                .fontSize(12)
+                .fontColor($r('app.color.text_primary'))
+                .decoration({ type: td.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 0.5, color: $r('app.color.shadow_color') })
+          }, (td: DisplayEvent) => `todo_${this.timeline.dateKey}_${td.id}_${td.completed}`)
+        }
+        .width('100%')
+        .padding({ bottom: 6 })
+      }
+
       // 全天 / 跨天日程：同样用**色块**展示（与普通日程保持一致的视觉），
       // 画在 0 点之前并**随内容一起滚动**（向下滑时跟 0 点一起上移，不再常驻顶部）
       if (this.timeline.allDay.length > 0) {
