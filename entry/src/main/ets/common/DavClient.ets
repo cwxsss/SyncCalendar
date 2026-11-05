@@ -465,6 +465,16 @@ export class DavClient {
     return DavClient.reportComponents(href, auth, 'VTODO', '');
   }
 
+  /** 不带 comp-filter 的全量 calendar-query（诊断用） */
+  static async reportAll(href: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' +
+      '<d:prop><d:getetag/><c:calendar-data/></d:prop>' +
+      '<c:filter><c:comp-filter name="VCALENDAR"/></c:filter>' +
+      '</c:calendar-query>';
+    return DavClient.reportRaw(href, auth, body, 'ALL');
+  }
+
   /** 通用 REPORT：按组件类型过滤拉取 calendar-data + getetag */
   private static async reportComponents(href: string, auth: string,
     compName: string, timeRange: string): Promise<RemoteItem[]> {
@@ -475,6 +485,12 @@ export class DavClient {
       `<c:comp-filter name="${compName}">` +
       timeRange +
       '</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>';
+    return DavClient.reportRaw(href, auth, body, compName);
+  }
+
+  /** 通用 REPORT 执行器：传完整 body，返回解析后的资源列表 */
+  static async reportRaw(href: string, auth: string, body: string,
+    compName: string): Promise<RemoteItem[]> {
     const httpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await httpRequest.request(href, {
