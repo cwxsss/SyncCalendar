@@ -161,6 +161,16 @@ export class SyncEngine {
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
       LogUtil.write(`日历本[${i}]「${calName}」开始同步：${href}`);
       const t1: number = Date.now();
+      // ⭐ 纯待办本（COMP_SET 只有 VTODO）不跑 event 通道。
+      //    实测群晖：对纯待办本做 event 的 REPORT 会返回文件列表，
+      //    里面其实是 VTODO 文件，被 parseEvents 解析成 0 条日程却仍落库
+      //    → 本地库出现 kind='event' 记录，而所在本是待办本。
+      //    后果：这条"假日程"在待办列表看不到（列表只查 kind='todo'），
+      //    但点它编辑会走日程通道，报"需要联网 + 日历本需可写"。
+      const thisComps: string = i < acc.calendarComps.length ? acc.calendarComps[i] : '';
+      if (thisComps === 'todo') {
+        LogUtil.write(`日历本[${i}]「${calName}」是纯待办本(COMP_SET=todo)，跳过 event 通道`);
+      } else {
       let items: RemoteItem[] = [];
       try {
         items = await DavClient.reportEtags(href, auth);
@@ -307,6 +317,8 @@ export class SyncEngine {
       const stat: string = await EventDb.applyRemote(context, calKey, href, remote, false);
       LogUtil.write(`日历本[${i}]「${calName}」日程落库完成：${stat}，耗时 ${Math.round((Date.now() - t1) / 1000)} 秒`);
       changed += remote.length;
+      } // end else（非纯待办本才跑 event 通道）
+
       // 3) 拉取该日历本下的待办（VTODO，只读展示，拉取失败不影响日程同步）
       try {
         const todoItems = await DavClient.reportTodos(href, auth);

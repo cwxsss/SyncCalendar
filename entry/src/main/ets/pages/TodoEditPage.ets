@@ -615,9 +615,11 @@ struct TodoEditPage {
                 .fontColor(this.hasDue
                   ? $r('app.color.text_primary') : $r('app.color.text_hint'))
               Blank()
-              Text('修改')
-                .fontSize(13)
-                .fontColor($r('app.color.brand'))
+              // ⭐ 不再显示"修改"文字：整行可点，右侧放个箭头作为可点的视觉暗示
+              //    （与日程页的「开始/结束时间」行一致）
+              Text('›')
+                .fontSize(18)
+                .fontColor($r('app.color.text_hint'))
             }
             .layoutWeight(1)
             .padding({ left: 12, right: 12, top: 12, bottom: 12 })

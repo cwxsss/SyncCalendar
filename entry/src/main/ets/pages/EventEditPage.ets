@@ -1391,7 +1391,8 @@ struct EventEditPage {
   }
 
   build() {
-    Column({ space: 14 }) {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 14 }) {
       // 顶部（与内容区左右对齐，避免贴边误触）
       Row({ space: 6 }) {
         Text('取消')
@@ -1832,27 +1833,41 @@ struct EventEditPage {
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
       .align(Alignment.Top)
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: 12 })
+      .backgroundColor($r('app.color.page_bg'))
+      // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+
+      // ===== 居中弹层 =====
+      if (this.sheetShow) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => {
+            this.sheetShow = false;
+          })
+        this.centerSheet()
+      }
     }
     .width('100%')
     .height('100%')
-    .padding({ top: 12 })
-    .backgroundColor($r('app.color.page_bg'))
-    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    // ⚠️ 整个页面**只允许一个 bindSheet**：挂两个时后者会覆盖前者，
-    //    表现为"时间选择框白框一闪而过"（范围弹层顶掉了它）。
-    //    这里用 sheetMode 在同一个弹层里切换内容。
-    .bindSheet($$this.sheetShow, this.bottomSheet(), {
-      height: this.sheetMode === 'scope' ? 320 : (this.sheetMode === 'repeatEnd' ? 340 : 380),
-      showClose: false,
-      dragBar: true,
-      backgroundColor: $r('app.color.card_bg')
-    })
   }
 
-  /** ⭐ 唯一的底部弹层：按 sheetMode 切换显示"时间选择"/"重复范围选择"/"重复截止日期" */
+  /**
+   * 居中弹层（自绘覆盖层，与待办页一致）。
+   *
+   * 原来用 bindSheet 从底部弹出，用户反馈"点完之后选择框在下面出来，操作不顺畅"。
+   * 改成屏幕居中，视线不用上下跳。
+   *
+   * 为什么不用 bindSheet：SDK 的 SheetOptions 没有 position/alignment，只能底部弹。
+   */
   @Builder
-  bottomSheet() {
+  centerSheet() {
     if (this.sheetMode === 'scope') {
       this.scopeSheet()
     } else if (this.sheetMode === 'repeatEnd') {

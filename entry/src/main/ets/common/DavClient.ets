@@ -501,6 +501,8 @@ export class DavClient {
       }
       const xml: string = resp.result as string;
       LogUtil.write(`HTTP REPORT(${compName}) 响应体 ${xml.length} 字符`);
+      LogUtil.write(`REPORT-诊断(${compName}) 前200字符: ${xml.substring(0, 200)}`);
+      LogUtil.write(`REPORT-诊断(${compName}) 含VTODO=${xml.indexOf('BEGIN:VTODO') >= 0} 含VEVENT=${xml.indexOf('BEGIN:VEVENT') >= 0} 响应数=${(xml.match(/<[\w-]*:?response[\s>]/gi) || []).length}`);
       const originMatch = /https?:\/\/[^/]+/i.exec(href);
       const origin: string = originMatch !== null ? originMatch[0] : '';
       const items: RemoteItem[] = [];
@@ -524,6 +526,13 @@ export class DavClient {
         item.etag = etag;
         item.ics = block.substring(start, end + 'END:VCALENDAR'.length);
         items.push(item);
+      }
+      LogUtil.write(`诊断 blocks=${blocks.length} items=${items.length} xml长=${xml.length}`);
+      for (let bi = 0; bi < blocks.length; bi++) {
+        const bb: string = blocks[bi];
+        if (!/<[\w-]*:?response[\s>]/i.test(bb)) { continue; }
+        const h: string = DavClient.extractTag(bb, "href");
+        LogUtil.write(`诊断 block${bi} len=${bb.length} href=[${h.substring(0,50)}] VCAL=${bb.indexOf("BEGIN:VCALENDAR")>=0} VTODO=${bb.indexOf("BEGIN:VTODO")>=0}`);
       }
       return items;
     } finally {

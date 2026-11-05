@@ -3637,6 +3637,7 @@ struct Index {
     // ⭐ 改为独立页面（与编辑日程一致）：把 id 预置后跳转
     AppStorage.setOrCreate<number>('pendingTodoId', t.id);
     AppStorage.setOrCreate<number>('pendingTodoDate', 0);
+    LogUtil.write(`打开待办编辑：id=${t.id} uid=${t.uid} 标题长度=${t.title.length} 本=${t.calKey}`);
     router.pushUrl({ url: 'pages/TodoEditPage' });
     return;
   }
