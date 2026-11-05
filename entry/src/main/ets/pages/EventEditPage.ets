@@ -1917,8 +1917,10 @@ struct EventEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
   /** ⭐ 重复日程"作用范围"选择弹层：保存/删除前让用户明确改哪几次 */
@@ -1954,8 +1956,10 @@ struct EventEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 20, right: 20 })
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
   @Builder
@@ -2164,8 +2168,10 @@ struct EventEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 }
 
