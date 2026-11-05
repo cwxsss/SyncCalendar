@@ -191,19 +191,15 @@ struct TodoEditPage {
         if (this.books.length > 0) {
           this.bookKey = this.books[0].calKey;
         }
-        // 预填截止日（从月视图某天点进来时带过来）
-        const preDate: number = AppStorage.get<number>('pendingTodoDate') ?? 0;
-        AppStorage.setOrCreate<number>('pendingTodoDate', 0);
-        if (preDate > 0) {
-          const d = new Date(preDate);
-          this.pickDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-          this.hasDue = true;
-          this.dueMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 9, 0).getTime();
-        } else {
-          // 默认"明天 09:00"，与新建日程口径一致
-          const base = new Date();
-          this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
-        }
+        // ⭐ 新建待办默认**无截止时间**（hasDue 保持 false）。
+        //    待办是"要完成的事"，不是"发生在某天的事"，多数一开始不确定哪天截止。
+        //    日期选择器只预置一个合理的初始值（明天），用户点了才会真正设置。
+        const base = new Date();
+        this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1);
+        this.pickHour = 9;
+        this.pickMin = 0;
+        this.hasDue = false;
+        this.dueMs = 0;
       }
     } catch (err) {
       LogUtil.write(`待办编辑页初始化失败: ${(err as BusinessError).message ?? ''}`);

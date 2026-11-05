@@ -3627,8 +3627,11 @@ struct Index {
    */
   private async openTodoCreator(): Promise<void> {
     // ⭐ 改为独立页面（与新建日程一致）：预置参数后跳转
+    //    待办默认**没有截止时间**（与日程不同：待办不是"发生在某天的事"，
+    //    而是"要完成的事"，多数待办一开始并不确定哪天截止）。
+    //    所以不传 pendingTodoDate（0 = 不预填）。
     AppStorage.setOrCreate<number>('pendingTodoId', 0);
-    AppStorage.setOrCreate<number>('pendingTodoDate', this.selectedDate);
+    AppStorage.setOrCreate<number>('pendingTodoDate', 0);
     router.pushUrl({ url: 'pages/TodoEditPage' });
   }
 
