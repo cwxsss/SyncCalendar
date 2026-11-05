@@ -465,6 +465,42 @@ export class DavClient {
     return DavClient.reportComponents(href, auth, 'VTODO', '');
   }
 
+  /** PROPFIND Depth:1 列出某集合下所有资源的文件名（诊断用，不做组件过滤） */
+  static async listNames(href: string, auth: string): Promise<string[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(href, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 30000
+      });
+      const xml: string = resp.result as string;
+      LogUtil.write(`PROPFIND诊断 状态=${resp.responseCode} 响应体=${xml.length}字符`);
+      const out: string[] = [];
+      const re = /<[\w-]*:?href>([^<]+)<\/[\w-]*:?href>/gi;
+      let m: RegExpExecArray | null = re.exec(xml);
+      while (m !== null) {
+        const h: string = m[1];
+        if (h.indexOf('.ics') >= 0) {
+          out.push(decodeURIComponent(h.substring(h.lastIndexOf('/') + 1)));
+        }
+        m = re.exec(xml);
+      }
+      return out;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
   /** 不带 comp-filter 的全量 calendar-query（诊断用） */
   static async reportAll(href: string, auth: string): Promise<RemoteItem[]> {
     const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
