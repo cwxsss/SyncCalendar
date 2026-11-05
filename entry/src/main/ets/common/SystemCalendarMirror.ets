@@ -40,6 +40,7 @@ import { calendarManager } from '@kit.CalendarKit';
 import { AccountStore, BookPalette, DavAccount } from './AccountStore';
 import { EventDb, LocalEvent } from './EventDb';
 import { IcsTime, IcsUtil } from './IcsUtil';
+import { isSolarTerm } from './LunarUtil';
 import { RruleUtil } from './RruleUtil';
 import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
@@ -1191,11 +1192,20 @@ export class SystemCalendarMirror {
     startTs: number,
     endTs: number
   ): calendarManager.Event {
+    let finalEndTs = endTs;
+    if (e.isAllDay) {
+      if (isSolarTerm(e.title)) {
+        finalEndTs = SystemCalendarMirror.dayStart(startTs) + SystemCalendarMirror.DAY - 1000;
+      } else {
+        const lastDayStart = SystemCalendarMirror.dayStart(endTs > startTs ? endTs - 1 : endTs);
+        finalEndTs = lastDayStart + SystemCalendarMirror.DAY - 1000;
+      }
+    }
     const ev: calendarManager.Event = {
       type: calendarManager.EventType.NORMAL,
       title: e.title !== '' ? e.title : '(无标题)',
       startTime: startTs,
-      endTime: e.isAllDay ? SystemCalendarMirror.dayStart(endTs) + SystemCalendarMirror.DAY : endTs,
+      endTime: finalEndTs,
       isAllDay: e.isAllDay,
       identifier: identifier
     };

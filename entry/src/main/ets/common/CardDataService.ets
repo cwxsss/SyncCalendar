@@ -6,7 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { preferences } from '@kit.ArkData';
 import { CalendarDataService, DisplayEvent } from './CalendarDataService';
 import { AppSettings } from './AppSettings';
-import { LunarUtil } from './LunarUtil';
+import { LunarUtil, isSolarTerm } from './LunarUtil';
 import { LogUtil } from './LogUtil';
 import { TimelineUtil, DayTimeline, TimelineBlock } from './TimelineUtil';
 
@@ -348,8 +348,13 @@ export class CardDataService {
         .filter((e: DisplayEvent): boolean => e.endTime > todayKey || (e.startTime >= todayKey && e.endTime >= e.startTime));
 
       const dayKey = (ms: number): number => CardDataService.startOfDay(ms);
-      const spansDays = (e: DisplayEvent): boolean =>
-        dayKey(e.endTime) > dayKey(e.startTime);
+      const spansDays = (e: DisplayEvent): boolean => {
+        if (isSolarTerm(e.title)) {
+          return false;
+        }
+        const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
+        return dayKey(effectiveEnd) > dayKey(e.startTime);
+      };
       // 已开始的跨天日程按全天展示（不参与时间轴定位）
       const isDayLong = (e: DisplayEvent): boolean => e.isAllDay || spansDays(e);
       const groups = new Map<number, DisplayEvent[]>();
@@ -483,8 +488,17 @@ export class CardDataService {
           grp.dateLabel = `${grp.shortDate} ${grp.weekday}`;
         }
 
-        const dayEvs: DisplayEvent[] = events.filter((e: DisplayEvent): boolean =>
-          e.startTime < curDayEnd && e.endTime > curDayStart);
+        const dayEvs: DisplayEvent[] = events.filter((e: DisplayEvent): boolean => {
+          const startDay = CardDataService.startOfDay(e.startTime);
+          let endDay = startDay;
+          if (isSolarTerm(e.title)) {
+            endDay = startDay;
+          } else {
+            const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
+            endDay = CardDataService.startOfDay(effectiveEnd);
+          }
+          return curDayStart >= startDay && curDayStart <= endDay;
+        });
         const dayAllDay = dayEvs.filter((e: DisplayEvent): boolean => e.isAllDay || spansDays(e));
         const dayTimed = dayEvs.filter((e: DisplayEvent): boolean => !e.isAllDay && !spansDays(e))
           .sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);

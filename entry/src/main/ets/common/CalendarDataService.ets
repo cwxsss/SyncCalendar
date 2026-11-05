@@ -9,6 +9,7 @@ import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { RruleUtil } from './RruleUtil';
 import { IcsUtil } from './IcsUtil';
+import { isSolarTerm } from './LunarUtil';
 import { SystemCalendarMirror } from './SystemCalendarMirror';
 import { SyncEngine } from './SyncEngine';
 import { DavClient } from './DavClient';
@@ -47,6 +48,13 @@ export class DisplayEvent {
 }
 
 export class CalendarDataService {
+  /** 获取某时刻所在自然日 00:00:00.000 时间戳 */
+  static startOfDay(ms: number): number {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
   /** 本功能依赖的日历权限：读取本应用日历 + 读取全部日历（即"读取全部日程"） */
   private static readonly CALENDAR_PERMISSIONS: Permissions[] = [
     'ohos.permission.READ_CALENDAR'
@@ -265,6 +273,19 @@ export class CalendarDataService {
           d.endTime = occ + dur;
           const spanFullDay = (dur > 0 && dur % 86400000 === 0 && new Date(occ).getHours() === 0);
           d.isAllDay = e.isAllDay || spanFullDay;
+          if (isSolarTerm(d.title)) {
+            const day0: number = CalendarDataService.startOfDay(occ);
+            d.startTime = day0;
+            d.endTime = day0 + 86400000 - 1000;
+            d.isAllDay = true;
+          } else if (d.isAllDay) {
+            // 全天日程规范化：单日全天日程确保 endTime 在当天 23:59:59，避免次日误显或小组件误杀
+            if (dur <= 0 || dur === 86400000) {
+              const day0: number = CalendarDataService.startOfDay(occ);
+              d.startTime = day0;
+              d.endTime = day0 + 86400000 - 1000;
+            }
+          }
           d.calKey = e.calKey;
           d.calName = baseName;
           d.color = baseColor;
@@ -328,6 +349,19 @@ export class CalendarDataService {
               d.endTime = ev.endTime;
               const span24h = (d.endTime > d.startTime) && ((d.endTime - d.startTime) % 86400000 === 0);
               d.isAllDay = ev.isAllDay === true || (span24h && new Date(d.startTime).getHours() === 0);
+              if (isSolarTerm(d.title)) {
+                const day0: number = CalendarDataService.startOfDay(d.startTime);
+                d.startTime = day0;
+                d.endTime = day0 + 86400000 - 1000;
+                d.isAllDay = true;
+              } else if (d.isAllDay) {
+                const durSys = d.endTime - d.startTime;
+                if (durSys <= 0 || durSys === 86400000) {
+                  const day0: number = CalendarDataService.startOfDay(d.startTime);
+                  d.startTime = day0;
+                  d.endTime = day0 + 86400000 - 1000;
+                }
+              }
               d.calKey = sysKey;
               d.calName = nameOf(sysKey);
               d.color = color;

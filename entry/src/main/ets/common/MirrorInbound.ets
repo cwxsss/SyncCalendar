@@ -22,6 +22,7 @@ import { common } from '@kit.AbilityKit';
 import { calendarManager } from '@kit.CalendarKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
+import { isSolarTerm } from './LunarUtil';
 import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { MirrorSnapshot, MirrorSnapshotRow } from './MirrorSnapshot';
@@ -303,11 +304,20 @@ export class MirrorInbound {
     e.location = ev.location?.location ?? '';
     e.startTime = ev.startTime;
     e.isAllDay = ev.isAllDay === true;
-    // 系统全天 endTime 可能是"次日 00:00"，也可能是"当日 23:59:59.999"
-    // → 统一成本工程约定："排他结束日前一毫秒"
-    e.endTime = e.isAllDay
-      ? MirrorInbound.dayStart(ev.endTime - 1) + MirrorInbound.DAY - 1
-      : ev.endTime;
+    if (e.isAllDay) {
+      if (isSolarTerm(e.title)) {
+        const day0 = MirrorInbound.dayStart(ev.startTime);
+        e.startTime = day0;
+        e.endTime = day0 + MirrorInbound.DAY - 1000;
+      } else {
+        const lastDayStart = (ev.endTime > ev.startTime)
+          ? MirrorInbound.dayStart(ev.endTime - 1)
+          : MirrorInbound.dayStart(ev.startTime);
+        e.endTime = lastDayStart + MirrorInbound.DAY - 1000;
+      }
+    } else {
+      e.endTime = ev.endTime;
+    }
     e.rrule = MirrorInbound.rruleOf(ev);
     e.recurring = e.rrule !== '';
     if (ev.reminderTime !== undefined && ev.reminderTime.length > 0) {

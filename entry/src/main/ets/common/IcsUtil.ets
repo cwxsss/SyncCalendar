@@ -1,6 +1,7 @@
 // entry/src/main/ets/common/IcsUtil.ets
 // iCalendar 解析与生成
 import { LocalEvent, RemoteEvent } from './EventDb';
+import { isSolarTerm } from './LunarUtil';
 
 /** 解析出的远端日程（内部中间结构） */
 class ParsedEvent {
@@ -28,6 +29,13 @@ export class IcsTime {
 }
 
 export class IcsUtil {
+  /** 获取某时刻所在日 00:00:00.000 毫秒时间戳 */
+  static startOfDay(ms: number): number {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
   /** 解析 VCALENDAR 文本为事件列表 */
   static parse(ics: string): RemoteEvent[] {
     const unfolded: string = ics.replace(/\r?\r\n[ \t]/g, '');
@@ -42,11 +50,28 @@ export class IcsUtil {
       }
       if (upper.startsWith('END:VEVENT')) {
         if (current !== null && current.startTime > 0) {
-          // 无 DTEND 时用 DURATION；都没有则视为零长事件（不再丢弃整条）
-          if (current.endTime < current.startTime) {
-            current.endTime = current.duration > 0
-              ? current.startTime + current.duration
-              : current.startTime;
+          if (isSolarTerm(current.title)) {
+            const day0 = IcsUtil.startOfDay(current.startTime);
+            current.startTime = day0;
+            current.endTime = day0 + 86400000 - 1000;
+            current.isAllDay = true;
+          } else {
+            // 无 DTEND 时用 DURATION；都没有则视为零长事件
+            if (current.endTime < current.startTime) {
+              current.endTime = current.duration > 0
+                ? current.startTime + current.duration
+                : current.startTime;
+            }
+            // RFC 5545：全天日程若缺失 DTEND 或 DTEND 算后 <= DTSTART，默认持续 1 天（结束于当天 23:59:59）
+            if (current.isAllDay && current.endTime <= current.startTime) {
+              current.endTime = current.startTime + 86400000 - 1000;
+            }
+            // 若起止时间跨度恰好为 1 整天（86400000ms）且从 00:00 开始，规范为全天日程（结束于当天 23:59:59）
+            const dur = current.endTime - current.startTime;
+            if (dur === 86400000 && new Date(current.startTime).getHours() === 0) {
+              current.isAllDay = true;
+              current.endTime = current.startTime + 86400000 - 1000;
+            }
           }
           parsed.push(current);
         }

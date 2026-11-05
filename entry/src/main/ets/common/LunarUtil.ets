@@ -7,6 +7,26 @@ export class LunarDate {
   isLeap: boolean = false;
 }
 
+/** 中国二十四节气列表（按季节公历顺序，公历阳历单日事件） */
+export const SOLAR_TERMS: string[] = [
+  '小寒', '大寒', '立春', '雨水', '惊蛰', '春分',
+  '清明', '谷雨', '立夏', '小满', '芒种', '夏至',
+  '小暑', '大暑', '立秋', '处暑', '白露', '秋分',
+  '寒露', '霜降', '立冬', '小雪', '大雪', '冬至'
+];
+
+/** 判断日程标题是否为二十四节气（公历单天全天日程） */
+export function isSolarTerm(title: string): boolean {
+  if (!title) {
+    return false;
+  }
+  const t = title.trim();
+  return SOLAR_TERMS.some((st: string): boolean =>
+    t === st || t === `${st}节气` || t.includes(`节气 - ${st}`) || t.includes(`二十四节气 - ${st}`) ||
+    t.endsWith(`·${st}`) || t.endsWith(` ${st}`) || t.startsWith(`${st} `)
+  );
+}
+
 export class LunarUtil {
   // 农历压缩数据表：每年一个十六进制值（1900~2100）
   private static readonly LUNAR_INFO: number[] = [

@@ -3,6 +3,7 @@
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { SOLAR_TERMS } from './LunarUtil';
 
 /** 本地事件行 */
 export class LocalEvent {
@@ -145,6 +146,23 @@ export class EventDb {
       await store.executeSql('ALTER TABLE events ADD COLUMN recurrence_id INTEGER DEFAULT 0');
     } catch (err) {
       // 列已存在
+    }
+    // 修复已有全天日程数据：将 0 时长全天日程规范为当天 23:59:59
+    try {
+      await store.executeSql(
+        'UPDATE events SET end_time = start_time + 86399000 WHERE is_all_day = 1 AND end_time <= start_time'
+      );
+    } catch (err) {
+      // 忽略
+    }
+    // 修复已有二十四节气日程数据：节气均为单日全天日程，防止被镜像或误解析拉伸到次日
+    try {
+      const cond = SOLAR_TERMS.map((st: string) => `title LIKE '%${st}%'`).join(' OR ');
+      await store.executeSql(
+        `UPDATE events SET is_all_day = 1, end_time = start_time + 86399000 WHERE (${cond}) AND end_time > start_time + 86399000`
+      );
+    } catch (err) {
+      // 忽略
     }
     EventDb.db = store;
     return store;

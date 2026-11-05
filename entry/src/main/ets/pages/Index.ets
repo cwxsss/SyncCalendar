@@ -9,7 +9,7 @@ import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/Acco
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
 import { SyncEngine, SyncBusyError } from '../common/SyncEngine';
 import { LogUtil } from '../common/LogUtil';
-import { LunarUtil } from '../common/LunarUtil';
+import { LunarUtil, isSolarTerm } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
@@ -530,9 +530,14 @@ struct Index {
     const map = new Map<number, DisplayEvent[]>();
     for (const e of this.events) {
       const startDay = this.startOfDay(e.startTime);
-      // 修复问题 7：半开区间判定。如果结束时间在某天 00:00:00，则实际属于前一天结束，不计入下一天！
-      const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
-      const endDay = this.startOfDay(effectiveEnd);
+      let endDay = startDay;
+      if (isSolarTerm(e.title)) {
+        endDay = startDay;
+      } else {
+        // 半开区间判定：如果结束时间在某天 00:00:00，则实际属于前一天结束，不计入下一天！
+        const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
+        endDay = this.startOfDay(effectiveEnd);
+      }
       for (let t = startDay; t <= endDay; t += 86400000) {
         const arr = map.get(t);
         if (arr === undefined) {
@@ -4009,7 +4014,11 @@ struct Index {
 
   /** 是否跨天（结束日期晚于开始日期） */
   private spansDays(e: DisplayEvent): boolean {
-    return this.startOfDay(e.endTime) > this.startOfDay(e.startTime);
+    if (isSolarTerm(e.title)) {
+      return false;
+    }
+    const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
+    return this.startOfDay(effectiveEnd) > this.startOfDay(e.startTime);
   }
 
   @Builder

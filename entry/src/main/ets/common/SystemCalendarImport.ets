@@ -6,6 +6,7 @@ import { common } from '@kit.AbilityKit';
 import { calendarManager } from '@kit.CalendarKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
+import { isSolarTerm } from './LunarUtil';
 import { AppSettings } from './AppSettings';
 import { LogUtil } from './LogUtil';
 import { BookRef, SystemCalendarMirror } from './SystemCalendarMirror';
@@ -102,8 +103,22 @@ export class SystemCalendarImport {
             e.location = ev.location !== undefined && ev.location.location !== undefined
               ? ev.location.location : '';
             e.startTime = ev.startTime;
-            e.endTime = ev.endTime;
             e.isAllDay = ev.isAllDay === true;
+            if (e.isAllDay) {
+              const startDay = new Date(ev.startTime);
+              startDay.setHours(0, 0, 0, 0);
+              if (isSolarTerm(ev.title ?? '')) {
+                e.startTime = startDay.getTime();
+                e.endTime = startDay.getTime() + 86400000 - 1000;
+              } else {
+                const lastDay = (ev.endTime > ev.startTime) ? new Date(ev.endTime - 1) : new Date(ev.startTime);
+                lastDay.setHours(0, 0, 0, 0);
+                e.startTime = startDay.getTime();
+                e.endTime = lastDay.getTime() + 86400000 - 1000;
+              }
+            } else {
+              e.endTime = ev.endTime;
+            }
             e.kind = 'event';
             e.rrule = SystemCalendarImport.rruleOf(ev);
             e.recurring = e.rrule !== '';
