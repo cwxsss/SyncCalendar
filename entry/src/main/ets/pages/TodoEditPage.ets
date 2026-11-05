@@ -75,6 +75,14 @@ struct TodoEditPage {
 
   // ---------- 截止时间选择器 ----------
   @State pickShow: boolean = false;
+  /**
+   * ⭐ 页面唯一底部弹层（ArkUI 同一页面挂多个 bindSheet 会互相覆盖，
+   *    实测表现为"白框一闪而过"）。用 sheetMode 切换内容：
+   *      'due'    → 截止时间（日期 + 时间滚轮）
+   *      'parent' → 父任务选择
+   */
+  @State sheetShow: boolean = false;
+  @State sheetMode: string = 'due';
   @State pickDate: Date = new Date();
   @State pickHour: number = 9;
   @State pickMin: number = 0;
@@ -615,7 +623,8 @@ struct TodoEditPage {
             .borderRadius(10)
             .backgroundColor($r('app.color.card_bg'))
             .onClick(() => {
-              this.pickShow = true;
+              this.sheetMode = 'due';
+              this.sheetShow = true;
             })
             if (this.hasDue) {
               Text('清除')
@@ -745,7 +754,8 @@ struct TodoEditPage {
                 .fontSize(13)
                 .fontColor($r('app.color.brand'))
                 .onClick(() => {
-                  this.parentPickShow = true;
+                  this.sheetMode = 'parent';
+                  this.sheetShow = true;
                 })
             }
           }
@@ -754,7 +764,8 @@ struct TodoEditPage {
           .borderRadius(10)
           .backgroundColor($r('app.color.card_bg'))
           .onClick(() => {
-            this.parentPickShow = true;
+            this.sheetMode = 'parent';
+            this.sheetShow = true;
           })
 
           // 附件
@@ -847,6 +858,170 @@ struct TodoEditPage {
     // ⭐ 沉浸式：背景延伸到状态栏/导航条区域（与 EventEditPage 一致）
     //    只扩绘制范围、不移动子组件 → 状态栏区域同色，不再是割裂的白条
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .bindSheet($$this.sheetShow, this.bottomSheet(), {
+      height: this.sheetMode === 'parent' ? 400 : 380,
+      showClose: false,
+      dragBar: true,
+      backgroundColor: $r('app.color.card_bg')
+    })
+  }
+
+  /** 唯一底部弹层：按 sheetMode 切换内容 */
+  @Builder
+  bottomSheet() {
+    if (this.sheetMode === 'parent') {
+      this.parentSheet()
+    } else {
+      this.dueSheet()
+    }
+  }
+
+  /** 截止时间选择弹层（日期 + 时间） */
+  @Builder
+  dueSheet() {
+    Column({ space: 14 }) {
+      Text('选择截止时间')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+      Row({ space: 6 }) {
+        DatePicker({
+          start: new Date(2000, 0, 1),
+          end: new Date(2050, 11, 31),
+          selected: this.pickDate
+        })
+          .onDateChange((value: Date) => {
+            this.pickDate = value;
+          })
+          // 滚轮文字显式指定颜色：默认取系统主题色，深色模式下会与弹层底色撞色
+          .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+          .selectedTextStyle({
+            color: $r('app.color.text_primary'),
+            font: { size: 16, weight: FontWeight.Medium }
+          })
+          .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+          .layoutWeight(1)
+          .height(210)
+        TimePicker({
+          selected: new Date(2000, 0, 1, this.pickHour, this.pickMin)
+        })
+          .onChange((value: TimePickerResult) => {
+            this.pickHour = value.hour;
+            this.pickMin = value.minute;
+          })
+          .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+          .selectedTextStyle({
+            color: $r('app.color.text_primary'),
+            font: { size: 16, weight: FontWeight.Medium }
+          })
+          .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+          .layoutWeight(1)
+          .height(210)
+      }
+      .width('100%')
+
+      Button('确定')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .fontColor($r('app.color.button_text'))
+        .backgroundColor($r('app.color.brand'))
+        .onClick(() => {
+          this.confirmDue();
+          this.sheetShow = false;
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
+  }
+
+  /** 父任务选择弹层 */
+  @Builder
+  parentSheet() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Text('选择父任务')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Blank()
+        Text('无父任务')
+          .fontSize(14)
+          .fontColor($r('app.color.brand'))
+          .onClick(() => {
+            this.parentUid = '';
+            this.sheetShow = false;
+          })
+      }
+      .width('100%')
+      .padding({ top: 12 })
+
+      if (this.parentCandidates().length === 0) {
+        Text('没有可选的顶层任务')
+          .fontSize(13)
+          .fontColor($r('app.color.text_hint'))
+          .padding(20)
+      } else {
+        List({ space: 6 }) {
+          ForEach(this.parentCandidates(), (c: DisplayEvent) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Circle().width(8).height(8).fill(c.color)
+                Text(c.title === '' ? '(无标题待办)' : c.title)
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_primary'))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                if (this.parentUid === c.uid) {
+                  Text('✓')
+                    .fontSize(14)
+                    .fontColor($r('app.color.brand'))
+                }
+              }
+              .width('100%')
+              .padding(12)
+              .borderRadius(10)
+              .backgroundColor($r('app.color.chip_off_bg'))
+            }
+            .width('100%')
+            .onClick(() => {
+              this.parentUid = c.uid;
+              this.sheetShow = false;
+            })
+          }, (c: DisplayEvent) => `pc_${c.uid}`)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .scrollBar(BarState.Off)
+      }
+
+      Button('取消')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .fontColor($r('app.color.text_primary'))
+        .backgroundColor($r('app.color.chip_off_bg'))
+        .onClick(() => {
+          this.sheetShow = false;
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
+    .layoutWeight(1)
+  }
+
+  /** 确认截止时间：把滚轮值合成毫秒 */
+  private confirmDue(): void {
+    const d: Date = this.pickDate;
+    this.dueMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
+      this.pickHour, this.pickMin).getTime();
+    this.hasDue = true;
   }
 
   /** 字段小标题 */
