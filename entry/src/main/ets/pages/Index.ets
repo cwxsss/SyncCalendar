@@ -4300,6 +4300,154 @@ class AgendaTimelineGroup {
 }
 
 /**
+ * 列表视图的"待办 + 全天/跨天"区（#68）。
+ *
+ * 为什么做成独立组件：列表视图每天一张卡片，需要**每天独立折叠**
+ * （用户反馈：原来多个卡片共用一个折叠状态，"要收都收、要展都展"）。
+ * 独立组件 = 独立 @State topExpanded，天然互不影响。
+ *
+ * 为什么放在 DayTimelineView 外面：后者内部时间轴是固定高度 viewH()，
+ * 在它里面插内容会被挤出去（实测渲染不出来）。
+ */
+@Component
+struct AgendaTopBar {
+  @Prop todos: DisplayEvent[] = [];
+  @Prop allDay: DisplayEvent[] = [];
+  onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {
+  };
+  onToggleTodo: (t: DisplayEvent) => void = (t: DisplayEvent): void => {
+  };
+
+  /** 本卡片的折叠状态（每天独立） */
+  @State private expanded: boolean = false;
+
+  /** 合并条目：待办在前、全天在后 */
+  private items(): TopBarItem[] {
+    const out: TopBarItem[] = [];
+    for (const td of this.todos) {
+      const it = new TopBarItem();
+      it.isTodo = true;
+      it.ev = td;
+      out.push(it);
+    }
+    for (const ev of this.allDay) {
+      const it = new TopBarItem();
+      it.isTodo = false;
+      it.ev = ev;
+      out.push(it);
+    }
+    return out;
+  }
+
+  private total(): number {
+    return this.todos.length + this.allDay.length;
+  }
+
+  private visible(): TopBarItem[] {
+    const all: TopBarItem[] = this.items();
+    if (this.expanded || all.length <= 3) {
+      return all;
+    }
+    return all.slice(0, 3);
+  }
+
+  build() {
+    Column() {
+      if (this.total() > 0) {
+      Column({ space: 4 }) {
+        ForEach(this.visible(), (item: TopBarItem) => {
+          if (item.isTodo) {
+            Row({ space: 8 }) {
+              Stack() {
+                if (item.ev.completed) {
+                  Path()
+                    .width(18)
+                    .height(18)
+                    .commands('M5 9.5 L7.5 12.5 L13 6.5')
+                    .stroke('#FFFFFF')
+                    .strokeWidth(2)
+                    .strokeLineCap(LineCapStyle.Round)
+                    .strokeLineJoin(LineJoinStyle.Round)
+                    .fill(Color.Transparent)
+                }
+              }
+              .width(18)
+              .height(18)
+              .borderRadius(9)
+              .backgroundColor(item.ev.completed ? item.ev.color : 'rgba(0,0,0,0)')
+              .border({ width: 1.5, color: item.ev.color })
+              .onClick(() => {
+                this.onToggleTodo(item.ev);
+              })
+              Text(item.ev.title === '' ? '(无标题待办)' : item.ev.title)
+                .fontSize(12)
+                .fontColor($r('app.color.text_primary'))
+                .decoration({
+                  type: item.ev.completed ? TextDecorationType.LineThrough : TextDecorationType.None
+                })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 0.5, color: $r('app.color.shadow_color') })
+          } else {
+            Row({ space: 6 }) {
+              Text(item.ev.isAllDay ? '全天' : '跨天')
+                .fontSize(9)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#26000000')
+                .borderRadius(6)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              Text(item.ev.title === '' ? '(无标题)' : item.ev.title)
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#FFFFFF')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor(item.ev.color)
+            .onClick(() => this.onPick(item.ev))
+          }
+        }, (item: TopBarItem) => `ab_${item.isTodo ? 't' : 'a'}_${item.ev.id}_${item.ev.completed ? 1 : 0}`)
+
+        if (this.total() > 3) {
+          Row({ space: 4 }) {
+            Text(this.expanded ? '收起' : `还有 ${this.total() - 3} 条`)
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+            Text(this.expanded ? '⌃' : '⌄')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+          }
+          .width('100%')
+          .height(18)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => {
+            this.expanded = !this.expanded;
+          })
+        }
+      }
+      .width('100%')
+      .padding({ bottom: 4 })
+      }
+    }
+    .width('100%')
+  }
+}
+
+/**
  * 顶部固定区（全天日程 + 待办）的一个条目（#68）。
  * ArkTS 不允许内联对象字面量类型，必须用命名 class。
  */
@@ -4628,11 +4776,23 @@ struct DayTimelineView {
 
   build() {
     Column() {
-      // 时间轴主体（含顶部"全天/跨天"条 —— 它们随内容一起滚动，向下滑时跟 0 点一起上移）。
       // ⭐ 顶部固定区（待办 + 全天/跨天）#68：放在 Scroll **之外** → 不随时间轴滚动。
       //    原来它在 timelineBody 里，会被"自动滚到当前时刻"带走，
       //    导致下午 16 点打开时全天日程看不见。
-      this.topBar()
+      //    ⚠️ 只对 scrollable（周/月视图）做固定区：
+      //    列表视图（scrollable=false）的卡片高度由"按日程起止截断的时间轴"决定，
+      //    在里面再插一个固定区会被固定高度的 timelineBody 挤到卡片外（实测红块跑到 y=620）。
+      //    列表视图逐天展开、不存在"自动滚到当前时刻"的问题，所以它继续把
+      //    待办+全天放在 timelineBody 内部跟随内容即可。
+      if (this.scrollable) {
+        Column() {
+          this.topBar()
+        }
+        .width('100%')
+        .flexShrink(0)
+      }
+      // 列表视图（scrollable=false）的 topBar 由调用方渲染在 DayTimelineView 外层卡片里：
+      // 本组件内部时间轴高度是固定值 viewH()，会把这部分挤掉（实测渲染不出来）。
       // scrollable=true 时包一层 Scroll 并自动定位到当前时刻；否则整页平铺。
       if (this.scrollable) {
         Scroll(this.scroller) {
@@ -4650,7 +4810,6 @@ struct DayTimelineView {
           }
         })
       } else {
-        this.topBar()
         this.timelineBody()
       }
     }
@@ -4788,8 +4947,13 @@ struct DayTimelineView {
   @Builder
   private timelineBody() {
     Column() {
-      // 顶部固定区（待办 + 全天/跨天）已移到 Scroll 之外（#68），
-      // 这里只剩可滚动的时间轴本体。
+      // 周/月视图：待办+全天已移到 Scroll 之外做浮动固定区（#68），这里只剩时间轴。
+      // 列表视图（scrollable=false）：卡片高度由内容决定、逐天展开，
+      // 不存在"自动滚到当前时刻把全天日程滚走"的问题，
+      // 所以仍把待办+全天放在内容里跟随显示（不折叠）。
+      if (!this.scrollable) {
+        this.topBar()
+      }
       Row() {
         // 左侧小时刻度（每格一条底线，作为时间尺；当前小时高亮）。只渲染视窗内的小时
         Column() {
