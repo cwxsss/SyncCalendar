@@ -4299,6 +4299,15 @@ class AgendaTimelineGroup {
   timeline: DayTimeline = new DayTimeline();
 }
 
+/**
+ * 顶部固定区（全天日程 + 待办）的一个条目（#68）。
+ * ArkTS 不允许内联对象字面量类型，必须用命名 class。
+ */
+class TopBarItem {
+  isTodo: boolean = false;   // true=待办（带勾选圈） false=全天/跨天日程（色块）
+  ev: DisplayEvent = new DisplayEvent();
+}
+
 /** 日程层纵向序列中的一行：空隙 / 冲突组。整点线与红线已移到另外两层，本层不含任何"线"。
  *  topRatio~botRatio = 该行覆盖的当日比例区间（0~1，乘整日高得 vp）。 */
 class TimeRow {
@@ -4328,7 +4337,12 @@ struct DayTimelineView {
   onToggleTodo: (t: DisplayEvent) => void = (t: DisplayEvent): void => {}; // 勾选待办回调
   private scroller: Scroller = new Scroller();
   @State private viewportH: number = 0; // 滚动视口高度（由 Scroll 实测，用于把"当前时刻"居中）
-  @State private allDayH: number = 0;   // 顶部"全天/跨天"区高度（它现在随内容滚动，居中定位要加上）
+  /** ⭐ 顶部固定区（全天日程 + 待办）是否展开（#68）
+   *  默认折叠：最多显示 3 条，超出显示向下箭头。折叠是为了避免浮动区盖住大片时间轴视野。 */
+  @State private topExpanded: boolean = false;
+  /** 顶部"全天/跨天"区高度 —— #68 起该区移出 Scroll（浮动固定），
+   *  不再参与滚动偏移计算，恒为 0。保留字段仅为兼容旧引用。 */
+  @State private allDayH: number = 0;
   private pendingScroll: boolean = false;
 
   aboutToAppear(): void {
@@ -4338,6 +4352,49 @@ struct DayTimelineView {
   /** 显示日变为"今天"（或从今天切走）时触发；切到今天则自动定位到当前时刻 */
   private onShowNowLine(): void {
     this.scrollToNow();
+  }
+
+  /**
+   * 顶部固定区要显示的条目（#68）：**待办在前、全天/跨天在后**，合并成一个列表。
+   * 合并而不是分两块，是为了统一"最多显示 3 条"的限制 —— 否则两块各自 3 条会变 6 条。
+   */
+  private topItems(): TopBarItem[] {
+    const out: TopBarItem[] = [];
+    for (const td of this.timeline.todos) {
+      const it = new TopBarItem();
+      it.isTodo = true;
+      it.ev = td;
+      out.push(it);
+    }
+    for (const ev of this.timeline.allDay) {
+      const it = new TopBarItem();
+      it.isTodo = false;
+      it.ev = ev;
+      out.push(it);
+    }
+    return out;
+  }
+
+  /** 顶部固定区总条数 */
+  private topCount(): number {
+    return this.timeline.todos.length + this.timeline.allDay.length;
+  }
+
+  /** 折叠时最多显示 3 条（#68）；展开后显示全部 */
+  private topLimit(): number {
+    return this.topExpanded ? this.topCount() : 3;
+  }
+
+  /** 折叠时是否还有被藏起来的条目（决定要不要画展开箭头） */
+  private topHasMore(): boolean {
+    return this.topCount() > 3;
+  }
+
+  /** 取前 N 条（展开状态由 topLimit 决定） */
+  private topVisible(): TopBarItem[] {
+    const all: TopBarItem[] = this.topItems();
+    const lim: number = this.topLimit();
+    return all.length > lim ? all.slice(0, lim) : all;
   }
 
   /** 自动滚动：把"当前时刻红线"定位到可视区**垂直居中**
@@ -4356,8 +4413,9 @@ struct DayTimelineView {
       return;
     }
     const vp: number = this.viewportH > 0 ? this.viewportH : this.hourUnit * 8;
-    // 内容顶部还有"全天/跨天"区（allDayH），且时间轴只从 viewTop 开始 → 都要计入偏移
-    const y: number = this.allDayH + (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - vp / 2;
+    // #68：全天/待办区已移出 Scroll（浮动固定），偏移里不再加 allDayH。
+    // 时间轴只从 viewTop 开始 → 直接用比例换算即可。
+    const y: number = (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - vp / 2;
     setTimeout((): void => {
       this.scroller.scrollTo({ xOffset: 0, yOffset: y < 0 ? 0 : y });
     }, 60);
@@ -4571,6 +4629,10 @@ struct DayTimelineView {
   build() {
     Column() {
       // 时间轴主体（含顶部"全天/跨天"条 —— 它们随内容一起滚动，向下滑时跟 0 点一起上移）。
+      // ⭐ 顶部固定区（待办 + 全天/跨天）#68：放在 Scroll **之外** → 不随时间轴滚动。
+      //    原来它在 timelineBody 里，会被"自动滚到当前时刻"带走，
+      //    导致下午 16 点打开时全天日程看不见。
+      this.topBar()
       // scrollable=true 时包一层 Scroll 并自动定位到当前时刻；否则整页平铺。
       if (this.scrollable) {
         Scroll(this.scroller) {
@@ -4588,6 +4650,7 @@ struct DayTimelineView {
           }
         })
       } else {
+        this.topBar()
         this.timelineBody()
       }
     }
@@ -4598,19 +4661,27 @@ struct DayTimelineView {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 时间轴主体：顶部"全天/跨天"条（随滚动一起移动）+ 左侧小时刻度 + 右侧按冲突组分行、组内按列并排 */
+  /**
+   * 顶部固定区（#68）：待办 + 全天/跨天日程，**不随时间轴滚动**。
+   *
+   * 为什么加这个区：原来它们排在时间轴最前面，但打开日视图会自动滚到当前时刻
+   * （比如下午 16 点），于是全天日程被滚上去看不见了。改成浮动固定后，
+   * 不管时间轴怎么滚，它们都贴在日期行下方。
+   *
+   * 折叠机制（用户提的折中方案）：全天+待办合计**最多显示 3 条**，
+   * 超出时显示向下箭头，点一下展开全部；避免条数多时盖住大片视野。
+   */
   @Builder
-  private timelineBody() {
-    Column() {
-      // ⭐ 当天截止待办区（#45）：画在最顶，全天/跨天之上，随内容一起滚动。
-      if (this.timeline.todos.length > 0) {
-        Column({ space: 4 }) {
-          ForEach(this.timeline.todos, (td: DisplayEvent) => {
+  private topBar() {
+    if (this.topCount() > 0) {
+      Column({ space: 4 }) {
+        ForEach(this.topVisible(), (item: TopBarItem) => {
+          if (item.isTodo) {
+            // ---- 待办行：勾选圈 + 标题 ----
             Row({ space: 8 }) {
-              // 勾选圈：点击切换完成（与待办列表同一回调）
-              // 同列表：矢量勾（#50）
+              // 矢量勾（#50）：字符 ✓ 依赖字体，粗细/居中不稳定
               Stack() {
-                if (td.completed) {
+                if (item.ev.completed) {
                   Path()
                     .width(18)
                     .height(18)
@@ -4625,15 +4696,17 @@ struct DayTimelineView {
               .width(18)
               .height(18)
               .borderRadius(9)
-              .backgroundColor(td.completed ? td.color : 'rgba(0,0,0,0)')
-              .border({ width: 1.5, color: td.color })
+              .backgroundColor(item.ev.completed ? item.ev.color : 'rgba(0,0,0,0)')
+              .border({ width: 1.5, color: item.ev.color })
               .onClick(() => {
-                this.onToggleTodo(td);
+                this.onToggleTodo(item.ev);
               })
-              Text(td.title === '' ? '(无标题待办)' : td.title)
+              Text(item.ev.title === '' ? '(无标题待办)' : item.ev.title)
                 .fontSize(12)
                 .fontColor($r('app.color.text_primary'))
-                .decoration({ type: td.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
+                .decoration({
+                  type: item.ev.completed ? TextDecorationType.LineThrough : TextDecorationType.None
+                })
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .layoutWeight(1)
@@ -4645,26 +4718,16 @@ struct DayTimelineView {
             .borderRadius(6)
             .backgroundColor($r('app.color.card_bg'))
             .border({ width: 0.5, color: $r('app.color.shadow_color') })
-          }, (td: DisplayEvent) => `todo_${this.timeline.dateKey}_${td.id}_${td.completed}`)
-        }
-        .width('100%')
-        .padding({ bottom: 6 })
-      }
-
-      // 全天 / 跨天日程：同样用**色块**展示（与普通日程保持一致的视觉），
-      // 画在 0 点之前并**随内容一起滚动**（向下滑时跟 0 点一起上移，不再常驻顶部）
-      if (this.timeline.allDay.length > 0) {
-        Column({ space: 4 }) {
-          ForEach(this.timeline.allDay, (e: DisplayEvent) => {
+          } else {
+            // ---- 全天/跨天日程：色块 ----
             Row({ space: 6 }) {
-              Text(e.isAllDay ? '全天' : '跨天')
+              Text(item.ev.isAllDay ? '全天' : '跨天')
                 .fontSize(9)
                 .fontColor('#FFFFFF')
                 .backgroundColor('#26000000')
                 .borderRadius(6)
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-              if (!e.writable) {
-                // 只读标记：圆角矩形白框 + 白字（与色块上的「只读」小标同一套样式）
+              if (!item.ev.writable) {
                 Text('只读')
                   .fontSize(9)
                   .fontColor('#FFFFFF')
@@ -4672,43 +4735,61 @@ struct DayTimelineView {
                   .borderRadius(4)
                   .padding({ left: 4, right: 4, top: 0, bottom: 0 })
               }
-              Text(e.title === '' ? '(无标题)' : e.title)
+              Text(item.ev.title === '' ? '(无标题)' : item.ev.title)
                 .fontSize(12)
                 .fontWeight(FontWeight.Medium)
                 .fontColor('#FFFFFF')
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .layoutWeight(1)
-              if (e.location !== '') {
-                Text(e.location)
+              if (item.ev.location !== '') {
+                Text(item.ev.location)
                   .fontSize(10)
                   .fontColor('#D9FFFFFF')
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .constraintSize({ maxWidth: 120 })
+                  .constraintSize({ maxWidth: 100 })
               }
             }
             .alignItems(VerticalAlign.Center)
             .width('100%')
-            .height(26)
+            .height(24)
             .padding({ left: 8, right: 8 })
-            .borderRadius(8)
-            // 只读不再用灰蒙版（已撤），只靠标题后的「只读」白框小标区分
-            .backgroundColor(e.color)
-            .onClick(() => this.onPick(e))
-          }, (e: DisplayEvent) => `al_${this.timeline.dateKey}_${TimelineUtil.keyOf(e)}_${e.writable ? 1 : 0}_${e.location.length}`)
-        }
-        .width('100%')
-        .padding({ bottom: 6 })
-        .onAreaChange((oldVal: Area, newVal: Area): void => {
-          const h: number = Number(newVal.height);
-          if (h > 0 && (h - this.allDayH > 1 || h - this.allDayH < -1)) {
-            this.allDayH = h;
-            this.tryScroll();
+            .borderRadius(6)
+            .backgroundColor(item.ev.color)
+            .onClick(() => this.onPick(item.ev))
           }
-        })
-      }
+        }, (item: TopBarItem) => `tb_${this.timeline.dateKey}_${item.isTodo ? 't' : 'a'}_${item.ev.id}_${item.ev.completed ? 1 : 0}`)
 
+        // 展开/收起箭头（合计超过 3 条时才出现）
+        if (this.topHasMore()) {
+          Row({ space: 4 }) {
+            Text(this.topExpanded ? '收起' : `还有 ${this.topCount() - 3} 条`)
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+            Text(this.topExpanded ? '⌃' : '⌄')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+          }
+          .width('100%')
+          .height(18)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => {
+            this.topExpanded = !this.topExpanded;
+          })
+        }
+      }
+      .width('100%')
+      .padding({ bottom: 6 })
+    }
+  }
+
+  /** 时间轴主体：左侧小时刻度 + 右侧按冲突组分行、组内按列并排（顶部固定区已移出，#68） */
+  @Builder
+  private timelineBody() {
+    Column() {
+      // 顶部固定区（待办 + 全天/跨天）已移到 Scroll 之外（#68），
+      // 这里只剩可滚动的时间轴本体。
       Row() {
         // 左侧小时刻度（每格一条底线，作为时间尺；当前小时高亮）。只渲染视窗内的小时
         Column() {
