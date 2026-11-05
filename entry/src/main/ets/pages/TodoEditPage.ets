@@ -521,7 +521,8 @@ struct TodoEditPage {
 
   // ---------- UI ----------
   build() {
-    Column({ space: 14 }) {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 14 }) {
       // ===== 固定顶部栏：取消 · 标题 · 保存 =====
       Row({ space: 6 }) {
         Text('取消')
@@ -850,35 +851,54 @@ struct TodoEditPage {
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
       .align(Alignment.Top)
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: 12 })
+      .backgroundColor($r('app.color.page_bg'))
+      // ⭐ 沉浸式：背景延伸到状态栏/导航条区域（与 EventEditPage 一致）
+      //    只扩绘制范围、不移动子组件 → 状态栏区域同色，不再是割裂的白条
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+
+      // ===== 居中弹层（浮在内容之上）=====
+      if (this.sheetShow) {
+        // 遮罩：半透明，点空白关闭
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => {
+            this.sheetShow = false;
+          })
+        // 居中卡片
+        this.centerDialog()
+      }
     }
     .width('100%')
     .height('100%')
-    .padding({ top: 12 })
-    .backgroundColor($r('app.color.page_bg'))
-    // ⭐ 沉浸式：背景延伸到状态栏/导航条区域（与 EventEditPage 一致）
-    //    只扩绘制范围、不移动子组件 → 状态栏区域同色，不再是割裂的白条
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .bindSheet($$this.sheetShow, this.bottomSheet(), {
-      height: this.sheetMode === 'parent' ? 400 : 380,
-      showClose: false,
-      dragBar: true,
-      backgroundColor: $r('app.color.card_bg')
-    })
   }
 
-  /** 唯一底部弹层：按 sheetMode 切换内容 */
+  /**
+   * 居中弹层（自绘覆盖层，不用 bindSheet）。
+   *
+   * 为什么不用 bindSheet：SDK 的 SheetOptions 没有 position/alignment，
+   * 只能从底部弹，无法居中。而用户要求"在中间弹出来更方便"。
+   * 本工程既有的 tipsOverlay 也是自绘覆盖层（系统弹层在本环境不可靠），
+   * 这里沿用同一套做法。
+   */
   @Builder
-  bottomSheet() {
+  centerDialog() {
     if (this.sheetMode === 'parent') {
-      this.parentSheet()
+      this.parentDialog()
     } else {
-      this.dueSheet()
+      this.dueDialog()
     }
   }
 
-  /** 截止时间选择弹层（日期 + 时间） */
+  /** 截止时间选择弹层（居中卡片：日期 + 时间） */
   @Builder
-  dueSheet() {
+  dueDialog() {
     Column({ space: 14 }) {
       Text('选择截止时间')
         .fontSize(16)
@@ -935,13 +955,15 @@ struct TodoEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
-  /** 父任务选择弹层 */
+  /** 父任务选择弹层（居中卡片） */
   @Builder
-  parentSheet() {
+  parentDialog() {
     Column({ space: 10 }) {
       Row({ space: 8 }) {
         Text('选择父任务')
@@ -1011,9 +1033,10 @@ struct TodoEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
-    .layoutWeight(1)
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
   /** 确认截止时间：把滚轮值合成毫秒 */

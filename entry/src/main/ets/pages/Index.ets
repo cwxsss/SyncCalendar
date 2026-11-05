@@ -3498,14 +3498,24 @@ struct Index {
       // 勾选框（颜色跟随日历本）—— **只有这块触发完成切换**
       Row() {
         if (t.completed) {
-          Text('✓')
-            .fontSize(13)
-            .fontColor($r('app.color.button_text'))
-            .width(22)
-            .height(22)
-            .textAlign(TextAlign.Center)
-            .borderRadius(11)
-            .backgroundColor(this.colorOfCal(t.calKey))
+          // ⭐ 用矢量 Path 画勾（#50）：字符 '✓' 依赖字体，
+          //    不同设备下粗细/居中不一致，视觉上"不精致"。
+          //    Path 可精确控制线宽、端点圆角与几何比例。
+          Stack() {
+            Path()
+              .width(22)
+              .height(22)
+              .commands('M6 12.5 L9.5 16 L16.5 8')
+              .stroke($r('app.color.button_text'))
+              .strokeWidth(2.2)
+              .strokeLineCap(LineCapStyle.Round)
+              .strokeLineJoin(LineJoinStyle.Round)
+              .fill(Color.Transparent)
+          }
+          .width(22)
+          .height(22)
+          .borderRadius(11)
+          .backgroundColor(this.colorOfCal(t.calKey))
         } else {
           Text('')
             .width(22)
@@ -4594,18 +4604,28 @@ struct DayTimelineView {
           ForEach(this.timeline.todos, (td: DisplayEvent) => {
             Row({ space: 8 }) {
               // 勾选圈：点击切换完成（与待办列表同一回调）
-              Text(td.completed ? '✓' : '')
-                .fontSize(12)
-                .fontColor(td.completed ? '#FFFFFF' : 'rgba(0,0,0,0)')
-                .width(18)
-                .height(18)
-                .textAlign(TextAlign.Center)
-                .borderRadius(9)
-                .backgroundColor(td.completed ? td.color : 'rgba(0,0,0,0)')
-                .border({ width: 1.5, color: td.color })
-                .onClick(() => {
-                  this.onToggleTodo(td);
-                })
+              // 同列表：矢量勾（#50）
+              Stack() {
+                if (td.completed) {
+                  Path()
+                    .width(18)
+                    .height(18)
+                    .commands('M5 9.5 L7.5 12.5 L13 6.5')
+                    .stroke('#FFFFFF')
+                    .strokeWidth(2)
+                    .strokeLineCap(LineCapStyle.Round)
+                    .strokeLineJoin(LineJoinStyle.Round)
+                    .fill(Color.Transparent)
+                }
+              }
+              .width(18)
+              .height(18)
+              .borderRadius(9)
+              .backgroundColor(td.completed ? td.color : 'rgba(0,0,0,0)')
+              .border({ width: 1.5, color: td.color })
+              .onClick(() => {
+                this.onToggleTodo(td);
+              })
               Text(td.title === '' ? '(无标题待办)' : td.title)
                 .fontSize(12)
                 .fontColor($r('app.color.text_primary'))
