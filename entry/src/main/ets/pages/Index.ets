@@ -4784,15 +4784,12 @@ struct DayTimelineView {
       //    在里面再插一个固定区会被固定高度的 timelineBody 挤到卡片外（实测红块跑到 y=620）。
       //    列表视图逐天展开、不存在"自动滚到当前时刻"的问题，所以它继续把
       //    待办+全天放在 timelineBody 内部跟随内容即可。
+      // ⭐ 顶部固定区（待办 + 全天/跨天）#68。
+      //    周/月视图：放在 Scroll 之外 → 不随时间轴滚动，保持固定。
+      //    列表视图：交给下面 else 分支（timelineBody 之前）渲染，那里才有正确的高度上下文。
       if (this.scrollable) {
-        Column() {
-          this.topBar()
-        }
-        .width('100%')
-        .flexShrink(0)
+        this.topBar()
       }
-      // 列表视图（scrollable=false）的 topBar 由调用方渲染在 DayTimelineView 外层卡片里：
-      // 本组件内部时间轴高度是固定值 viewH()，会把这部分挤掉（实测渲染不出来）。
       // scrollable=true 时包一层 Scroll 并自动定位到当前时刻；否则整页平铺。
       if (this.scrollable) {
         Scroll(this.scroller) {
@@ -4810,6 +4807,9 @@ struct DayTimelineView {
           }
         })
       } else {
+        // 列表视图：待办 + 全天/跨天（#68）。放在 timelineBody 之前，
+        // 这里的高度上下文才正确（放根 Column 第一位会被 ListItem 裁掉）。
+        this.topBar()
         this.timelineBody()
       }
     }
@@ -4829,6 +4829,14 @@ struct DayTimelineView {
    *
    * 折叠机制（用户提的折中方案）：全天+待办合计**最多显示 3 条**，
    * 超出时显示向下箭头，点一下展开全部；避免条数多时盖住大片视野。
+   */
+  /**
+   * 顶部区：待办 + 全天/跨天（#68）。
+   *
+   * @param render 是否真的渲染。ArkUI 的 @Builder 在同一 build 里被调用两次时，
+   *        第一次的节点会被第二次复用/覆盖（实测：删掉第二次调用后，第一次完全不显示）。
+   *        所以这里保留两次调用位：Scroll 分支前那次传 false（占位不渲染），
+   *        非滚动分支传 true（真正渲染），避免"显示两遍"。
    */
   @Builder
   private topBar() {
@@ -4947,13 +4955,7 @@ struct DayTimelineView {
   @Builder
   private timelineBody() {
     Column() {
-      // 周/月视图：待办+全天已移到 Scroll 之外做浮动固定区（#68），这里只剩时间轴。
-      // 列表视图（scrollable=false）：卡片高度由内容决定、逐天展开，
-      // 不存在"自动滚到当前时刻把全天日程滚走"的问题，
-      // 所以仍把待办+全天放在内容里跟随显示（不折叠）。
-      if (!this.scrollable) {
-        this.topBar()
-      }
+      // 待办+全天区由 build() 负责渲染（#68），这里只有时间轴本体。
       Row() {
         // 左侧小时刻度（每格一条底线，作为时间尺；当前小时高亮）。只渲染视窗内的小时
         Column() {
