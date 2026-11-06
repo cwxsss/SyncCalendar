@@ -118,9 +118,10 @@ struct EventEditPage {
   @State sheetShow: boolean = false;
   @State sheetMode: string = 'picker';
   @State pickerIsEnd: boolean = false;
-  @State pickDate: Date = new Date();
-  @State pickHour: number = 9;
-  @State pickMin: number = 0;
+  /** 弹层打开时的初始日期与时间（传给独立子组件 DateTimePickerSheetContent） */
+  @State pickerInitDate: Date = new Date();
+  @State pickerInitHour: number = 9;
+  @State pickerInitMin: number = 0;
   /** ⭐ 重复日程编辑范围：'one' 仅此次 / 'future' 此次及以后 / 'all' 全部 */
   @State scope: string = 'all';
   private pendingDelete: boolean = false;     // 该弹层是"保存"还是"删除"流程
@@ -669,7 +670,7 @@ struct EventEditPage {
   /** 打开"重复结束条件"日期选择弹层（复用唯一的底部弹层） */
   private openRepeatUntilPicker(): void {
     const base = this.repeatUntil > 0 ? new Date(this.repeatUntil) : new Date(this.startMs);
-    this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+    this.pickerInitDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
     this.sheetMode = 'repeatEnd';
     this.sheetShow = true;
   }
@@ -694,37 +695,51 @@ struct EventEditPage {
   private openPicker(isEnd: boolean): void {
     this.pickerIsEnd = isEnd;
     const base = new Date(isEnd ? this.endMs : this.startMs);
-    this.pickDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
-    this.pickHour = base.getHours();
-    this.pickMin = base.getMinutes();
+    this.pickerInitDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+    this.pickerInitHour = base.getHours();
+    this.pickerInitMin = base.getMinutes();
     this.sheetMode = 'picker';
     this.sheetShow = true;
   }
 
-  private applyPicker(): void {
-    const d = this.pickDate;
-    const picked: number = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
-      this.pickHour, this.pickMin).getTime();
+  private onPickerConfirm(d: Date, h: number, m: number): void {
+    const picked: number = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m).getTime();
     if (this.pickerIsEnd) {
       // 全天日程的结束存为"当天 23:59:59.999"（排他日期前 1 毫秒）
       this.endMs = this.allDay ? picked + 86399999 : picked;
+      if (this.endMs < this.startMs) {
+        // 若结束早于开始，开始时间自动前移
+        this.startMs = this.allDay ? picked : (picked >= 3600000 ? picked - 3600000 : 0);
+      }
     } else {
-      // 设定开始时间后，结束时间自动跟随 = 开始 + 1 小时
+      // 设定开始时间后，若结束时间小于等于开始时间，结束时间自动跟随向后推
       this.startMs = picked;
-      this.endMs = this.allDay ? picked + 86399999 : picked + 3600000;
+      if (this.endMs <= this.startMs) {
+        this.endMs = this.allDay ? picked + 86399999 : picked + 3600000;
+      }
     }
+    this.sheetShow = false;
   }
 
-  private toggleAllDay(): void {
-    this.allDay = !this.allDay;
-    if (this.allDay) {
+  /**
+   * ⭐ 全天开关切换处理：
+   * 必须严格受控并在 (this.allDay === isOn) 时拦截，避免重复取反造成动画冲突卡在 50% 中间。
+   */
+  private handleAllDayChange(isOn: boolean): void {
+    if (this.allDay === isOn) {
+      return;
+    }
+    this.allDay = isOn;
+    if (isOn) {
       const s = new Date(this.startMs);
       const dayStart: number = new Date(s.getFullYear(), s.getMonth(), s.getDate()).getTime();
+      const currentSpan: number = Math.max(0, this.endMs - this.startMs);
       this.startMs = dayStart;
-      this.endMs = dayStart + 86399999;
+      const days: number = Math.max(1, Math.round(currentSpan / 86400000));
+      this.endMs = dayStart + days * 86400000 - 1;
     } else {
       const s = new Date(this.startMs);
-      this.startMs = s.getTime() + 9 * 3600000;
+      this.startMs = new Date(s.getFullYear(), s.getMonth(), s.getDate(), 9, 0).getTime();
       this.endMs = this.startMs + 3600000;
     }
   }
@@ -1118,7 +1133,7 @@ struct EventEditPage {
       e.location = this.location.trim();
       e.description = this.description.trim();
       e.startTime = this.startMs;
-      e.endTime = this.allDay ? this.startMs + 86399999 : this.endMs;
+      e.endTime = this.allDay ? (this.endMs > this.startMs ? this.endMs : this.startMs + 86399999) : this.endMs;
       e.isAllDay = this.allDay;
       // 一律写入所选 CalDAV 日历本（新建/编辑/从「本机」迁过来都一样）
       e.calKey = book.calKey;
@@ -1545,8 +1560,9 @@ struct EventEditPage {
             Blank()
             Toggle({ type: ToggleType.Switch, isOn: this.allDay })
               .selectedColor($r('app.color.brand'))
-              .onChange(() => {
-                this.toggleAllDay();
+              .switchPointColor(Color.White)
+              .onChange((isOn: boolean) => {
+                this.handleAllDayChange(isOn);
               })
           }
           .width('100%')
@@ -1983,56 +1999,27 @@ struct EventEditPage {
     if (this.sheetMode === 'scope') {
       this.scopeSheet()
     } else if (this.sheetMode === 'repeatEnd') {
-      this.repeatEndSheet()
+      RepeatEndSheetContent({
+        initDate: this.pickerInitDate,
+        onConfirm: (d: Date) => {
+          this.repeatUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+          this.sheetShow = false;
+        }
+      })
     } else if (this.sheetMode === 'customReminder') {
       this.customReminderSheet()
     } else {
-      this.dateTimePickerSheet()
-    }
-  }
-
-  /** 重复"截止日期"选择弹层（只选日期） */
-  @Builder
-  repeatEndSheet() {
-    Column({ space: 14 }) {
-      Text('重复到哪一天')
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .padding({ top: 12 })
-      DatePicker({
-        start: new Date(2000, 0, 1),
-        end: new Date(2060, 11, 31),
-        selected: this.pickDate
+      DateTimePickerSheetContent({
+        pickerTitle: this.pickerIsEnd ? '选择结束时间' : '选择开始时间',
+        isAllDay: this.allDay,
+        initDate: this.pickerInitDate,
+        initHour: this.pickerInitHour,
+        initMin: this.pickerInitMin,
+        onConfirm: (d: Date, h: number, m: number) => {
+          this.onPickerConfirm(d, h, m);
+        }
       })
-        .onDateChange((value: Date) => {
-          this.pickDate = value;
-        })
-        .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
-        .selectedTextStyle({
-          color: $r('app.color.text_primary'),
-          font: { size: 16, weight: FontWeight.Medium }
-        })
-        .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
-        .layoutWeight(1)
-        .height(210)
-        .width('100%')
-      Button('确定')
-        .width('100%')
-        .height(44)
-        .borderRadius(12)
-        .fontSize(15)
-        .backgroundColor($r('app.color.brand'))
-        .onClick(() => {
-          const d = this.pickDate;
-          this.repeatUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-          this.sheetShow = false;
-        })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
   }
 
   /** ⭐ 重复日程"作用范围"选择弹层：保存/删除前让用户明确改哪几次 */
@@ -2216,70 +2203,6 @@ struct EventEditPage {
       .onClick(() => {
         this.toggleReminder(minutes);
       })
-  }
-
-  /** 开始/结束时间选择弹层：左侧日期、右侧时间（全天时只有日期），一次确定 */
-  @Builder
-  dateTimePickerSheet() {
-    Column({ space: 14 }) {
-      Text(this.pickerIsEnd ? '选择结束时间' : '选择开始时间')
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .padding({ top: 12 })
-      Row({ space: 6 }) {
-        DatePicker({
-          start: new Date(2000, 0, 1),
-          end: new Date(2050, 11, 31),
-          selected: this.pickDate
-        })
-          .onDateChange((value: Date) => {
-            this.pickDate = value;
-          })
-          // 滚轮文字显式指定颜色：默认取系统主题色，深色模式下与弹层底色撞色会"看不清"
-          .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
-          .selectedTextStyle({
-            color: $r('app.color.text_primary'),
-            font: { size: 16, weight: FontWeight.Medium }
-          })
-          .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
-          .layoutWeight(1)
-          .height(210)
-        if (!this.allDay) {
-          TimePicker({
-            selected: new Date(2000, 0, 1, this.pickHour, this.pickMin)
-          })
-            .onChange((value: TimePickerResult) => {
-              this.pickHour = value.hour;
-              this.pickMin = value.minute;
-            })
-            .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
-            .selectedTextStyle({
-              color: $r('app.color.text_primary'),
-              font: { size: 16, weight: FontWeight.Medium }
-            })
-            .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
-            .layoutWeight(1)
-            .height(210)
-        }
-      }
-      .width('100%')
-
-      Button(this.allDay ? '确定日期' : '确定')
-        .width('100%')
-        .height(44)
-        .borderRadius(12)
-        .fontSize(15)
-        .backgroundColor($r('app.color.brand'))
-        .onClick(() => {
-          this.applyPicker();
-          this.sheetShow = false;
-        })
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, bottom: 24 })
   }
 
   @Builder
@@ -2542,4 +2465,156 @@ class BookLookup {
 
 class CalSourceWithHref extends CalSource {
   href: string = '';
+}
+
+/**
+ * ⭐ 日期/时间选择弹层内容（独立组件）：
+ * 彻底隔离滚轮事件与父页面 @State 重绘周期，
+ * 内部滑动由原生手势自然驱动，绝不触发外部 re-build，彻底杜绝滚轮跳动与回弹。
+ */
+@Component
+struct DateTimePickerSheetContent {
+  @Prop pickerTitle: string = '';
+  @Prop isAllDay: boolean = false;
+  initDate: Date = new Date();
+  initHour: number = 9;
+  initMin: number = 0;
+  onConfirm: (date: Date, hour: number, min: number) => void = () => {};
+
+  private selectedDate: Date = new Date();
+  private selectedHour: number = 9;
+  private selectedMin: number = 0;
+  private readonly pickerStart: Date = new Date(2000, 0, 1);
+  private readonly pickerEnd: Date = new Date(2050, 11, 31);
+
+  aboutToAppear(): void {
+    this.selectedDate = new Date(this.initDate.getTime());
+    this.selectedHour = this.initHour;
+    this.selectedMin = this.initMin;
+  }
+
+  build() {
+    Column({ space: 14 }) {
+      Text(this.pickerTitle)
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+
+      Row({ space: 6 }) {
+        DatePicker({
+          start: this.pickerStart,
+          end: this.pickerEnd,
+          selected: this.initDate
+        })
+          .onDateChange((value: Date) => {
+            if (value && !isNaN(value.getTime())) {
+              this.selectedDate = value;
+            }
+          })
+          .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+          .selectedTextStyle({
+            color: $r('app.color.text_primary'),
+            font: { size: 16, weight: FontWeight.Medium }
+          })
+          .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+          .layoutWeight(1)
+          .height(210)
+
+        if (!this.isAllDay) {
+          TimePicker({
+            selected: new Date(2000, 0, 1, this.initHour, this.initMin)
+          })
+            .onChange((value: TimePickerResult) => {
+              if (value.hour !== undefined && value.minute !== undefined) {
+                this.selectedHour = value.hour;
+                this.selectedMin = value.minute;
+              }
+            })
+            .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+            .selectedTextStyle({
+              color: $r('app.color.text_primary'),
+              font: { size: 16, weight: FontWeight.Medium }
+            })
+            .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+            .layoutWeight(1)
+            .height(210)
+        }
+      }
+      .width('100%')
+
+      Button(this.isAllDay ? '确定日期' : '确定')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .backgroundColor($r('app.color.brand'))
+        .onClick(() => {
+          this.onConfirm(this.selectedDate, this.selectedHour, this.selectedMin);
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
+  }
+}
+
+/** 重复"截止日期"选择弹层内容（独立组件） */
+@Component
+struct RepeatEndSheetContent {
+  initDate: Date = new Date();
+  onConfirm: (date: Date) => void = () => {};
+
+  private selectedDate: Date = new Date();
+  private readonly pickerStart: Date = new Date(2000, 0, 1);
+  private readonly repeatUntilEnd: Date = new Date(2060, 11, 31);
+
+  aboutToAppear(): void {
+    this.selectedDate = new Date(this.initDate.getTime());
+  }
+
+  build() {
+    Column({ space: 14 }) {
+      Text('重复到哪一天')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .padding({ top: 12 })
+
+      DatePicker({
+        start: this.pickerStart,
+        end: this.repeatUntilEnd,
+        selected: this.initDate
+      })
+        .onDateChange((value: Date) => {
+          if (value && !isNaN(value.getTime())) {
+            this.selectedDate = value;
+          }
+        })
+        .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+        .selectedTextStyle({
+          color: $r('app.color.text_primary'),
+          font: { size: 16, weight: FontWeight.Medium }
+        })
+        .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+        .layoutWeight(1)
+        .height(210)
+        .width('100%')
+
+      Button('确定')
+        .width('100%')
+        .height(44)
+        .borderRadius(12)
+        .fontSize(15)
+        .backgroundColor($r('app.color.brand'))
+        .onClick(() => {
+          this.onConfirm(this.selectedDate);
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 24 })
+  }
 }
