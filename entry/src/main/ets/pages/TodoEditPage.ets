@@ -11,6 +11,8 @@ import { CardDataService } from '../common/CardDataService';
 import { CalendarDataService, DraftTransfer } from '../common/CalendarDataService';
 import { LogUtil } from '../common/LogUtil';
 import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
+import { AppSettings } from '../common/AppSettings';
+import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
 
 /** 可选的日历清单 */
 class TodoBookChoice {
@@ -366,6 +368,7 @@ struct TodoEditPage {
       // 后台触发 CalDAV 实时推送
       this.triggerPush(ctx, targetHref);
 
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
       this.getUIContext().getPromptAction().showToast({ message: '待办已保存并同步' });
       router.back();
     } catch (err) {
@@ -408,8 +411,16 @@ struct TodoEditPage {
     const ok = await CalendarDataService.convertTodoToEvent(ctx, id);
     if (ok) {
       try {
+        if (await AppSettings.getMirrorEnabled(ctx) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(ctx).catch((err: Error) => {
+            LogUtil.write(`转日程后同步镜像至系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {}
+      try {
         await CardDataService.pushToAllForms(ctx);
       } catch (err) {}
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
       this.getUIContext().getPromptAction().showToast({ message: '已成功转换为日程' });
       router.back();
     } else {
@@ -443,6 +454,7 @@ struct TodoEditPage {
             try {
               await CardDataService.pushToAllForms(ctx);
             } catch (err) {}
+            AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
             this.getUIContext().getPromptAction().showToast({ message: '待办已删除' });
             router.back();
           }

@@ -1585,6 +1585,10 @@ struct Index {
       this.buildEventsByDay();
       this.rebuildPages();
       this.rebuildDayTimeline();
+      if (this.mode === 'agenda') {
+        this.ensureAgendaData().catch(() => {});
+      }
+      this.dataVersion++;
 
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
 
