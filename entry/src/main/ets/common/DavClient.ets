@@ -661,4 +661,261 @@ export class DavClient {
     const match = regex.exec(xml);
     return match !== null ? match[2].trim() : '';
   }
+}// ===== CardDAV 支持（#10）=====
+// 说明：地址簿（addressbook）与日历本（calendar）在 DAV 层面是**并列的两类集合**，
+// 发现方式相同（PROPFIND Depth:1 看 resourcetype），但内容类型不同：
+//   日历本 → calendar-query / calendar-data / BEGIN:VEVENT
+//   地址簿 → addressbook-query / address-data / BEGIN:VCARD
+// 这两组方法刻意与日历侧分开，不复用 reportComponents —— 两者的 XML 命名空间
+// （urn:ietf:params:xml:ns:caldav vs ...:carddav）与解析入口都不一样，
+// 硬凑一个"通用"函数会让两边都看不懂。
+
+/** 地址簿条目（添加账号时勾选用） */
+export class DavAddressBookEntry {
+  href: string = '';
+  displayName: string = '';
+  /** 服务器声明的描述（addressbook-description），可能为空 */
+  description: string = '';
+  /** 是否可写（current-user-privilege-set），未知时按可写处理 */
+  writable: boolean = true;
+}
+
+/** 地址簿发现结果（带状态码，便于区分 401 与其它异常） */
+export class DavAddressBookDiscovery {
+  statusCode: number = 0;
+  entries: DavAddressBookEntry[] = [];
+}
+
+export class DavCardDavClient {
+  /**
+   * PROPFIND Depth:1 列出地址簿集合。
+   * 判据＝resourcetype 含 `addressbook` —— 与日历侧"含 calendar"同理，
+   * 不能只看 displayname 或路径（服务器可任意命名集合）。
+   */
+  static async listAddressBooks(serverUrl: string, auth: string): Promise<DavAddressBookDiscovery> {
+    const requestBody: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop>' +
+      '<d:displayname/><d:resourcetype/>' +
+      '<d:current-user-privilege-set/>' +
+      '<card:addressbook-description/>' +
+      // supported-address-data 告诉服务器我们接受 vCard 3.0
+      '<card:supported-address-data/>' +
+      '</d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    const out = new DavAddressBookDiscovery();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(serverUrl, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: requestBody,
+        connectTimeout: 10000,
+        readTimeout: 20000
+      });
+      out.statusCode = resp.responseCode;
+      LogUtil.write(`HTTP PROPFIND(地址簿) ${serverUrl} → ${resp.responseCode}`);
+      if (resp.responseCode !== 207 && resp.responseCode !== 200) {
+        return out;
+      }
+      const xml: string = resp.result as string;
+      const originMatch = /https?:\/\/[^/]+/i.exec(serverUrl);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const href: string = DavClient.extractTag(block, 'href');
+        if (href === '') {
+          continue;
+        }
+        const resourcetype: string = DavClient.extractTag(block, 'resourcetype');
+        // 🔴 只认 addressbook。有些服务器（群晖）会在地址簿下再嵌套别的集合，
+        //    用 calendar 误判会把它当日历本，反之亦然。
+        if (!/addressbook/i.test(resourcetype)) {
+          continue;
+        }
+        const entry = new DavAddressBookEntry();
+        entry.href = href.startsWith('http') ? href : origin + href;
+        let name: string = DavClient.extractTag(block, 'displayname');
+        if (name === '') {
+          const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
+          if (segs.length > 0) {
+            const last: string = segs[segs.length - 1];
+            try {
+              name = decodeURIComponent(last);
+            } catch (err) {
+              name = last;
+            }
+          } else {
+            name = href;
+          }
+        }
+        entry.displayName = name;
+        entry.description = DavClient.extractTag(block, 'addressbook-description');
+        // 权限：只有明确出现 "write" 才算不可写，未返回则按可写（兼容缺省服务器）
+        const priv: string = DavClient.extractTag(block, 'current-user-privilege-set');
+        if (priv !== '' && !/>\s*write\s*</i.test(priv)) {
+          entry.writable = false;
+        }
+        LogUtil.write(`发现地址簿：「${entry.displayName}」${entry.href} 可写=${entry.writable}`);
+        out.entries.push(entry);
+      }
+      return out;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * REPORT addressbook-query 拉取地址簿内全部 vCard。
+   * 不传过滤器＝拉全部（联系人数量级远小于日程，且没有可靠时间范围可过滤）。
+   */
+  static async reportCards(bookHref: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop><d:getetag/><card:address-data content-type="text/vcard" version="3.0"/></d:prop>' +
+      '</card:addressbook-query>';
+    return DavCardDavClient.reportCardsRaw(bookHref, auth, body);
+  }
+
+  /** 只拉 ETag（不拉正文），用于"没变化就不重新解析" */
+  static async reportCardEtags(bookHref: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop><d:getetag/></d:prop>' +
+      '</card:addressbook-query>';
+    return DavCardDavClient.reportCardsRaw(bookHref, auth, body);
+  }
+
+  private static async reportCardsRaw(bookHref: string, auth: string, body: string): Promise<RemoteItem[]> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(bookHref, {
+        method: 'REPORT' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 60000
+      });
+      console.info(`REPORT(CARD) ${bookHref} 响应码: ${resp.responseCode}`);
+      LogUtil.write(`HTTP REPORT(CARD) ${bookHref} → ${resp.responseCode}`);
+      if (resp.responseCode === 401) {
+        throw new DavHttpError(401, '服务器拒绝凭据(401)');
+      }
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `服务器返回状态码 ${resp.responseCode}`);
+      }
+      const xml: string = resp.result as string;
+      LogUtil.write(`HTTP REPORT(CARD) 响应体 ${xml.length} 字符`);
+      const originMatch = /https?:\/\/[^/]+/i.exec(bookHref);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
+      const items: RemoteItem[] = [];
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const resHref: string = DavClient.extractTag(block, 'href');
+        if (resHref === '') {
+          continue;
+        }
+        const item = new RemoteItem();
+        item.href = resHref.startsWith('http') ? resHref : origin + resHref;
+        item.etag = DavClient.extractTag(block, 'getetag').replace(/"/g, '');
+        // address-data 里可能是 CDATA 包裹，也可能直接是文本
+        const start: number = block.indexOf('BEGIN:VCARD');
+        const end: number = block.indexOf('END:VCARD');
+        if (start >= 0 && end >= 0) {
+          item.ics = block.substring(start, end + 'END:VCARD'.length);
+        } else {
+          // 只要 ETag 的查询走到这里，正文为空是正常的
+          item.ics = '';
+        }
+        items.push(item);
+      }
+      LogUtil.write(`REPORT(CARD) 解析出 ${items.length} 个资源`);
+      return items;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /** PUT 单张 vCard（Content-Type 为 text/vcard，不是 text/calendar） */
+  static async putCard(url: string, auth: string, vcard: string): Promise<string> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.PUT,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'text/vcard; charset=utf-8',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: vcard,
+        connectTimeout: 10000,
+        readTimeout: 30000
+      });
+      console.info(`PUT(CARD) ${url} 响应码: ${resp.responseCode}`);
+      LogUtil.write(`HTTP PUT(CARD) ${url} → ${resp.responseCode}`);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `推送失败，服务器返回 ${resp.responseCode}`);
+      }
+      const headers = resp.header as Record<string, string>;
+      if (headers !== undefined && headers !== null) {
+        const etag = headers['ETag'] ?? headers['etag'] ?? '';
+        return typeof etag === 'string' ? etag.replace(/"/g, '') : '';
+      }
+      return '';
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * 地址簿端点的候选路径。
+   * 群晖：/carddav/ ；Nextcloud：/remote.php/dav/addressbooks/<user>/ ；
+   * Radicale：/<user>/ ；Baïkal：/dav.php/addressbooks/<user>/
+   */
+  static addressBookCandidates(base: string, username: string): string[] {
+    const out: string[] = [];
+    const m = /^https?:\/\/[^/]+/i.exec(base.trim());
+    if (m === null) {
+      return out;
+    }
+    const origin: string = m[0];
+    const u: string = encodeURIComponent(username);
+    const push = (p: string): void => {
+      const full: string = origin + p;
+      if (out.indexOf(full) < 0) {
+        out.push(full);
+      }
+    };
+    // 让用户填的地址本身先试（最常见：直接填对了地址簿家目录）
+    // ArkTS 无全局 URL 构造器，手工取 origin 之后的路径部分
+    const rest: string = base.trim().substring(origin.length);
+    push(rest === "" ? "/" : rest);
+    // 群晖 Synology Contacts
+    push('/carddav/');
+    push('/carddav');
+    // Nextcloud / ownCloud
+    push(`/remote.php/dav/addressbooks/${u}/`);
+    push('/remote.php/dav/addressbooks/');
+    // Baïkal
+    push(`/dav.php/addressbooks/${u}/`);
+    // Radicale
+    push(`/${u}/`);
+    push('/');
+    return out;
+  }
 }

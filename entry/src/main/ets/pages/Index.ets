@@ -1576,6 +1576,24 @@ struct Index {
           this.menuOpen = false;
           router.pushUrl({ url: 'pages/AccountsPage' });
         })
+        // 联系人（CardDAV 通讯录）
+        Row({ space: 10 }) {
+          Text('📇')
+            .fontSize(13)
+            .width(16)
+            .textAlign(TextAlign.Center)
+          Text('联系人')
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%')
+        .height(40)
+        .borderRadius(8)
+        .padding({ left: 12 })
+        .onClick(() => {
+          this.menuOpen = false;
+          router.pushUrl({ url: 'pages/ContactListPage' });
+        })
         // 设置
         Row({ space: 10 }) {
           Text('⚙')

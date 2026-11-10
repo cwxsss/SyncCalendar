@@ -110,9 +110,29 @@ struct AccountsPage {
   }
 
   private openAddPage(): void {
-    // 目前只支持 CalDAV：点 + 直接进入添加 CalDAV 账号页（不再弹类型选择菜单）
-    AppStorage.setOrCreate<string>('pendingAccountType', TYPE_CALDAV);
-    router.pushUrl({ url: 'pages/AddAccountPage' });
+    // 支持两种：CalDAV 日历 / CardDAV 通讯录。
+    // 联系人同步是本版新增能力，入口放在这里比藏进设置页更符合用户预期
+    // （"加账号"和"加通讯录"都是"接一个服务器账号"）。
+    this.getUIContext().showAlertDialog({
+      title: '添加账号',
+      message: '选择要添加的账号类型',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: 'CalDAV 日历',
+        action: (): void => {
+          AppStorage.setOrCreate<string>('pendingAccountType', TYPE_CALDAV);
+          router.pushUrl({ url: 'pages/AddAccountPage' });
+        }
+      },
+      secondaryButton: {
+        value: 'CardDAV 通讯录',
+        action: (): void => {
+          AppStorage.setOrCreate<string>('pendingAccountType', TYPE_CARDDAV);
+          router.pushUrl({ url: 'pages/AddAccountPage' });
+        }
+      }
+    });
   }
 
   /** 点击账号 → 进入编辑页（查看/重选日历本） */
