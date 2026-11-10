@@ -161,6 +161,12 @@ export class EventDb {
       await store.executeSql(
         `UPDATE events SET is_all_day = 1, end_time = start_time + 86399000 WHERE (${cond}) AND end_time > start_time + 86399000`
       );
+      // 清理历史残留的同日重复节气行（只保留首行，彻底消除重复节日）
+      await store.executeSql(
+        `DELETE FROM events WHERE id NOT IN (
+           SELECT min(id) FROM events WHERE (${cond}) AND deleted = 0 GROUP BY title, (start_time / 86400000)
+         ) AND (${cond}) AND deleted = 0 AND dirty = 0`
+      );
     } catch (err) {
       // 忽略
     }

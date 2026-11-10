@@ -522,7 +522,11 @@ export class CardDataService {
           grp.items.push(it);
         }
         grp.count = grp.items.length;
-        multiDayGroups.push(grp);
+        // ⭐ 优化：显示未来7天和未来3天时（numDays > 1），如果没有日程和待办（grp.count === 0），
+        // 则不显示该天日期（不加入 multiDayGroups），彻底节省卡片有限的空间！
+        if (numDays <= 1 || grp.count > 0) {
+          multiDayGroups.push(grp);
+        }
       }
       data.multiDayJson = JSON.stringify(multiDayGroups);
       data.rangeCount = multiDayGroups.reduce((acc: number, g: CardDayGroup): number => acc + g.count, 0);

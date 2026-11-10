@@ -366,23 +366,25 @@ export class CalendarDataService {
               d.calName = nameOf(sysKey);
               d.color = color;
 
-              // 智能去重：与本地 CalDAV 日程完全重合时只展示一个（以本地为主）
+              // 智能去重：消除重复节日与完全重合的日程（以本地 CalDAV 为主，系统间同名节日也去重）
               const dup: boolean = result.some((x: DisplayEvent): boolean => {
-                if (x.isSystem) {
-                  return false;
-                }
                 const t1 = x.title.trim().toLowerCase();
                 const t2 = d.title.trim().toLowerCase();
-                if (t1 !== t2 && !t1.includes(t2) && !t2.includes(t1)) {
+                const isTitleMatch = (t1 === t2 || t1.includes(t2) || t2.includes(t1));
+                if (!isTitleMatch) {
                   return false;
                 }
-                // 全天日程：同一天即视为同一条
-                if (x.isAllDay || d.isAllDay) {
+                // 二十四节气与全天节日：无论是系统与本地、还是系统内部多日历源，只要同一天有同名节日/节气，只展示一个
+                if (isSolarTerm(x.title) || isSolarTerm(d.title) || x.isAllDay || d.isAllDay) {
                   const d1 = new Date(x.startTime);
                   const d2 = new Date(d.startTime);
                   return d1.getFullYear() === d2.getFullYear() &&
                          d1.getMonth() === d2.getMonth() &&
                          d1.getDate() === d2.getDate();
+                }
+                // 普通系统日程间如果非节假日，仅当其中一个是本地日程时才去重
+                if (x.isSystem && d.isSystem) {
+                  return false;
                 }
                 // 定时日程：开始时间相差在 60 秒内
                 return Math.abs(x.startTime - d.startTime) <= 60000;

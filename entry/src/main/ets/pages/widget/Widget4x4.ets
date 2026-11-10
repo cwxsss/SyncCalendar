@@ -611,7 +611,11 @@ struct Widget4x4Card {
 
   private parseMultiDays(): CardDayGroup4[] {
     try {
-      return JSON.parse(this.multiDayJson) as CardDayGroup4[];
+      const all = JSON.parse(this.multiDayJson) as CardDayGroup4[];
+      if (this.cardDays > 1) {
+        return all.filter((g: CardDayGroup4) => g.count > 0);
+      }
+      return all;
     } catch (err) {
       return [];
     }

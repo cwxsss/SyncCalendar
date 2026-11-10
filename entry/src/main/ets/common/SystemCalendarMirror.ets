@@ -976,9 +976,29 @@ export class SystemCalendarMirror {
     // 现有镜像条目：identifier -> Event
     const existing: Map<string, calendarManager.Event> = new Map<string, calendarManager.Event>();
     const sysEvents: calendarManager.Event[] = await SystemCalendarMirror.queryEvents(cal);
+    // ⭐ 自动清洗系统日历中历史残留的重复节气条目（同日同名节气只保留一个）
+    const seenSolarDay = new Set<string>();
     for (const ev of sysEvents) {
+      if (ev.id === undefined) {
+        continue;
+      }
+      const title = (ev.title ?? '').trim();
+      if (isSolarTerm(title)) {
+        const dayKey = `${title}_${SystemCalendarMirror.dayStart(ev.startTime)}`;
+        if (seenSolarDay.has(dayKey)) {
+          try {
+            await cal.deleteEvent(ev.id);
+            res.deleted++;
+            LogUtil.write(`自动清理系统日历重复节气: ${title} (${SystemCalendarMirror.fmt(ev.startTime)})`);
+          } catch (e) {
+            // 忽略
+          }
+          continue;
+        }
+        seenSolarDay.add(dayKey);
+      }
       const id: string = ev.identifier ?? '';
-      if (id === '' || ev.id === undefined) {
+      if (id === '') {
         continue;
       }
       existing.set(id, ev);
@@ -1193,8 +1213,9 @@ export class SystemCalendarMirror {
     endTs: number
   ): calendarManager.Event {
     let finalEndTs = endTs;
-    if (e.isAllDay) {
-      if (isSolarTerm(e.title)) {
+    const isSolar = isSolarTerm(e.title);
+    if (e.isAllDay || isSolar) {
+      if (isSolar) {
         finalEndTs = SystemCalendarMirror.dayStart(startTs) + SystemCalendarMirror.DAY - 1000;
       } else {
         const lastDayStart = SystemCalendarMirror.dayStart(endTs > startTs ? endTs - 1 : endTs);
@@ -1204,9 +1225,9 @@ export class SystemCalendarMirror {
     const ev: calendarManager.Event = {
       type: calendarManager.EventType.NORMAL,
       title: e.title !== '' ? e.title : '(无标题)',
-      startTime: startTs,
+      startTime: isSolar ? SystemCalendarMirror.dayStart(startTs) : startTs,
       endTime: finalEndTs,
-      isAllDay: e.isAllDay,
+      isAllDay: isSolar ? true : e.isAllDay,
       identifier: identifier
     };
     if (e.description !== '') {
