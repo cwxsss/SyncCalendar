@@ -57,6 +57,17 @@ export class DavAccount {
   calendarColors: string[] = [];
   /** 各日历本写权限（'1'=可写 '0'=只读），与 calendarHrefs 一一对应；空数组表示未知（按可写处理） */
   calendarWritable: string[] = [];
+  /**
+   * ⭐ 各本连续失败次数（#92）：与 calendarHrefs 同下标。
+   *   null 表示该位无记录（旧数据或从未失败）。
+   */
+  calendarFailCount: number[] = [];
+  /**
+   * ⭐ 各本下次允许重试的时间戳（毫秒，#92）：与 calendarHrefs 同下标。
+   *   当前时间小于该值时跳过该本，不再向服务器发请求。
+   *   0 / undefined 表示可立即重试。
+   */
+  calendarNextRetry: number[] = [];
   itemCount: number = 0;
   lastSyncTime: string = '';
 }
@@ -448,6 +459,19 @@ export class AccountStore {
     return '';
   }
 
+  /** 解析分号分隔的数字数组（空/非法项按 0 处理，保证下标与 hrefs 对齐，#92） */
+  private static parseNumArray(s: string): number[] {
+    if (s === '') {
+      return [];
+    }
+    const out: number[] = [];
+    for (const seg of s.split(';')) {
+      const n: number = Number(seg);
+      out.push(Number.isNaN(n) ? 0 : n);
+    }
+    return out;
+  }
+
   private static decodeAccount(raw: string): DavAccount | null {
     const parts: string[] = raw.split('|');
     if (parts.length < 9) {
@@ -474,6 +498,12 @@ export class AccountStore {
     if (parts.length >= 12) {
       acc.calendarWritable = parts[11] === '' ? [] : parts[11].split(';');
     }
+    if (parts.length >= 13) {
+      acc.calendarFailCount = AccountStore.parseNumArray(parts[12]);
+    }
+    if (parts.length >= 14) {
+      acc.calendarNextRetry = AccountStore.parseNumArray(parts[13]);
+    }
     return acc;
   }
 
@@ -492,7 +522,9 @@ export class AccountStore {
       acc.calendarNames.join(';'),
       acc.calendarColors.join(';'),
       safe(acc.id),
-      acc.calendarWritable.join(';')
+      acc.calendarWritable.join(';'),
+      acc.calendarFailCount.join(';'),
+      acc.calendarNextRetry.join(';')
     ];
     return parts.join('|');
   }
@@ -565,6 +597,8 @@ export class AccountStore {
             a.calendarNames = o['calendarNames'] !== undefined ? o['calendarNames'] as string[] : [];
             a.calendarColors = o['calendarColors'] !== undefined ? o['calendarColors'] as string[] : [];
             a.calendarWritable = o['calendarWritable'] !== undefined ? o['calendarWritable'] as string[] : [];
+            a.calendarFailCount = o['calendarFailCount'] !== undefined ? o['calendarFailCount'] as number[] : [];
+            a.calendarNextRetry = o['calendarNextRetry'] !== undefined ? o['calendarNextRetry'] as number[] : [];
             a.itemCount = o['itemCount'] !== undefined ? o['itemCount'] as number : 0;
             a.lastSyncTime = o['lastSyncTime'] !== undefined ? o['lastSyncTime'] as string : '';
             if (a.id === '') {

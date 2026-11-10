@@ -159,6 +159,14 @@ export class SyncEngine {
       const href: string = acc.calendarHrefs[i];
       const calKey: string = `${acc.id}_${i}`;
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
+
+      // ⭐ #92 5xx 阶梯退避：若该本仍在退避冷却期内，直接跳过本轮同步，不发请求
+      if (i < acc.calendarNextRetry.length && acc.calendarNextRetry[i] > Date.now()) {
+        const remainingSec: number = Math.round((acc.calendarNextRetry[i] - Date.now()) / 1000);
+        LogUtil.write(`日历本[${i}]「${calName}」处于退避期（剩余 ${remainingSec} 秒），跳过`);
+        continue;
+      }
+
       LogUtil.write(`日历本[${i}]「${calName}」开始同步：${href}`);
       const t1: number = Date.now();
       let items: RemoteItem[] = [];
@@ -168,6 +176,16 @@ export class SyncEngine {
         if (err instanceof DavHttpError && (err as DavHttpError).status === 404) {
           LogUtil.write(`日历本[${i}]「${calName}」在服务器上已不存在(404)，本轮跳过，收尾时自动从账号移除`);
           deadIdxs.push(i);
+          continue;
+        }
+        // ⭐ #92 5xx 错误不再连坐整个账号，改为该本单独退避
+        if (err instanceof DavHttpError && (err as DavHttpError).status >= 500) {
+          const st: number = (err as DavHttpError).status;
+          const fails: number = SyncEngine.bumpFailCount(acc, i);
+          const waitMs: number = SyncEngine.backoffMs(fails);
+          SyncEngine.setNextRetry(acc, i, Date.now() + waitMs);
+          LogUtil.write(`日历本[${i}]「${calName}」服务器异常 ${st}（连续第 ${fails} 次），`
+            + `本轮跳过，${Math.round(waitMs / 60000)} 分钟后再试`);
           continue;
         }
         throw err as Error;
@@ -288,8 +306,22 @@ export class SyncEngine {
         const tstat: string = await EventDb.applyRemote(context, calKey, href, remoteTodos, true);
         LogUtil.write(`日历本[${i}]「${calName}」待办：REPORT ${todoItems.length} 个资源，解析 ${remoteTodos.length} 条，${tstat}`);
       } catch (err) {
-        const te = err as BusinessError;
-        LogUtil.write(`日历本[${i}]「${calName}」拉取待办失败(忽略)：${te.message}`);
+        // ⭐ #92 待办通道的 5xx 也要记退避。
+        if (err instanceof DavHttpError && (err as DavHttpError).status >= 500) {
+          const st: number = (err as DavHttpError).status;
+          const fails: number = SyncEngine.bumpFailCount(acc, i);
+          const waitMs: number = SyncEngine.backoffMs(fails);
+          SyncEngine.setNextRetry(acc, i, Date.now() + waitMs);
+          LogUtil.write(`日历本[${i}]「${calName}」待办通道服务器异常 ${st}（连续第 ${fails} 次），`
+            + `${Math.round(waitMs / 60000)} 分钟后再试`);
+        } else {
+          const te = err as BusinessError;
+          LogUtil.write(`日历本[${i}]「${calName}」拉取待办失败(忽略)：${te.message}`);
+        }
+      }
+      // ⭐ #92 该本本轮走完了（两通道都没抛出可退避的错误）→ 视为恢复，清空退避记录。
+      if (!(i < acc.calendarNextRetry.length && acc.calendarNextRetry[i] > Date.now())) {
+        SyncEngine.clearBackoff(acc, i);
       }
     }
     // 收尾：把本轮发现的"服务器上已删除"的日历本从账号移除并清理本地数据。
@@ -298,6 +330,62 @@ export class SyncEngine {
       await SyncEngine.removeDeadBooks(context, acc, deadIdxs);
     }
     return changed;
+  }
+
+  // ---------- #92 单本失败退避 ----------
+
+  /** 该本连续失败次数 +1，返回新值（数组长度不足时先补齐到 hrefs 长度） */
+  static bumpFailCount(acc: DavAccount, idx: number): number {
+    while (acc.calendarFailCount.length < acc.calendarHrefs.length) {
+      acc.calendarFailCount.push(0);
+    }
+    const cur: number = idx < acc.calendarFailCount.length ? acc.calendarFailCount[idx] : 0;
+    const next: number = cur + 1;
+    if (idx < acc.calendarFailCount.length) {
+      acc.calendarFailCount[idx] = next;
+    }
+    return next;
+  }
+
+  /** 记录该本下次可重试的时间戳 */
+  static setNextRetry(acc: DavAccount, idx: number, atMs: number): void {
+    while (acc.calendarNextRetry.length < acc.calendarHrefs.length) {
+      acc.calendarNextRetry.push(0);
+    }
+    if (idx < acc.calendarNextRetry.length) {
+      acc.calendarNextRetry[idx] = atMs;
+    }
+  }
+
+  /**
+   * 递增退避阶梯：第 1 次 1 分钟，第 2 次 5 分钟，第 3 次 10 分钟，第 4 次起 30 分钟封顶。
+   *
+   * 为什么不固定 10 分钟而从 1 分钟起步：
+   * 短暂抖动（网络瞬断、服务器重启）1 分钟就能恢复，
+   * 一上来等 10 分钟会让用户觉得"怎么一直不同步"。
+   * 而真坏了的本（地址变更）会很快升到 30 分钟，不会持续打服务器。
+   */
+  static backoffMs(fails: number): number {
+    if (fails <= 1) {
+      return 60 * 1000;
+    }
+    if (fails === 2) {
+      return 5 * 60 * 1000;
+    }
+    if (fails === 3) {
+      return 10 * 60 * 1000;
+    }
+    return 30 * 60 * 1000;
+  }
+
+  /** 该本同步成功 → 清空失败次数与重试时间，恢复正常节奏 */
+  static clearBackoff(acc: DavAccount, idx: number): void {
+    if (idx < acc.calendarFailCount.length && acc.calendarFailCount[idx] !== 0) {
+      acc.calendarFailCount[idx] = 0;
+    }
+    if (idx < acc.calendarNextRetry.length && acc.calendarNextRetry[idx] !== 0) {
+      acc.calendarNextRetry[idx] = 0;
+    }
   }
 
   /**

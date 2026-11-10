@@ -691,6 +691,11 @@ struct EventEditPage {
     return `提前${m / 1440}天`;
   }
 
+  private startOfDay(ms: number): number {
+    const d: Date = new Date(ms);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  }
+
   /** 打开时间选择弹层：日期 + 时间一次选完 */
   private openPicker(isEnd: boolean): void {
     this.pickerIsEnd = isEnd;
@@ -1183,6 +1188,20 @@ struct EventEditPage {
       } catch (err) {
         // 忽略
       }
+      // 联动清理/更新系统日历中的镜像事件（保证负一屏和系统日历即时呈现最新日程）
+      try {
+        if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(context).catch((err: Error) => {
+            LogUtil.write(`编辑页保存后同步镜像到系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {
+        // 忽略
+      }
+      // 通知主页：有日程修改完成，并自动定位到该日程所属日期
+      const targetDay: number = this.startOfDay(e.startTime);
+      AppStorage.setOrCreate<number>('pendingEventDate', targetDay);
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
       this.getUIContext().getPromptAction().showToast({ message: '日程已保存' });
       router.back();
     } catch (err) {
@@ -1269,6 +1288,16 @@ struct EventEditPage {
       } catch (err) {
         // 忽略
       }
+      try {
+        if (await AppSettings.getMirrorEnabled(ctx) && await SystemCalendarMirror.hasPermission()) {
+          SystemCalendarMirror.syncNow(ctx).catch((err: Error) => {
+            LogUtil.write(`转待办后同步镜像清理系统日历失败: ${err.message}`);
+          });
+        }
+      } catch (err) {
+        // 忽略
+      }
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
       this.getUIContext().getPromptAction().showToast({ message: '已成功转换为待办事项' });
       router.back();
     } else {
@@ -1399,6 +1428,7 @@ struct EventEditPage {
       } catch (err) {
         // 忽略
       }
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', Date.now());
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
       router.back();
     } catch (err) {
@@ -1561,12 +1591,13 @@ struct EventEditPage {
             Toggle({ type: ToggleType.Switch, isOn: this.allDay })
               .selectedColor($r('app.color.brand'))
               .switchPointColor(Color.White)
+              .margin({ right: 0 })
               .onChange((isOn: boolean) => {
                 this.handleAllDayChange(isOn);
               })
           }
           .width('100%')
-          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+          .padding({ left: 14, right: 10, top: 10, bottom: 10 })
           .borderRadius(12)
           .backgroundColor($r('app.color.card_bg'))
 
@@ -2481,6 +2512,8 @@ struct DateTimePickerSheetContent {
   initMin: number = 0;
   onConfirm: (date: Date, hour: number, min: number) => void = () => {};
 
+  @State private currentDate: Date = new Date();
+  @State private currentTime: Date = new Date(2000, 0, 1, 9, 0);
   private selectedDate: Date = new Date();
   private selectedHour: number = 9;
   private selectedMin: number = 0;
@@ -2488,9 +2521,11 @@ struct DateTimePickerSheetContent {
   private readonly pickerEnd: Date = new Date(2050, 11, 31);
 
   aboutToAppear(): void {
+    this.currentDate = new Date(this.initDate.getTime());
     this.selectedDate = new Date(this.initDate.getTime());
     this.selectedHour = this.initHour;
     this.selectedMin = this.initMin;
+    this.currentTime = new Date(2000, 0, 1, this.initHour, this.initMin);
   }
 
   build() {
@@ -2507,10 +2542,11 @@ struct DateTimePickerSheetContent {
         DatePicker({
           start: this.pickerStart,
           end: this.pickerEnd,
-          selected: this.initDate
+          selected: this.currentDate
         })
           .onDateChange((value: Date) => {
             if (value && !isNaN(value.getTime())) {
+              this.currentDate = value;
               this.selectedDate = value;
             }
           })
@@ -2525,12 +2561,13 @@ struct DateTimePickerSheetContent {
 
         if (!this.isAllDay) {
           TimePicker({
-            selected: new Date(2000, 0, 1, this.initHour, this.initMin)
+            selected: this.currentTime
           })
             .onChange((value: TimePickerResult) => {
               if (value.hour !== undefined && value.minute !== undefined) {
                 this.selectedHour = value.hour;
                 this.selectedMin = value.minute;
+                this.currentTime = new Date(2000, 0, 1, value.hour, value.minute);
               }
             })
             .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
@@ -2552,7 +2589,7 @@ struct DateTimePickerSheetContent {
         .fontSize(15)
         .backgroundColor($r('app.color.brand'))
         .onClick(() => {
-          this.onConfirm(this.selectedDate, this.selectedHour, this.selectedMin);
+          this.onConfirm(this.currentDate, this.selectedHour, this.selectedMin);
         })
     }
     .width('100%')

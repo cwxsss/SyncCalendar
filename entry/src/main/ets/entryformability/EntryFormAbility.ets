@@ -39,8 +39,12 @@ export default class EntryFormAbility extends FormExtensionAbility {
     LogUtil.init(this.context);
     let formId: string = '';
     if (want.parameters !== undefined) {
-      const raw = want.parameters['ohos.extra.param.key.form_identity'];
-      formId = typeof raw === 'string' ? raw : '';
+      const raw = want.parameters['ohos.extra.param.key.form_identity'] ??
+        want.parameters['form_id'] ??
+        want.parameters['ohos.extra.param.key.form_id'];
+      if (raw !== undefined && raw !== null) {
+        formId = String(raw);
+      }
     }
     LogUtil.write(`添加卡片: formId=${formId}`);
     // 先返回空壳初始数据，异步查库后推送真实数据
@@ -50,6 +54,24 @@ export default class EntryFormAbility extends FormExtensionAbility {
     }
     const initial = new CardData();
     return formBindingData.createFormBindingData(initial);
+  }
+
+  onCastToNormalForm(formId: string): void {
+    LogUtil.init(this.context);
+    LogUtil.write(`卡片转为常态卡片: formId=${formId}`);
+    CardDataService.registerForm(this.context, formId);
+    this.pushData(formId, CardDataService.getDayOffset(formId), CardDataService.getCardDays(formId));
+  }
+
+  onChangeFormVisibility(newStatus: Record<string, number>): void {
+    LogUtil.init(this.context);
+    for (const key of Object.keys(newStatus)) {
+      if (newStatus[key] === 1) { // 1 代表卡片变为可见（如划入负一屏或返回桌面）
+        LogUtil.write(`卡片变为可见: formId=${key}`);
+        CardDataService.registerForm(this.context, key);
+        this.pushData(key, CardDataService.getDayOffset(key), CardDataService.getCardDays(key));
+      }
+    }
   }
 
   onUpdateForm(formId: string): void {

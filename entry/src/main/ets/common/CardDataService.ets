@@ -272,7 +272,8 @@ export class CardDataService {
         dataCache.set(cacheKey, cardDataObj);
       }
       try {
-        await formProvider.updateForm(formId, binding);
+        const freshBinding: formBindingData.FormBindingData = formBindingData.createFormBindingData(cardDataObj);
+        await formProvider.updateForm(formId, freshBinding);
         CardDataService.scheduleNextRefresh(formId, cardDataObj.nextRefreshMinutes);
       } catch (err) {
         const e = err as BusinessError;

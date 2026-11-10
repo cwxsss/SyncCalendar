@@ -83,6 +83,7 @@ struct Index {
   private sources: CalSource[] = [];
   private eventsByDay: Map<number, DisplayEvent[]> = new Map<number, DisplayEvent[]>();
   private isLoadingAll: boolean = false;
+  private pendingReload: boolean = false;
   private swiperController: SwiperController = new SwiperController();
   private expandedSwiperController: SwiperController = new SwiperController();
   private swiperGuard: boolean = false;
@@ -246,8 +247,25 @@ struct Index {
     }
     // 卡片"添加"按钮深链：首次冷启动经 onCreate→AppStorage 落到这里消费
     this.consumeWidgetAction();
-    // 无条件刷新：之前"列表为空就跳过"的条件会导致账号列表卡死在空状态，
-    // 同步时误报"没有可同步的账号"
+
+    // 检查是否有编辑/新建日程传回的定位日期
+    const pendingDate: number = AppStorage.get<number>('pendingEventDate') ?? 0;
+    if (pendingDate !== 0) {
+      AppStorage.setOrCreate<number>('pendingEventDate', 0);
+      if (pendingDate >= 946684800000 && pendingDate <= 4102444800000) {
+        this.jumpToDate(pendingDate);
+      }
+    }
+
+    // 消费日程修改时间戳标记（若有修改，清除旧详情缓存）
+    const modifiedTs: number = AppStorage.get<number>('eventModifiedTimestamp') ?? 0;
+    if (modifiedTs !== 0) {
+      AppStorage.setOrCreate<number>('eventModifiedTimestamp', 0);
+      this.detailShow = false;
+      this.detailEvent = null;
+    }
+
+    // 无条件刷新：保证回到前台或编辑返回时即时重载所有日程和卡片
     this.reloadAll().then((): Promise<void> => this.handlePendingSync());
   }
 
@@ -441,6 +459,7 @@ struct Index {
   // ---------- 数据 ----------
   private async reloadAll(): Promise<void> {
     if (this.isLoadingAll) {
+      this.pendingReload = true;
       return;
     }
     this.isLoadingAll = true;
@@ -460,6 +479,12 @@ struct Index {
       this.startAutoSync();
     } finally {
       this.isLoadingAll = false;
+      if (this.pendingReload) {
+        this.pendingReload = false;
+        setTimeout(() => {
+          this.reloadAll().catch(() => {});
+        }, 60);
+      }
     }
   }
 
