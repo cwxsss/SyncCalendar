@@ -40,6 +40,21 @@ export class ContactRow {
 
 const DB_NAME: string = 'sync_contacts.db';
 const TABLE: string = 'contacts';
+const META: string = 'contact_meta';
+
+/**
+ * ⭐ 解析器版本号。
+ *
+ * 为什么需要（2026-11-11 实测踩到）：
+ *   同步靠 ETag 判断"远端没变就跳过解析"。但**本地解析逻辑升级时 ETag 不会变**，
+ *   于是旧数据永远停在旧解析结果上。
+ *   实例：修好「ORG 值含 \; 被截断」后重同步，日志显示
+ *        「远端 8，新增 0，更新 0，不变 8」 ← 根本没重新解析，界面还是错的。
+ *
+ * ⇒ 解析逻辑有任何影响输出结果的改动，就把这个数字 +1。
+ *   启动时会比对，不一致就清空本地联系人缓存并强制全量重解析。
+ */
+const PARSER_VERSION: number = 2;
 
 export class ContactDb {
   private static db: relationalStore.RdbStore | null = null;
@@ -74,8 +89,47 @@ export class ContactDb {
     } catch (err) {
       LogUtil.write(`创建联系人索引失败（忽略）：${(err as Error).message}`);
     }
+    // 解析器版本表（单行）
+    await store.executeSql(
+      'CREATE TABLE IF NOT EXISTS contact_meta (k TEXT PRIMARY KEY, v TEXT)'
+    );
+    await ContactDb.checkParserVersion(store);
     ContactDb.db = store;
     return store;
+  }
+
+  /**
+   * 解析器版本比对。不一致 ⇒ 清空联系人缓存，逼下一轮全量重解析。
+   * 只清联系人数据（不动账号与设置），代价可控。
+   */
+  private static async checkParserVersion(store: relationalStore.RdbStore): Promise<void> {
+    const want: string = String(PARSER_VERSION);
+    try {
+      const pred = new relationalStore.RdbPredicates(META);
+      pred.equalTo('k', 'parser_version');
+      const rs = await store.query(pred);
+      let cur: string = '';
+      try {
+        if (rs.goToFirstRow()) {
+          cur = rs.getString(rs.getColumnIndex('v'));
+        }
+      } finally {
+        rs.close();
+      }
+      if (cur === want) {
+        return;
+      }
+      // 版本不同 → 全清，等下一轮同步重新解析
+      await store.executeSql('DELETE FROM ' + TABLE);
+      // ⚠️ 不用 update-then-insert：update 影响 0 行时插入会撞主键
+      //    （实测报 "Abort due to constraint violation"）。
+      //    直接 INSERT OR REPLACE 一步到位。
+      await store.executeSql(
+        `INSERT OR REPLACE INTO ${META} (k, v) VALUES ('parser_version', '${want}')`);
+      LogUtil.write(`联系人解析器版本 ${cur === '' ? '(无)' : cur} → ${want}，已清空缓存待重解析`);
+    } catch (err) {
+      LogUtil.write(`联系人解析器版本检查失败：${(err as Error).message}`);
+    }
   }
 
   /** 把解析后的联系人写入/更新（按 book_key + uid 判断） */

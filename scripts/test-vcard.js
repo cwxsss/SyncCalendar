@@ -128,6 +128,32 @@ function firstType(params) {
   return '';
 }
 
+
+function rawValueOf(line) {
+  const colon = findValueColon(line.text);
+  if (colon < 0) return '';
+  return line.text.substring(colon + 1);
+}
+
+function splitSegments(raw) {
+  const out = [];
+  let cur = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charAt(i);
+    if (ch === '\\' && i + 1 < raw.length) {
+      cur += ch + raw.charAt(i + 1);
+      i++;
+    } else if (ch === ';') {
+      out.push(unescape(cur));
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(unescape(cur));
+  return out;
+}
+
 function parse(raw, href, etag) {
   if (raw === '' || raw.indexOf('BEGIN:VCARD') < 0) return null;
   const c = { uid: '', href: href || '', etag: etag || '', displayName: '', familyName: '',
@@ -141,7 +167,10 @@ function parse(raw, href, etag) {
       case 'UID': c.uid = valueOf(line); break;
       case 'FN': if (fn === '') fn = valueOf(line); break;
       case 'N': if (n === '') n = valueOf(line); break;
-      case 'ORG': if (c.org === '') c.org = valueOf(line).split(';')[0]; break;
+      case 'ORG': if (c.org === '') {
+        const segs = splitSegments(rawValueOf(line));
+        c.org = segs.length > 0 ? segs[0] : '';
+      } break;
       case 'TITLE': c.title = valueOf(line); break;
       case 'NOTE': c.note = valueOf(line); break;
       case 'REV': c.rev = valueOf(line); break;
@@ -160,7 +189,8 @@ function parse(raw, href, etag) {
     }
   }
   if (n !== '') {
-    const seg = n.split(';');
+    const nl = lines.filter(l => l.name === 'N')[0];
+    const seg = nl ? splitSegments(rawValueOf(nl)) : n.split(';');
     c.familyName = seg[0] || '';
     c.givenName = seg[1] || '';
   }
@@ -370,6 +400,17 @@ const synoEdited = setField(syno, 'FN', '王大明');
 ok('改 FN 后 PRODID 仍在', synoEdited.indexOf('PRODID') >= 0, '丢了 PRODID');
 ok('改 FN 后 X-ABLabel 仍在', synoEdited.indexOf('X-ABLabel') >= 0, '丢了 X-ABLabel');
 eq('改 FN 后新值生效', fieldValues(synoEdited, 'FN'), ['王大明']);
+
+console.log('\n=== 12. 多段字段里值含转义分号（回归）===');
+// 真实踩到的 bug：ORG 值里带 \; 时，先反转义再 split 会截断
+const segCase = ['BEGIN:VCARD', 'VERSION:3.0', 'UID:seg-1',
+  'FN:赵六', 'N:赵;六;;;',
+  'ORG:含\\,逗号\\;分号的公司;技术部',
+  'END:VCARD'].join('\r\n');
+const c5 = parse(segCase, '', '');
+eq('ORG 第一级完整（含分号不被截断）', c5.org, '含,逗号;分号的公司');
+eq('N 的姓', c5.familyName, '赵');
+eq('N 的名', c5.givenName, '六');
 
 console.log('\n' + '='.repeat(46));
 console.log(`结果：通过 ${pass}，失败 ${fail}`);

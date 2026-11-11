@@ -576,7 +576,9 @@ export class DavClient {
         const item = new RemoteItem();
         item.href = resHref.startsWith('http') ? resHref : origin + resHref;
         item.etag = etag;
-        item.ics = block.substring(start, end + 'END:VCALENDAR'.length);
+        // 还原 XML 实体（日程文本里出现 < & 时同样需要）
+        item.ics = DavClient.unescapeXmlEntities(
+          block.substring(start, end + 'END:VCALENDAR'.length));
         items.push(item);
       }
       LogUtil.write(`诊断 blocks=${blocks.length} items=${items.length} xml长=${xml.length}`);
@@ -655,11 +657,39 @@ export class DavClient {
    * 与「十亿笑声」实体炸弹这类解析器层面的攻击面。
    * 另外 `tag` 只由本文件内的代码常量传入，不来自远端数据，故无需防注入。
    */
+  /**
+   * 还原 XML 实体。
+   *
+   * 🔴 为什么必须有（2026-11-11 实测群晖发现）：
+   *   vCard 正文是作为 **XML 文本节点**塞在 address-data 里的，
+   *   `<` `>` `&` 会被服务端转义成 `&lt;` `&gt;` `&amp;`。
+   *   例如群晖的标签行：
+   *       上传：item1.X-ABLABEL:_$!<CELL>!$_
+   *       回读：item1.X-ABLABEL:_$!&lt;CELL&gt;!$_
+   *   若不还原就存库，`&lt;` 会进入 raw 原文；下次「就地改字段 → PUT 回写」
+   *   就把 `&lt;` 写进服务器，**标签被永久写坏**，而且界面上看不出来。
+   *
+   * CalDAV 侧同理（SUMMARY 里出现 `<` 或 `&` 时会踩到），两处统一处理。
+   * ⚠️ 只还原五个预定义实体，不引入实体解析（避开 XXE，与 extractTag 一致）。
+   */
+  static unescapeXmlEntities(s: string): string {
+    if (s.indexOf('&') < 0) {
+      return s;
+    }
+    return s.replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      // &amp; 必须最后替换，否则 "&amp;lt;" 会被错误还原成 "<"
+      .replace(/&amp;/g, '&');
+  }
+
   static extractTag(xml: string, tag: string): string {
     const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
     const regex: RegExp = new RegExp(pattern, 'i');
     const match = regex.exec(xml);
-    return match !== null ? match[2].trim() : '';
+    // 属性值同样是 XML 文本节点，可能带实体（如 displayname 含 & 或 <）
+    return match !== null ? DavClient.unescapeXmlEntities(match[2].trim()) : '';
   }
 }// ===== CardDAV 支持（#10）=====
 // 说明：地址簿（addressbook）与日历本（calendar）在 DAV 层面是**并列的两类集合**，
@@ -837,7 +867,9 @@ export class DavCardDavClient {
         const start: number = block.indexOf('BEGIN:VCARD');
         const end: number = block.indexOf('END:VCARD');
         if (start >= 0 && end >= 0) {
-          item.ics = block.substring(start, end + 'END:VCARD'.length);
+          // 还原 XML 实体（见 unescapeXmlEntities 的说明）
+          item.ics = DavClient.unescapeXmlEntities(
+            block.substring(start, end + 'END:VCARD'.length));
         } else {
           // 只要 ETag 的查询走到这里，正文为空是正常的
           item.ics = '';
@@ -906,6 +938,12 @@ export class DavCardDavClient {
     const rest: string = base.trim().substring(origin.length);
     push(rest === "" ? "/" : rest);
     // 群晖 Synology Contacts
+    // 🔴 实测（2026-11-11）：`/carddav/` 只返回"集合自己"，**不列子地址簿**；
+    //    真正能列出地址簿的是 `/carddav/<用户名>/`。
+    //    只填域名时若只试 `/carddav/`，会得到 207 但 entries=0，
+    //    表现为"没有找到地址簿（服务器返回 207）"—— 极难排查。
+    //    ⇒ 带用户名的路径必须排在前面。
+    push(`/carddav/${u}/`);
     push('/carddav/');
     push('/carddav');
     // Nextcloud / ownCloud

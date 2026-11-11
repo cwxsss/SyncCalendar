@@ -127,10 +127,19 @@ struct CalendarListPage {
         return;
       }
       if (disc.entries.length === 0) {
-        this.statusMsg = `没有找到地址簿（服务器返回 ${disc.statusCode}）。\n\n`
-          + '请确认：\n'
-          + '1) 该服务器开启了 CardDAV（群晖需安装「Synology Contacts」）\n'
-          + '2) 地址可填域名，本页会自动尝试 /carddav/ 等常见路径';
+        // ⚠️ 207 但零地址簿，与 405「不是 DAV 端点」是两回事，提示要分开写，
+        //    否则用户会照着 405 的思路去改地址，白折腾。
+        const body: string = disc.statusCode === 207
+          ? `服务器接受了请求但没返回地址簿（207）。\n\n`
+            + '常见原因：\n'
+            + '1) 地址层级不对 —— 群晖要填到「用户名」那一层：\n'
+            + '   https://你的域名/carddav/你的用户名/\n'
+            + '2) 该账号下确实还没有地址簿（在 Synology Contacts 里新建一个）'
+          : `没有找到地址簿（服务器返回 ${disc.statusCode}）。\n\n`
+            + '请确认：\n'
+            + '1) 该服务器开启了 CardDAV（群晖需安装「Synology Contacts」）\n'
+            + '2) 地址可填域名，本页会自动尝试 /carddav/<用户名>/ 等常见路径';
+        this.statusMsg = body;
         this.statusOk = false;
         return;
       }

@@ -6,7 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { relationalStore } from '@kit.ArkData';
 import { ContactDb, ContactRow } from '../common/ContactDb';
 import { ContactService } from '../common/ContactService';
-import { VCardPhone, VCardEmail } from '../common/VCardUtil';
+import { VCardPhone, VCardEmail, VCardContact, VCardUtil } from '../common/VCardUtil';
 import { LogUtil } from '../common/LogUtil';
 
 @Entry
@@ -54,10 +54,16 @@ struct ContactDetailPage {
     this.note = row.note;
     this.phonesText = this.jsonToLines(row.phonesJson);
     this.emailsText = this.jsonToLines(row.emailsJson);
-    // N 字段从 raw 里解出来（库里未单独存）
-    const fam: string[] = this.extractN(row.raw);
-    this.familyName = fam.length > 0 ? fam[0] : '';
-    this.givenName = fam.length > 1 ? fam[1] : '';
+    // 姓名分段（姓/名）统一走 VCardUtil 解析，别再自己写正则。
+    // 🔴 2026-11-11 踩过：自制 /^N:(.*)$/m 有两个坑 ——
+    //   ① 区分大小写，行首带 \r 时 ^ 对不上；
+    //   ② 服务端返回的长行是**折行**的，正则只拿到第一段。
+    //    表现为"姓/名 一直显示 —"，而 FN 正常，很难怀疑到正则。
+    const parsed: VCardContact | null = VCardUtil.parse(row.raw, row.href, row.etag);
+    if (parsed !== null) {
+      this.familyName = parsed.familyName;
+      this.givenName = parsed.givenName;
+    }
     this.loaded = true;
   }
 
@@ -77,15 +83,6 @@ struct ContactDetailPage {
     return text.split('\n')
       .map((s: string): string => s.trim())
       .filter((s: string): boolean => s !== '');
-  }
-
-  /** 从 vCard 原文取 N 字段五段 */
-  private extractN(raw: string): string[] {
-    const m = /^N:(.*)$/m.exec(raw);
-    if (m === null) {
-      return [];
-    }
-    return m[1].split(';').map((s: string): string => s.replace(/\\,/g, ',').replace(/\\;/g, ';'));
   }
 
   private async save(): Promise<void> {

@@ -226,6 +226,50 @@ export class VCardUtil {
     return VCardUtil.unescape(v);
   }
 
+  /**
+   * 取某行的**原始值**（冒号之后，**不反转义**）。
+   *
+   * 🔴 为什么需要单独一个（2026-11-11 实测踩到）：
+   *   多段字段（N / ORG / ADR）内部用 `;` 分段，而值里的分号是用 `\;` 转义的。
+   *   若先反转义再 `split(';')`，会把**本属于值一部分的分号**当成段分隔符：
+   *       原值：含\,逗号\;分号的公司
+   *       反转义后：含,逗号;分号的公司
+   *       split(';')[0] → "含,逗号"      ← 后半截被丢了
+   *   正确顺序是：**先按未转义的分号拆段，再逐段反转义**。
+   */
+  private static rawValueOf(line: VLine): string {
+    const colon: number = VCardUtil.findValueColon(line.text);
+    if (colon < 0) {
+      return '';
+    }
+    const v: string = line.text.substring(colon + 1);
+    return v.length > VCardUtil.MAX_FIELD_LEN ? v.substring(0, VCardUtil.MAX_FIELD_LEN) : v;
+  }
+
+  /**
+   * 按**未转义的**分号拆段：`a;b\;c;d` → ["a", "b;c", "d"]
+   * 拆完每段都做反转义。
+   */
+  private static splitSegments(raw: string): string[] {
+    const out: string[] = [];
+    let cur: string = '';
+    for (let i = 0; i < raw.length; i++) {
+      const ch: string = raw.charAt(i);
+      if (ch === '\\' && i + 1 < raw.length) {
+        // 转义序列整段保留，交给 unescape 处理
+        cur += ch + raw.charAt(i + 1);
+        i++;
+      } else if (ch === ';') {
+        out.push(VCardUtil.unescape(cur));
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(VCardUtil.unescape(cur));
+    return out;
+  }
+
   /** 取参数串（冒号之前、名之后） */
   private static paramsOf(line: VLine): string {
     const colon: number = VCardUtil.findValueColon(line.text);
@@ -289,6 +333,8 @@ export class VCardUtil {
 
     let fn: string = '';
     let n: string = '';
+    // 保存 N 的原始行引用：后面拆五段时要用未转义原文
+    let nLine: VLine | null = null;
     for (const line of lines) {
       switch (line.name) {
         case 'UID':
@@ -302,12 +348,15 @@ export class VCardUtil {
         case 'N':
           if (n === '') {
             n = VCardUtil.valueOf(line);
+            nLine = line;
           }
           break;
         case 'ORG':
           if (c.org === '') {
-            // ORG 可多级，用 ; 分隔，取第一级作公司名
-            c.org = VCardUtil.valueOf(line).split(';')[0];
+            // ORG 可多级，用 ; 分隔，取第一级作公司名。
+            // 必须用 splitSegments（按未转义分号拆），否则值里带 \; 会被截断。
+            const segs: string[] = VCardUtil.splitSegments(VCardUtil.rawValueOf(line));
+            c.org = segs.length > 0 ? segs[0] : '';
           }
           break;
         case 'TITLE':
@@ -344,7 +393,7 @@ export class VCardUtil {
           break;
         }
         case 'ADR': {
-          const a = VCardUtil.parseAddress(VCardUtil.valueOf(line), VCardUtil.paramsOf(line));
+          const a = VCardUtil.parseAddress(VCardUtil.rawValueOf(line), VCardUtil.paramsOf(line));
           if (a !== null) {
             c.addresses.push(a);
           }
@@ -356,8 +405,11 @@ export class VCardUtil {
     }
 
     // 拆 N（family;given;middle;prefix;suffix）
+    // ⚠️ n 已经过 valueOf 反转义，这里不能再按 ; 拆（姓氏里可能有 \;）
+    //    所以从原始行重新取一遍
     if (n !== '') {
-      const seg: string[] = n.split(';');
+      const seg: string[] = nLine !== null
+        ? VCardUtil.splitSegments(VCardUtil.rawValueOf(nLine)) : n.split(';');
       c.familyName = seg.length > 0 ? seg[0] : '';
       c.givenName = seg.length > 1 ? seg[1] : '';
       c.middleName = seg.length > 2 ? seg[2] : '';
@@ -415,7 +467,8 @@ export class VCardUtil {
     if (value === '') {
       return null;
     }
-    const seg: string[] = value.split(';');
+    // ⚠️ 传进来的是**未转义**原文，仍要用 splitSegments 免得值内分号被误拆
+    const seg: string[] = VCardUtil.splitSegments(value);
     const a = new VCardAddress();
     a.type = VCardUtil.firstType(params);
     a.street = seg.length > 2 ? seg[2] : '';
