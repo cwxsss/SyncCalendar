@@ -28,7 +28,7 @@ export class AppSettings {
   /** ⭐ 诊断开关：卡片驱动同步的时间预算（毫秒）。0/未设置 = 用内置默认（见 BackgroundSyncRunner）。
    *  留给真机排查用 —— 不用重编译就能做"9 秒 vs 长窗口"对照实验。 */
   private static readonly KEY_CARD_BUDGET_MS: string = 'card_budget_ms';
-  private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done'; // 一次性全量重拉已完成
+  private static readonly KEY_FULL_REFETCH: string = 'full_refetch_done_v2'; // 一次性全量重拉已完成（含全天与节假日解析修复）
   private static readonly KEY_DEFAULT_VIEW: string = 'default_view';      // 打开 App 默认视图
   private static readonly KEY_DISPLAY_STYLE: string = 'display_style';    // 日程显示方式：'timeline' | 'list'
   private static readonly KEY_CARD_DAYS_RANGE: string = 'card_days_range'; // 桌面卡片日程显示天数跨度：1 | 3 | 7

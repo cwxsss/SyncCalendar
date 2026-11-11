@@ -27,6 +27,137 @@ export function isSolarTerm(title: string): boolean {
   );
 }
 
+const DAY_MS: number = 86400000;
+const TZ_LEAK_MAX_MS: number = 14 * 3600000;
+
+const SINGLE_DAY_FESTIVALS: string[] = [
+  '腊八', '腊八节', '小年', '北方小年', '南方小年', '除夕', '破五', '迎财神', '人日',
+  '元宵', '元宵节', '上元节', '填仓节', '中和节', '龙抬头', '春龙节', '社日节', '上巳节',
+  '寒食', '寒食节', '清明节', '浴佛节', '夏至节', '七夕', '七夕节', '乞巧节',
+  '中元节', '地藏节', '重阳', '重阳节', '登高节', '寒衣节', '下元节', '冬至节',
+  '妇女节', '三八妇女节', '国际妇女节', '植树节', '消费者权益日', '国际消费者权益日',
+  '315', '3·15', '青年节', '五四青年节', '儿童节', '六一儿童节', '建党节', '七一建党节',
+  '建军节', '八一建军节', '教师节', '烈士纪念日', '国家公祭日', '国家宪法日',
+  '情人节', '白色情人节', '愚人节', '母亲节', '父亲节', '护士节', '国际护士节',
+  '记者节', '感恩节', '万圣夜', '万圣节前夜', '万圣节', '平安夜', '圣诞节',
+  '光棍节', '双十一', '双11', '双十二', '双12',
+  '地球一小时'
+];
+
+const MULTI_DAY_SKIP_RE: RegExp = /(?:假期|放假|调休|连休|黄金周|长假|旅行|旅游|出差|出游)/;
+const OBSERVANCE_DAY_RE: RegExp = /^(?:世界|国际|中国|全国|亚洲).{1,14}日$/;
+
+/** 返回 ms 所在本地日历天的 00:00:00.000 时间戳 */
+export function dayStartMs(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** 在本地日历日 0 点基础上加减若干天（按日历日增减，兼容夏令时） */
+export function addLocalDays(day0Ms: number, deltaDays: number): number {
+  const d = new Date(day0Ms);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + deltaDays);
+  return d.getTime();
+}
+
+/**
+ * 规范化全天日程起止时间，返回 [startDay0, lastDay 23:59:59]：
+ *  - 修复 0 时长/倒置结束
+ *  - 识别 UTC 午夜偏移整天（如 08:00..次日08:00 或 08:00..次日07:59:59）
+ *  - 识别排他 00:00 结束及鸿蒙系统日历 "+时区偏移" 读回（如 次日 08:00）
+ */
+export function normalizeAllDayRange(startMs: number, endMs: number): number[] {
+  const sDay: number = dayStartMs(startMs);
+  if (endMs <= startMs) {
+    return [sDay, addLocalDays(sDay, 1) - 1000];
+  }
+  const dur: number = endMs - startMs;
+  if (dur % DAY_MS === 0) {
+    const days: number = Math.max(1, Math.round(dur / DAY_MS));
+    return [sDay, addLocalDays(sDay, days) - 1000];
+  }
+  if ((dur + 1000) % DAY_MS === 0) {
+    const days: number = Math.max(1, Math.round((dur + 1000) / DAY_MS));
+    return [sDay, addLocalDays(sDay, days) - 1000];
+  }
+  if ((dur + 1) % DAY_MS === 0) {
+    const days: number = Math.max(1, Math.round((dur + 1) / DAY_MS));
+    return [sDay, addLocalDays(sDay, days) - 1000];
+  }
+  const eDay: number = dayStartMs(endMs);
+  const eTod: number = endMs - eDay;
+  let lastDay: number = eDay;
+  if (eDay > sDay && eTod >= 0 && eTod <= TZ_LEAK_MAX_MS) {
+    const prevDay: number = addLocalDays(eDay, -1);
+    lastDay = prevDay >= sDay ? prevDay : sDay;
+  }
+  return [sDay, addLocalDays(lastDay, 1) - 1000];
+}
+
+/** 判断标题是否为常见单日传统节日 / 纪念日 */
+export function isSingleDayFestival(title: string): boolean {
+  if (!title) {
+    return false;
+  }
+  const raw: string = title.trim();
+  if (MULTI_DAY_SKIP_RE.test(raw)) {
+    return false;
+  }
+  const core: string = raw.replace(/\s*[（(][^）)]*[）)]\s*$/, '').trim();
+  if (OBSERVANCE_DAY_RE.test(raw) || OBSERVANCE_DAY_RE.test(core)) {
+    return true;
+  }
+  for (let i = 0; i < SINGLE_DAY_FESTIVALS.length; i++) {
+    const f = SINGLE_DAY_FESTIVALS[i];
+    if (raw === f || core === f || raw.startsWith(`${f} `) || raw.startsWith(`${f}·`) || raw.endsWith(`·${f}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 若为二十四节气或跨度 <= 2 天的常见单日节日/纪念日，规范为单日全天 [day0, day0 23:59:59]；
+ * 否则返回 null（不改动多日长假或短时晚间活动）。
+ */
+export function normalizeSingleDayIfFestival(
+  title: string,
+  startMs: number,
+  endMs: number,
+  isAllDay: boolean
+): number[] | null {
+  if (isSolarTerm(title)) {
+    const sDay: number = dayStartMs(startMs);
+    return [sDay, addLocalDays(sDay, 1) - 1000];
+  }
+  if (!isSingleDayFestival(title)) {
+    return null;
+  }
+  const sDay: number = dayStartMs(startMs);
+  if (isAllDay) {
+    const range: number[] = normalizeAllDayRange(startMs, endMs);
+    const rsDay: number = range[0];
+    const rEndDay: number = dayStartMs(range[1]);
+    const daySpan: number = Math.round((rEndDay - rsDay) / DAY_MS) + 1;
+    if (daySpan <= 2) {
+      return [rsDay, addLocalDays(rsDay, 1) - 1000];
+    }
+    return null;
+  }
+  const dur: number = endMs - startMs;
+  if (dur < 12 * 3600000) {
+    return null;
+  }
+  const eDay: number = dayStartMs(endMs > startMs ? endMs : startMs);
+  const calDiff: number = Math.round((eDay - sDay) / DAY_MS);
+  if (calDiff <= 1 || (calDiff === 2 && (endMs - eDay) === 0)) {
+    return [sDay, addLocalDays(sDay, 1) - 1000];
+  }
+  return null;
+}
+
 export class LunarUtil {
   // 农历压缩数据表：每年一个十六进制值（1900~2100）
   private static readonly LUNAR_INFO: number[] = [

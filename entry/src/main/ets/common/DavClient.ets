@@ -272,25 +272,16 @@ export class DavClient {
     }
   }
 
-  /**
-   * 写权限探测：向日历本 PUT 一个探测资源——
-   * 2xx → 可写（随后删除探测资源）；403/401 等 → 只读；网络异常 → 乐观按可写。
-   * 用于服务器不返回 current-user-privilege-set 的情况（如部分 Synology 配置）。
-   */
-  static async probeWritable(href: string, auth: string): Promise<boolean> {
-    const url: string = href.endsWith('/')
-      ? `${href}synccalendar-probe.ics` : `${href}/synccalendar-probe.ics`;
-    const ics: string = 'BEGIN:VCALENDAR\r\n' +
-      'VERSION:2.0\r\n' +
-      'PRODID:-//SyncCalendar//Probe//CN\r\n' +
-      'BEGIN:VEVENT\r\n' +
-      'UID:syncprobe\r\n' +
-      'DTSTAMP:20000101T000000Z\r\n' +
-      'DTSTART:20000101T000000Z\r\n' +
-      'DTEND:20000101T010000Z\r\n' +
-      'SUMMARY:probe\r\n' +
-      'END:VEVENT\r\n' +
-      'END:VCALENDAR\r\n';
+  /** 从资源 href 提取文件名（去掉查询参数，取末段） */
+  static fileNameFromHref(href: string): string {
+    const q: number = href.indexOf('?');
+    const clean: string = q >= 0 ? href.substring(0, q) : href;
+    const idx: number = clean.lastIndexOf('/');
+    return idx >= 0 ? clean.substring(idx + 1) : clean;
+  }
+
+  /** 向指定 URL PUT 一份探测 ICS 并清理；返回 HTTP 状态码，网络异常返回 -1 */
+  private static async putProbe(url: string, auth: string, ics: string): Promise<number> {
     const httpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await httpRequest.request(url, {
@@ -306,25 +297,59 @@ export class DavClient {
       });
       LogUtil.write(`HTTP PUT(探测) ${url} → ${resp.responseCode}`);
       if (resp.responseCode >= 200 && resp.responseCode < 300) {
-        // 写入成功：删除探测资源，避免污染日历本
         try {
           await DavClient.deleteRemote(url, auth);
         } catch (err) {
           // 删除失败不影响权限判定
         }
-        return true;
       }
-      if (resp.responseCode === 412 || resp.responseCode === 405 || resp.responseCode === 409) {
-        // 资源已存在/方法冲突等：说明有写权限
-        return true;
-      }
-      return false; // 403/401 等 → 只读
+      return resp.responseCode;
     } catch (err) {
-      // 网络异常无法判定：乐观按可写，避免误标只读
-      return true;
+      return -1;
     } finally {
       httpRequest.destroy();
     }
+  }
+
+  /**
+   * 写权限探测：先尝试 PUT VEVENT；若服务端因"集合仅支持 VTODO"返回 400/403/415，
+   * 再回退尝试 PUT VTODO（如群晖 Inbox 任务本 / iCloud 提醒事项）；网络异常按乐观可写。
+   */
+  static async probeWritable(href: string, auth: string): Promise<boolean> {
+    const base: string = href.endsWith('/') ? href : `${href}/`;
+    const eventIcs: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Probe//CN\r\n' +
+      'BEGIN:VEVENT\r\n' +
+      'UID:syncprobe\r\n' +
+      'DTSTAMP:20000101T000000Z\r\n' +
+      'DTSTART:20000101T000000Z\r\n' +
+      'DTEND:20000101T010000Z\r\n' +
+      'SUMMARY:probe\r\n' +
+      'END:VEVENT\r\n' +
+      'END:VCALENDAR\r\n';
+    const code: number = await DavClient.putProbe(`${base}synccalendar-probe.ics`, auth, eventIcs);
+    if (code < 0 || (code >= 200 && code < 300) || code === 412 || code === 405 || code === 409) {
+      return true;
+    }
+    if (code === 400 || code === 403 || code === 415) {
+      const todoIcs: string = 'BEGIN:VCALENDAR\r\n' +
+        'VERSION:2.0\r\n' +
+        'PRODID:-//SyncCalendar//Probe//CN\r\n' +
+        'BEGIN:VTODO\r\n' +
+        'UID:syncprobe-todo\r\n' +
+        'DTSTAMP:20000101T000000Z\r\n' +
+        'SUMMARY:probe\r\n' +
+        'STATUS:NEEDS-ACTION\r\n' +
+        'END:VTODO\r\n' +
+        'END:VCALENDAR\r\n';
+      const todoCode: number = await DavClient.putProbe(`${base}synccalendar-probe-todo.ics`, auth, todoIcs);
+      if (todoCode < 0 || (todoCode >= 200 && todoCode < 300) ||
+        todoCode === 412 || todoCode === 405 || todoCode === 409) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** REPORT calendar-query：全量拉取某日历本内所有 VEVENT（不加时间范围，保证数据完整） */

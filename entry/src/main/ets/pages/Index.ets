@@ -9,7 +9,7 @@ import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/Acco
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
 import { SyncEngine, SyncBusyError } from '../common/SyncEngine';
 import { LogUtil } from '../common/LogUtil';
-import { LunarUtil, isSolarTerm } from '../common/LunarUtil';
+import { LunarUtil, dayStartMs, normalizeSingleDayIfFestival } from '../common/LunarUtil';
 import { CardDataService } from '../common/CardDataService';
 import { ReminderService } from '../common/ReminderService';
 import { AppSettings } from '../common/AppSettings';
@@ -556,8 +556,9 @@ struct Index {
     for (const e of this.events) {
       const startDay = this.startOfDay(e.startTime);
       let endDay = startDay;
-      if (isSolarTerm(e.title)) {
-        endDay = startDay;
+      const fest: number[] | null = normalizeSingleDayIfFestival(e.title, e.startTime, e.endTime, e.isAllDay);
+      if (fest !== null) {
+        endDay = dayStartMs(fest[1]);
       } else {
         // 半开区间判定：如果结束时间在某天 00:00:00，则实际属于前一天结束，不计入下一天！
         const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
@@ -1592,18 +1593,11 @@ struct Index {
 
       this.getUIContext().getPromptAction().showToast({ message: '日程已删除' });
 
-      // 1) 后台异步推送 CalDAV 服务器
+      // 1) 后台异步推送 CalDAV 服务器（经 triggerPush 串行保护，避免与全量拉取竞态）
       if (cur.href !== '') {
-        const accounts: DavAccount[] = await AccountStore.loadAll(context);
-        const curNorm: string = DavClient.normalizeHref(cur.href);
-        const acc = accounts.find((a: DavAccount): boolean =>
-          a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === curNorm));
-        if (acc !== undefined) {
-          const auth: string = DavClient.authHeader(acc.username, acc.password);
-          SyncEngine.pushDirtyForAccount(context, acc, auth).catch((err: Error) => {
-            LogUtil.write(`异步推送删除失败: ${err.message}`);
-          });
-        }
+        CalendarDataService.triggerPush(context, cur.href).catch((err: Error) => {
+          LogUtil.write(`异步推送删除失败: ${err.message}`);
+        });
       }
 
       // 2) 刷新通知提醒
@@ -3683,6 +3677,16 @@ struct Index {
     });
   }
 
+  /** 推送待办变更/删除到 CalDAV（直接推送对应账号，避免 syncAll 重入被丢弃） */
+  private async pushTodoChange(ctx: common.Context, todoId: number): Promise<void> {
+    const ev: LocalEvent | null = await EventDb.getById(ctx, todoId);
+    if (ev !== null && ev.href !== '') {
+      await CalendarDataService.triggerPush(ctx, ev.href);
+    } else if (!this.syncing) {
+      await this.syncAll(false);
+    }
+  }
+
   /** 执行删除待办并推送到服务器 */
   private async deleteTodo(t: DisplayEvent): Promise<void> {
     const ctx = this.getUIContext().getHostContext();
@@ -3701,7 +3705,7 @@ struct Index {
     this.dataVersion++;
     CardDataService.pushToAllForms(ctx).catch(() => {});
     this.getUIContext().getPromptAction().showToast({ message: '待办已删除' });
-    this.syncAll(false).catch((err: Error) => {
+    this.pushTodoChange(ctx, t.id).catch((err: Error) => {
       LogUtil.write('同步删除待办失败: ' + err.message);
     });
   }
@@ -3777,7 +3781,7 @@ struct Index {
         if (ctx !== undefined) {
           CardDataService.pushToAllForms(ctx).catch(() => {});
           await EventDb.advanceTodo(ctx, t.id, nextOcc);
-          this.syncAll(false).catch((err: Error) => {
+          this.pushTodoChange(ctx, t.id).catch((err: Error) => {
             LogUtil.write('待办后台同步失败: ' + err.message);
           });
         }
@@ -3849,7 +3853,7 @@ struct Index {
     if (ctx !== undefined) {
       CardDataService.pushToAllForms(ctx).catch(() => {});
       await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
-      this.syncAll(false).catch((err: Error) => {
+      this.pushTodoChange(ctx, t.id).catch((err: Error) => {
         LogUtil.write('待办后台同步失败: ' + err.message);
       });
     }
@@ -4043,7 +4047,7 @@ struct Index {
 
   /** 是否跨天（结束日期晚于开始日期） */
   private spansDays(e: DisplayEvent): boolean {
-    if (isSolarTerm(e.title)) {
+    if (normalizeSingleDayIfFestival(e.title, e.startTime, e.endTime, e.isAllDay) !== null) {
       return false;
     }
     const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;

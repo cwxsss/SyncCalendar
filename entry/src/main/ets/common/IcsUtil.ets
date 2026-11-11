@@ -1,7 +1,7 @@
 // entry/src/main/ets/common/IcsUtil.ets
 // iCalendar 解析与生成
 import { LocalEvent, RemoteEvent } from './EventDb';
-import { isSolarTerm } from './LunarUtil';
+import { addLocalDays, normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 
 /** 解析出的远端日程（内部中间结构） */
 class ParsedEvent {
@@ -38,42 +38,73 @@ export class IcsUtil {
 
   /** 解析 VCALENDAR 文本为事件列表 */
   static parse(ics: string): RemoteEvent[] {
-    const unfolded: string = ics.replace(/\r?\r\n[ \t]/g, '');
-    const lines: string[] = unfolded.split(/\r?\r\n/);
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/);
     const parsed: ParsedEvent[] = [];
     let current: ParsedEvent | null = null;
+    let currentStartUtc: boolean = false;
     for (const line of lines) {
       const upper: string = line.toUpperCase();
       if (upper.startsWith('BEGIN:VEVENT')) {
         current = new ParsedEvent();
+        currentStartUtc = false;
         continue;
       }
       if (upper.startsWith('END:VEVENT')) {
         if (current !== null && current.startTime > 0) {
-          if (isSolarTerm(current.title)) {
-            const day0 = IcsUtil.startOfDay(current.startTime);
-            current.startTime = day0;
-            current.endTime = day0 + 86400000 - 1000;
-            current.isAllDay = true;
-          } else {
-            // 无 DTEND 时用 DURATION；都没有则视为零长事件
-            if (current.endTime < current.startTime) {
-              current.endTime = current.duration > 0
-                ? current.startTime + current.duration
-                : current.startTime;
-            }
-            // RFC 5545：全天日程若缺失 DTEND 或 DTEND 算后 <= DTSTART，默认持续 1 天（结束于当天 23:59:59）
-            if (current.isAllDay && current.endTime <= current.startTime) {
-              current.endTime = current.startTime + 86400000 - 1000;
-            }
-            // 若起止时间跨度恰好为 1 整天（86400000ms）且从 00:00 开始，规范为全天日程（结束于当天 23:59:59）
-            const dur = current.endTime - current.startTime;
-            if (dur === 86400000 && new Date(current.startTime).getHours() === 0) {
-              current.isAllDay = true;
-              current.endTime = current.startTime + 86400000 - 1000;
+          // 无 DTEND 时用 DURATION；都没有则视为零长事件
+          if (current.endTime < current.startTime) {
+            current.endTime = current.duration > 0
+              ? current.startTime + current.duration
+              : current.startTime;
+          }
+          // UTC 午夜整天日程（如 DTSTART:20270308T000000Z ~ DTEND:20270309T000000Z 或 235959Z）：
+          // 按 UTC 日期转为本地对应单日/多日全天日程，避免在 UTC+8 显示成 08:00..次日08:00 并跨占两天
+          if (!current.isAllDay && currentStartUtc) {
+            const utcD = new Date(current.startTime);
+            if (utcD.getUTCHours() === 0 && utcD.getUTCMinutes() === 0 && utcD.getUTCSeconds() === 0) {
+              const durUtc: number = current.endTime - current.startTime;
+              if (durUtc > 0 && (durUtc % 86400000 === 0 || (durUtc + 1000) % 86400000 === 0)) {
+                const utcDays: number = durUtc % 86400000 === 0
+                  ? Math.max(1, Math.round(durUtc / 86400000))
+                  : Math.max(1, Math.round((durUtc + 1000) / 86400000));
+                const localStart: number = new Date(
+                  utcD.getUTCFullYear(), utcD.getUTCMonth(), utcD.getUTCDate(), 0, 0, 0, 0
+                ).getTime();
+                current.startTime = localStart;
+                current.endTime = addLocalDays(localStart, utcDays) - 1000;
+                current.isAllDay = true;
+              }
             }
           }
+          if (current.isAllDay) {
+            const norm: number[] = normalizeAllDayRange(current.startTime, current.endTime);
+            current.startTime = norm[0];
+            current.endTime = norm[1];
+          } else {
+            // 本地/浮动 00:00 起的整天跨度（N 天 00:00..00:00 或 00:00..23:59:59），规范为全天日程
+            const sD = new Date(current.startTime);
+            if (sD.getHours() === 0 && sD.getMinutes() === 0 && sD.getSeconds() === 0) {
+              const durLocal: number = current.endTime - current.startTime;
+              if (durLocal > 0 && (durLocal % 86400000 === 0 || (durLocal + 1000) % 86400000 === 0)) {
+                const norm: number[] = normalizeAllDayRange(current.startTime, current.endTime);
+                current.startTime = norm[0];
+                current.endTime = norm[1];
+                current.isAllDay = true;
+              }
+            }
+          }
+          // 二十四节气及跨度<=2天的单日传统节日/纪念日规范为单日全天
+          const festNorm: number[] | null = normalizeSingleDayIfFestival(
+            current.title, current.startTime, current.endTime, current.isAllDay
+          );
+          if (festNorm !== null) {
+            current.startTime = festNorm[0];
+            current.endTime = festNorm[1];
+            current.isAllDay = true;
+          }
           parsed.push(current);
+          currentStartUtc = false;
         }
         current = null;
         continue;
@@ -133,8 +164,8 @@ export class IcsUtil {
           //    覆盖行的 DTSTART 是"被改到的新时间"，只改标题时两者才相同；
           //    一旦把某次发生改期，用 startTime 排除主事件那次发生就会漏掉 →
           //    App 与系统日历里同一日程出现两条（2026-09-19 真机事故）。
-          const recDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
-          const rt = IcsUtil.parseTime(value, recDateOnly);
+          const recDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
+          const rt = IcsUtil.parseTime(value, recDateOnly, IcsUtil.isUtcTzid(propPart));
           if (rt !== null) {
             current.recurrenceId = rt.time;
           }
@@ -149,15 +180,17 @@ export class IcsUtil {
       } else if (propName === 'DURATION') {
         current.duration = IcsUtil.parseDurationMs(value);
       } else if (propName === 'DTSTART') {
-        const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
-        const t = IcsUtil.parseTime(value, isDateOnly);
+        const isDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
+        const isUtcParam: boolean = IcsUtil.isUtcTzid(propPart);
+        const t = IcsUtil.parseTime(value, isDateOnly, isUtcParam);
         if (t !== null) {
           current.startTime = t.time;
           current.isAllDay = t.allDay;
+          currentStartUtc = !t.allDay && (value.trim().toUpperCase().endsWith('Z') || isUtcParam);
         }
       } else if (propName === 'DTEND') {
-        const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
-        const t = IcsUtil.parseTime(value, isDateOnly);
+        const isDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
+        const t = IcsUtil.parseTime(value, isDateOnly, IcsUtil.isUtcTzid(propPart));
         if (t !== null) {
           // 全天日程 DTEND 为排他日期，减 1 秒存储为闭区间结束
           current.endTime = t.allDay ? t.time - 1000 : t.time;
@@ -204,8 +237,8 @@ export class IcsUtil {
 
   /** 解析 VCALENDAR 中的 VTODO 待办列表（待办为只读展示，不参与推送） */
   static parseTodos(ics: string): RemoteEvent[] {
-    const unfolded: string = ics.replace(/\r?\r\n[ \t]/g, '');
-    const lines: string[] = unfolded.split(/\r?\r\n/);
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/);
     const parsed: RemoteEvent[] = [];
     let current: RemoteEvent | null = null;
     for (const line of lines) {
@@ -244,8 +277,8 @@ export class IcsUtil {
         current.recurring = true;
         current.rrule = value;
       } else if (propName === 'DUE' || propName === 'DTSTART') {
-        const isDateOnly: boolean = propPart.toUpperCase().includes('VALUE=DATE');
-        const t = IcsUtil.parseTime(value, isDateOnly);
+        const isDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
+        const t = IcsUtil.parseTime(value, isDateOnly, IcsUtil.isUtcTzid(propPart));
         if (t !== null) {
           current.startTime = t.time;
           // 全天待办截止日按当天结束存储；普通待办开始=截止
@@ -482,8 +515,16 @@ export class IcsUtil {
     return sign * total * 1000;
   }
 
+  private static isDateOnlyProp(propPart: string): boolean {
+    return /(?:^|;)VALUE=DATE(?:;|$)/i.test(propPart);
+  }
+
+  private static isUtcTzid(propPart: string): boolean {
+    return /(?:^|;)TZID="?(?:Etc\/)?(?:UTC|GMT)"?(?:;|$)/i.test(propPart);
+  }
+
   /** 解析 iCal 时间值，返回 13 位毫秒时间戳（供 EXDATE 解析等复用） */
-  static parseTime(value: string, dateOnly: boolean): IcsTime | null {
+  static parseTime(value: string, dateOnly: boolean, forceUtc: boolean = false): IcsTime | null {
     const v: string = value.trim();
     if (/^\d{8}$/.test(v) || dateOnly) {
       const m = /^(\d{4})(\d{2})(\d{2})/.exec(v);
@@ -496,11 +537,11 @@ export class IcsUtil {
       result.allDay = true;
       return result;
     }
-    const m2 = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(v);
+    const m2 = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/i.exec(v);
     if (m2 === null) {
       return null;
     }
-    const isUtc: boolean = m2[7] === 'Z';
+    const isUtc: boolean = m2[7].toUpperCase() === 'Z' || forceUtc;
     let t2: number;
     if (isUtc) {
       t2 = Date.UTC(Number(m2[1]), Number(m2[2]) - 1, Number(m2[3]),

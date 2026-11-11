@@ -18,6 +18,7 @@ import { relationalStore } from '@kit.ArkData';
 import { calendarManager } from '@kit.CalendarKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { LogUtil } from './LogUtil';
+import { dayStartMs, normalizeAllDayRange } from './LunarUtil';
 
 /**
  * 快照行。
@@ -203,8 +204,9 @@ export class MirrorSnapshot {
     let start: number = ev.startTime;
     let end: number = ev.endTime;
     if (allDay) {
-      start = MirrorSnapshot.dayStart(start);
-      end = MirrorSnapshot.dayStart(end - 1);
+      const norm: number[] = normalizeAllDayRange(start, end);
+      start = norm[0];
+      end = dayStartMs(norm[1]);
     }
     const raw: string = [
       ev.title ?? '',

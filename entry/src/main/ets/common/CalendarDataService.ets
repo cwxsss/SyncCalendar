@@ -9,7 +9,7 @@ import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { RruleUtil } from './RruleUtil';
 import { IcsUtil } from './IcsUtil';
-import { isSolarTerm } from './LunarUtil';
+import { isSolarTerm, normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 import { SystemCalendarMirror } from './SystemCalendarMirror';
 import { SyncEngine } from './SyncEngine';
 import { DavClient } from './DavClient';
@@ -165,6 +165,9 @@ export class CalendarDataService {
         for (const cal of calendars) {
           try {
             const account: calendarManager.CalendarAccount = cal.getAccount();
+            if (SystemCalendarMirror.isMirrorAccountName(account.name) || account.name.startsWith('syncal_')) {
+              continue; // 本应用镜像写出的系统日历账户不作为独立系统来源展示
+            }
             sysRaw++;
             const sysKey: string = `sys_${account.name}`;
             if (sources.some((x: CalSource): boolean => x.calKey === sysKey)) {
@@ -271,20 +274,20 @@ export class CalendarDataService {
           d.location = e.location;
           d.startTime = occ;
           d.endTime = occ + dur;
-          const spanFullDay = (dur > 0 && dur % 86400000 === 0 && new Date(occ).getHours() === 0);
+          const occD = new Date(occ);
+          const spanFullDay = dur > 0 && (dur % 86400000 === 0 || (dur + 1000) % 86400000 === 0) &&
+            occD.getHours() === 0 && occD.getMinutes() === 0 && occD.getSeconds() === 0;
           d.isAllDay = e.isAllDay || spanFullDay;
-          if (isSolarTerm(d.title)) {
-            const day0: number = CalendarDataService.startOfDay(occ);
-            d.startTime = day0;
-            d.endTime = day0 + 86400000 - 1000;
+          if (d.isAllDay) {
+            const norm: number[] = normalizeAllDayRange(d.startTime, d.endTime);
+            d.startTime = norm[0];
+            d.endTime = norm[1];
+          }
+          const festNorm: number[] | null = normalizeSingleDayIfFestival(d.title, d.startTime, d.endTime, d.isAllDay);
+          if (festNorm !== null) {
+            d.startTime = festNorm[0];
+            d.endTime = festNorm[1];
             d.isAllDay = true;
-          } else if (d.isAllDay) {
-            // 全天日程规范化：单日全天日程确保 endTime 在当天 23:59:59，避免次日误显或小组件误杀
-            if (dur <= 0 || dur === 86400000) {
-              const day0: number = CalendarDataService.startOfDay(occ);
-              d.startTime = day0;
-              d.endTime = day0 + 86400000 - 1000;
-            }
           }
           d.calKey = e.calKey;
           d.calName = baseName;
@@ -324,7 +327,8 @@ export class CalendarDataService {
           }
 
           // 核心过滤：若该系统日历为本应用镜像写入的账户，跳过不重复加载（CalDAV 本地数据为权威来源）
-          const isOurMirror = accountName.startsWith('syncal_') ||
+          const isOurMirror = SystemCalendarMirror.isMirrorAccountName(accountName) ||
+            accountName.startsWith('syncal_') ||
             displayName.includes('同步日历') ||
             displayName.includes('小褚日历');
           if (isOurMirror) {
@@ -347,20 +351,21 @@ export class CalendarDataService {
               d.location = ev.location !== undefined && ev.location.location !== undefined ? ev.location.location : '';
               d.startTime = ev.startTime;
               d.endTime = ev.endTime;
-              const span24h = (d.endTime > d.startTime) && ((d.endTime - d.startTime) % 86400000 === 0);
-              d.isAllDay = ev.isAllDay === true || (span24h && new Date(d.startTime).getHours() === 0);
-              if (isSolarTerm(d.title)) {
-                const day0: number = CalendarDataService.startOfDay(d.startTime);
-                d.startTime = day0;
-                d.endTime = day0 + 86400000 - 1000;
+              const sysD = new Date(d.startTime);
+              const span24h = (d.endTime > d.startTime) &&
+                ((d.endTime - d.startTime) % 86400000 === 0 || (d.endTime - d.startTime + 1000) % 86400000 === 0);
+              d.isAllDay = ev.isAllDay === true ||
+                (span24h && sysD.getHours() === 0 && sysD.getMinutes() === 0 && sysD.getSeconds() === 0);
+              if (d.isAllDay) {
+                const normSys: number[] = normalizeAllDayRange(d.startTime, d.endTime);
+                d.startTime = normSys[0];
+                d.endTime = normSys[1];
+              }
+              const festSys: number[] | null = normalizeSingleDayIfFestival(d.title, d.startTime, d.endTime, d.isAllDay);
+              if (festSys !== null) {
+                d.startTime = festSys[0];
+                d.endTime = festSys[1];
                 d.isAllDay = true;
-              } else if (d.isAllDay) {
-                const durSys = d.endTime - d.startTime;
-                if (durSys <= 0 || durSys === 86400000) {
-                  const day0: number = CalendarDataService.startOfDay(d.startTime);
-                  d.startTime = day0;
-                  d.endTime = day0 + 86400000 - 1000;
-                }
               }
               d.calKey = sysKey;
               d.calName = nameOf(sysKey);
@@ -480,6 +485,17 @@ export class CalendarDataService {
       de.startTime = r.startTime;
       de.endTime = r.endTime;
       de.isAllDay = r.isAllDay;
+      if (de.isAllDay) {
+        const normSearch: number[] = normalizeAllDayRange(de.startTime, de.endTime);
+        de.startTime = normSearch[0];
+        de.endTime = normSearch[1];
+      }
+      const festSearch: number[] | null = normalizeSingleDayIfFestival(de.title, de.startTime, de.endTime, de.isAllDay);
+      if (festSearch !== null) {
+        de.startTime = festSearch[0];
+        de.endTime = festSearch[1];
+        de.isAllDay = true;
+      }
       de.recurring = r.recurring || r.rrule !== '';
             de.color = src !== undefined ? src.color : '#007DFF';
       de.calName = src !== undefined ? src.name : '';
@@ -490,7 +506,7 @@ export class CalendarDataService {
     return list;
   }
 
-  /** 后台推送脏数据到对应账号 */
+  /** 后台推送脏数据到对应账号（若该账号正在执行全量同步则短暂等待其收尾，避免拉取与推送并发竞态） */
   static async triggerPush(ctx: common.Context, targetHref: string): Promise<void> {
     try {
       const accounts: DavAccount[] = await AccountStore.loadAll(ctx);
@@ -498,6 +514,15 @@ export class CalendarDataService {
       const acc: DavAccount | undefined = accounts.find((a: DavAccount): boolean =>
         a.calendarHrefs.some((h: string): boolean => DavClient.normalizeHref(h) === eNorm));
       if (acc !== undefined) {
+        let waited: number = 0;
+        while (SyncEngine.isSyncing(acc.id) && waited < 38) {
+          await new Promise<void>((resolve: () => void): void => {
+            setTimeout((): void => {
+              resolve();
+            }, 400);
+          });
+          waited++;
+        }
         const auth: string = DavClient.authHeader(acc.username, acc.password);
         await SyncEngine.pushDirtyForAccount(ctx, acc, auth);
       }

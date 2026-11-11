@@ -40,7 +40,7 @@ import { calendarManager } from '@kit.CalendarKit';
 import { AccountStore, BookPalette, DavAccount } from './AccountStore';
 import { EventDb, LocalEvent } from './EventDb';
 import { IcsTime, IcsUtil } from './IcsUtil';
-import { isSolarTerm } from './LunarUtil';
+import { isSolarTerm, normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 import { RruleUtil } from './RruleUtil';
 import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
@@ -1212,22 +1212,26 @@ export class SystemCalendarMirror {
     startTs: number,
     endTs: number
   ): calendarManager.Event {
+    let finalStartTs = startTs;
     let finalEndTs = endTs;
-    const isSolar = isSolarTerm(e.title);
-    if (e.isAllDay || isSolar) {
-      if (isSolar) {
-        finalEndTs = SystemCalendarMirror.dayStart(startTs) + SystemCalendarMirror.DAY - 1000;
-      } else {
-        const lastDayStart = SystemCalendarMirror.dayStart(endTs > startTs ? endTs - 1 : endTs);
-        finalEndTs = lastDayStart + SystemCalendarMirror.DAY - 1000;
-      }
+    let finalAllDay = e.isAllDay;
+    if (finalAllDay) {
+      const norm: number[] = normalizeAllDayRange(finalStartTs, finalEndTs);
+      finalStartTs = norm[0];
+      finalEndTs = norm[1];
+    }
+    const festNorm: number[] | null = normalizeSingleDayIfFestival(e.title, finalStartTs, finalEndTs, finalAllDay);
+    if (festNorm !== null) {
+      finalStartTs = festNorm[0];
+      finalEndTs = festNorm[1];
+      finalAllDay = true;
     }
     const ev: calendarManager.Event = {
       type: calendarManager.EventType.NORMAL,
       title: e.title !== '' ? e.title : '(无标题)',
-      startTime: isSolar ? SystemCalendarMirror.dayStart(startTs) : startTs,
+      startTime: finalStartTs,
       endTime: finalEndTs,
-      isAllDay: isSolar ? true : e.isAllDay,
+      isAllDay: finalAllDay,
       identifier: identifier
     };
     if (e.description !== '') {

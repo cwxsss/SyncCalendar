@@ -22,7 +22,7 @@ import { common } from '@kit.AbilityKit';
 import { calendarManager } from '@kit.CalendarKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
-import { isSolarTerm } from './LunarUtil';
+import { normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 import { LogUtil } from './LogUtil';
 import { AppSettings } from './AppSettings';
 import { MirrorSnapshot, MirrorSnapshotRow } from './MirrorSnapshot';
@@ -189,7 +189,12 @@ export class MirrorInbound {
         res.skipped++; // 本地本来就有待推送的改动 → 不拿系统值覆盖，避免两边打架
         continue;
       }
-      MirrorInbound.applyToLocal(local, ev);
+      const changed: boolean = MirrorInbound.applyToLocal(local, ev);
+      if (!changed) {
+        // 仅规范化/快照规则变化而本地实际字段未变时，仅更新快照，避免误标 dirty 回写服务器
+        await MirrorSnapshot.put(context, MirrorInbound.rowOf(bucket, id, ev, fp));
+        continue;
+      }
       await EventDb.updateLocal(context, local);
       await MirrorSnapshot.put(context, MirrorInbound.rowOf(bucket, id, ev, fp));
       res.updated++;
@@ -297,26 +302,34 @@ export class MirrorInbound {
     return row;
   }
 
-  /** 系统日历 Event → 本工程 LocalEvent（只覆盖可映射字段） */
-  private static applyToLocal(e: LocalEvent, ev: calendarManager.Event): void {
+  /** 系统日历 Event → 本工程 LocalEvent（只覆盖可映射字段，返回是否有实际变更） */
+  private static applyToLocal(e: LocalEvent, ev: calendarManager.Event): boolean {
+    const prevTitle: string = e.title;
+    const prevDesc: string = e.description;
+    const prevLoc: string = e.location;
+    const prevStart: number = e.startTime;
+    const prevEnd: number = e.endTime;
+    const prevAllDay: boolean = e.isAllDay;
+    const prevRrule: string = e.rrule;
+    const prevRem: string = e.reminders.join(',');
+
     e.title = ev.title ?? '';
     e.description = ev.description ?? '';
     e.location = ev.location?.location ?? '';
     e.startTime = ev.startTime;
     e.isAllDay = ev.isAllDay === true;
     if (e.isAllDay) {
-      if (isSolarTerm(e.title)) {
-        const day0 = MirrorInbound.dayStart(ev.startTime);
-        e.startTime = day0;
-        e.endTime = day0 + MirrorInbound.DAY - 1000;
-      } else {
-        const lastDayStart = (ev.endTime > ev.startTime)
-          ? MirrorInbound.dayStart(ev.endTime - 1)
-          : MirrorInbound.dayStart(ev.startTime);
-        e.endTime = lastDayStart + MirrorInbound.DAY - 1000;
-      }
+      const norm: number[] = normalizeAllDayRange(ev.startTime, ev.endTime);
+      e.startTime = norm[0];
+      e.endTime = norm[1];
     } else {
       e.endTime = ev.endTime;
+    }
+    const festNorm: number[] | null = normalizeSingleDayIfFestival(e.title, e.startTime, e.endTime, e.isAllDay);
+    if (festNorm !== null) {
+      e.startTime = festNorm[0];
+      e.endTime = festNorm[1];
+      e.isAllDay = true;
     }
     e.rrule = MirrorInbound.rruleOf(ev);
     e.recurring = e.rrule !== '';
@@ -324,6 +337,9 @@ export class MirrorInbound {
       e.reminders = [...ev.reminderTime];
       e.reminder = ev.reminderTime[0];
     }
+    return e.title !== prevTitle || e.description !== prevDesc || e.location !== prevLoc
+      || e.startTime !== prevStart || e.endTime !== prevEnd || e.isAllDay !== prevAllDay
+      || e.rrule !== prevRrule || e.reminders.join(',') !== prevRem;
   }
 
   private static dayStart(ts: number): number {

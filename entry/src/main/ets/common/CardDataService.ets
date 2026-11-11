@@ -6,7 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { preferences } from '@kit.ArkData';
 import { CalendarDataService, DisplayEvent } from './CalendarDataService';
 import { AppSettings } from './AppSettings';
-import { LunarUtil, isSolarTerm } from './LunarUtil';
+import { LunarUtil, dayStartMs, normalizeSingleDayIfFestival } from './LunarUtil';
 import { LogUtil } from './LogUtil';
 import { TimelineUtil, DayTimeline, TimelineBlock } from './TimelineUtil';
 
@@ -350,7 +350,7 @@ export class CardDataService {
 
       const dayKey = (ms: number): number => CardDataService.startOfDay(ms);
       const spansDays = (e: DisplayEvent): boolean => {
-        if (isSolarTerm(e.title)) {
+        if (normalizeSingleDayIfFestival(e.title, e.startTime, e.endTime, e.isAllDay) !== null) {
           return false;
         }
         const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
@@ -492,8 +492,9 @@ export class CardDataService {
         const dayEvs: DisplayEvent[] = events.filter((e: DisplayEvent): boolean => {
           const startDay = CardDataService.startOfDay(e.startTime);
           let endDay = startDay;
-          if (isSolarTerm(e.title)) {
-            endDay = startDay;
+          const fest: number[] | null = normalizeSingleDayIfFestival(e.title, e.startTime, e.endTime, e.isAllDay);
+          if (fest !== null) {
+            endDay = dayStartMs(fest[1]);
           } else {
             const effectiveEnd = (e.endTime > e.startTime) ? (e.endTime - 1) : e.startTime;
             endDay = CardDataService.startOfDay(effectiveEnd);

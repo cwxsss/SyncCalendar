@@ -3,7 +3,74 @@
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { SOLAR_TERMS } from './LunarUtil';
+import { SOLAR_TERMS, normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
+
+class RepairRow {
+  id: number = 0;
+  startTime: number = 0;
+  endTime: number = 0;
+  isAllDay: number = 0;
+}
+
+/**
+ * 启动时规范化本地库缓存的异常全天日程与节气/常见单日节日：
+ *  1) 纠正 is_all_day = 1 行非零点起点（如 08:00）与 +时区偏移 拉伸
+ *  2) 纠正跨度 <= 2 天的节气/单日节日（含尚未拉取时的 08:00..次日08:00）
+ */
+async function repairStoredAllDayEvents(store: relationalStore.RdbStore): Promise<void> {
+  const pred = new relationalStore.RdbPredicates('events');
+  pred.equalTo('deleted', 0).and().equalTo('kind', 'event');
+  const rs = await store.query(pred, ['id', 'title', 'start_time', 'end_time', 'is_all_day']);
+  const updates: RepairRow[] = [];
+  try {
+    while (rs.goToNextRow()) {
+      const id: number = rs.getLong(rs.getColumnIndex('id'));
+      const title: string = rs.getString(rs.getColumnIndex('title'));
+      const startTime: number = rs.getLong(rs.getColumnIndex('start_time'));
+      const endTime: number = rs.getLong(rs.getColumnIndex('end_time'));
+      const isAllDay: boolean = rs.getLong(rs.getColumnIndex('is_all_day')) === 1;
+      if (startTime <= 0) {
+        continue;
+      }
+      let nextStart: number = startTime;
+      let nextEnd: number = endTime;
+      let nextAllDay: boolean = isAllDay;
+      if (nextAllDay) {
+        const norm: number[] = normalizeAllDayRange(nextStart, nextEnd);
+        nextStart = norm[0];
+        nextEnd = norm[1];
+      }
+      const festNorm: number[] | null = normalizeSingleDayIfFestival(title, nextStart, nextEnd, nextAllDay);
+      if (festNorm !== null) {
+        nextStart = festNorm[0];
+        nextEnd = festNorm[1];
+        nextAllDay = true;
+      }
+      const nextAllDayInt: number = nextAllDay ? 1 : 0;
+      if (nextStart !== startTime || nextEnd !== endTime || nextAllDayInt !== (isAllDay ? 1 : 0)) {
+        const row = new RepairRow();
+        row.id = id;
+        row.startTime = nextStart;
+        row.endTime = nextEnd;
+        row.isAllDay = nextAllDayInt;
+        updates.push(row);
+      }
+    }
+  } finally {
+    rs.close();
+  }
+  for (let i = 0; i < updates.length; i++) {
+    const u = updates[i];
+    const bucket: relationalStore.ValuesBucket = {
+      'start_time': u.startTime,
+      'end_time': u.endTime,
+      'is_all_day': u.isAllDay
+    };
+    const updPred = new relationalStore.RdbPredicates('events');
+    updPred.equalTo('id', u.id);
+    await store.update(bucket, updPred);
+  }
+}
 
 /** 本地事件行 */
 export class LocalEvent {
@@ -147,26 +214,26 @@ export class EventDb {
     } catch (err) {
       // 列已存在
     }
-    // 修复已有全天日程数据：将 0 时长全天日程规范为当天 23:59:59
+    // 规范化已有全天日程及单日节气/节日数据（统一 00:00 起点、+时区偏移与单日节日误拉伸）
     try {
-      await store.executeSql(
-        'UPDATE events SET end_time = start_time + 86399000 WHERE is_all_day = 1 AND end_time <= start_time'
-      );
+      await repairStoredAllDayEvents(store);
     } catch (err) {
       // 忽略
     }
-    // 修复已有二十四节气日程数据：节气均为单日全天日程，防止被镜像或误解析拉伸到次日
+    // 清理历史残留的同日重复节气行（只保留首行，彻底消除重复节日）
     try {
       const cond = SOLAR_TERMS.map((st: string) => `title LIKE '%${st}%'`).join(' OR ');
-      await store.executeSql(
-        `UPDATE events SET is_all_day = 1, end_time = start_time + 86399000 WHERE (${cond}) AND end_time > start_time + 86399000`
-      );
       // 清理历史残留的同日重复节气行（只保留首行，彻底消除重复节日）
       await store.executeSql(
         `DELETE FROM events WHERE id NOT IN (
            SELECT min(id) FROM events WHERE (${cond}) AND deleted = 0 GROUP BY title, (start_time / 86400000)
          ) AND (${cond}) AND deleted = 0 AND dirty = 0`
       );
+    } catch (err) {
+      // 忽略
+    }
+    try {
+      await store.executeSql('CREATE TABLE IF NOT EXISTS imported_syscal (uid TEXT PRIMARY KEY)');
     } catch (err) {
       // 忽略
     }
@@ -522,6 +589,9 @@ export class EventDb {
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
         || found.reminder !== r.reminder || found.recurring !== r.recurring
+        || found.startTime !== r.startTime || found.endTime !== r.endTime
+        || found.isAllDay !== r.isAllDay || found.title !== r.title
+        || found.description !== r.description || found.location !== r.location
         || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
         || found.href !== href) {
         // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填；
@@ -659,6 +729,39 @@ export class EventDb {
       rs.close();
     }
     return list;
+  }
+
+  /** 记录已导入过的系统日历 UID，防止从服务器/思源/App 删除后又被备份通道“复活”重传 */
+  static async markSyscalImported(context: common.Context, uid: string): Promise<void> {
+    if (uid === '') {
+      return;
+    }
+    try {
+      const store = await EventDb.getDb(context);
+      const bucket: relationalStore.ValuesBucket = { 'uid': uid };
+      await store.insert('imported_syscal', bucket);
+    } catch (err) {
+      // 主键已存在或写入失败时忽略
+    }
+  }
+
+  /** 判断系统日历 UID 是否已存在于本地库或历史备份记录中（避免删除后复活） */
+  static async isSyscalImported(context: common.Context, uid: string): Promise<boolean> {
+    if (await EventDb.uidExists(context, uid)) {
+      await EventDb.markSyscalImported(context, uid);
+      return true;
+    }
+    try {
+      const store = await EventDb.getDb(context);
+      const predicates = new relationalStore.RdbPredicates('imported_syscal');
+      predicates.equalTo('uid', uid);
+      const rs = await store.query(predicates);
+      const exists: boolean = rs.rowCount > 0;
+      rs.close();
+      return exists;
+    } catch (err) {
+      return false;
+    }
   }
 
   /** 按 UID 判断事件是否已存在（系统日历备份导入的幂等判重） */

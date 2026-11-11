@@ -252,7 +252,7 @@ export class SyncEngine {
               return [];
             }
             const resUid: string = SyncEngine.resUidFromHref(it.href);
-            const fileName: string = it.href.substring(it.href.lastIndexOf('/') + 1);
+            const fileName: string = DavClient.fileNameFromHref(it.href);
             const parsed: RemoteEvent[] = IcsUtil.parse(raw);
             const out: RemoteEvent[] = [];
             for (const r of parsed) {
@@ -294,11 +294,16 @@ export class SyncEngine {
         const todoItems = await DavClient.reportTodos(href, auth);
         const remoteTodos: RemoteEvent[] = [];
         for (const it of todoItems) {
+          const fileName: string = DavClient.fileNameFromHref(it.href);
           const parsedTodos: RemoteEvent[] = IcsUtil.parseTodos(it.ics);
           for (const t of parsedTodos) {
+            if (t.uid === 'syncprobe' || t.uid === 'syncprobe-todo') {
+              continue;
+            }
             if (t.uid === '') {
               t.uid = SyncEngine.uidFromHref(it.href);
             }
+            t.remotePath = fileName;
             t.etag = it.etag;
             remoteTodos.push(t);
           }
@@ -624,7 +629,13 @@ export class SyncEngine {
             await EventDb.purge(context, e.id);
             LogUtil.write('已从服务器删除待办: uid=' + e.uid);
           } catch (err) {
-            LogUtil.write('删除待办失败: ' + (err as Error).message);
+            const st: number = err instanceof DavHttpError ? (err as DavHttpError).status : 0;
+            if (st === 404 || st === 410) {
+              await EventDb.purge(context, e.id);
+              LogUtil.write(`待办在服务端已不存在(${st})，直接清理本地记录: uid=${e.uid}`);
+            } else {
+              LogUtil.write('删除待办失败: ' + (err as Error).message);
+            }
           }
         } else {
           const ics: string = IcsUtil.buildTodo(e);

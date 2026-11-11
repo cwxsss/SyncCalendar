@@ -6,7 +6,7 @@ import { common } from '@kit.AbilityKit';
 import { calendarManager } from '@kit.CalendarKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { EventDb, LocalEvent } from './EventDb';
-import { isSolarTerm } from './LunarUtil';
+import { normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 import { AppSettings } from './AppSettings';
 import { LogUtil } from './LogUtil';
 import { BookRef, SystemCalendarMirror } from './SystemCalendarMirror';
@@ -90,7 +90,7 @@ export class SystemCalendarImport {
               continue;
             }
             const uid: string = `syscal-${account.name}-${ev.id}`;
-            if (await EventDb.uidExists(context, uid)) {
+            if (await EventDb.isSyscalImported(context, uid)) {
               continue;
             }
             const e = new LocalEvent();
@@ -105,24 +105,25 @@ export class SystemCalendarImport {
             e.startTime = ev.startTime;
             e.isAllDay = ev.isAllDay === true;
             if (e.isAllDay) {
-              const startDay = new Date(ev.startTime);
-              startDay.setHours(0, 0, 0, 0);
-              if (isSolarTerm(ev.title ?? '')) {
-                e.startTime = startDay.getTime();
-                e.endTime = startDay.getTime() + 86400000 - 1000;
-              } else {
-                const lastDay = (ev.endTime > ev.startTime) ? new Date(ev.endTime - 1) : new Date(ev.startTime);
-                lastDay.setHours(0, 0, 0, 0);
-                e.startTime = startDay.getTime();
-                e.endTime = lastDay.getTime() + 86400000 - 1000;
-              }
+              const norm: number[] = normalizeAllDayRange(ev.startTime, ev.endTime);
+              e.startTime = norm[0];
+              e.endTime = norm[1];
             } else {
               e.endTime = ev.endTime;
+            }
+            const festNorm: number[] | null = normalizeSingleDayIfFestival(
+              ev.title ?? '', e.startTime, e.endTime, e.isAllDay
+            );
+            if (festNorm !== null) {
+              e.startTime = festNorm[0];
+              e.endTime = festNorm[1];
+              e.isAllDay = true;
             }
             e.kind = 'event';
             e.rrule = SystemCalendarImport.rruleOf(ev);
             e.recurring = e.rrule !== '';
             await EventDb.insertLocal(context, e); // insertLocal 置 dirty，随同步推送
+            await EventDb.markSyscalImported(context, uid);
             imported++;
           }
         } catch (err) {
