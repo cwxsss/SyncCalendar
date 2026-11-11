@@ -110,6 +110,8 @@ struct ContactListPage {
       }
       let total: number = 0;
       let failMsg: string = '';
+      let pushedUp: number = 0;
+      let conflicts: number = 0;
       for (const acc of cardAccounts) {
         LogUtil.write(`开始同步 CardDAV 账号「${acc.name}」（写系统通讯录=${writeSystem}）`);
         const r: ContactSyncResult = await ContactService.syncAccount(ctx, acc, writeSystem);
@@ -117,13 +119,23 @@ struct ContactListPage {
           failMsg = r.message;
         }
         total += r.total;
+        pushedUp += r.pushedUp;
+        conflicts += r.conflicts;
       }
       this.rows = await ContactDb.listAll(ctx);
       this.totalCount = this.rows.length;
+      // 反向同步的补充说明（有才拼，避免平时文案变长）
+      let extra: string = '';
+      if (pushedUp > 0) {
+        extra += `；已上行系统改动 ${pushedUp} 条`;
+      }
+      if (conflicts > 0) {
+        extra += `；${conflicts} 条因远端也改动而按远端优先`;
+      }
       if (failMsg !== '') {
         this.statusMsg = failMsg;
       } else if (writeSystem) {
-        this.statusMsg = `同步完成，共 ${this.rows.length} 位联系人（已写入手机通讯录）`;
+        this.statusMsg = `同步完成，共 ${this.rows.length} 位联系人（已写入手机通讯录）${extra}`;
       } else if (cap === 'unsupported') {
         this.statusMsg = `同步完成，共 ${this.rows.length} 位联系人。\n`
           + '当前版本仅在本应用内查看（写入手机通讯录需要系统级权限，本版本未包含）';

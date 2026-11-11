@@ -236,6 +236,38 @@ function setField(raw, name, newValue, params) {
   return (before + sep + lineText + '\n' + after).replace(/\n{3,}/g, '\n\n');
 }
 
+
+function setFieldRaw(raw, name, literal) {
+  const unfolded = unfold(raw);
+  const lines = splitLines(unfolded);
+  const upper = name.toUpperCase();
+  const hits = lines.filter(l => l.name === upper);
+  const lineText = `${upper}:${literal}`;
+  if (hits.length > 0) {
+    let out = '', cursor = 0;
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
+      out += unfolded.substring(cursor, h.start);
+      if (i === 0 && literal !== '') out += lineText + '\n';
+      cursor = h.end;
+      if (cursor < unfolded.length && unfolded.charAt(cursor) === '\n') cursor += 1;
+    }
+    out += unfolded.substring(cursor);
+    return out.replace(/\n{3,}/g, '\n\n');
+  }
+  if (literal === '') return raw;
+  const endIdx = unfolded.lastIndexOf('END:VCARD');
+  if (endIdx < 0) return raw;
+  const before = unfolded.substring(0, endIdx);
+  const after = unfolded.substring(endIdx);
+  const sep = before.endsWith('\n') ? '' : '\n';
+  return (before + sep + lineText + '\n' + after).replace(/\n{3,}/g, '\n\n');
+}
+
+function setStructuredField(raw, name, segments) {
+  return setFieldRaw(raw, name, segments.map(escape).join(';'));
+}
+
 function setMulti(raw, name, values, paramsList) {
   const unfolded = unfold(raw);
   const lines = splitLines(unfolded);
@@ -411,6 +443,18 @@ const c5 = parse(segCase, '', '');
 eq('ORG 第一级完整（含分号不被截断）', c5.org, '含,逗号;分号的公司');
 eq('N 的姓', c5.familyName, '赵');
 eq('N 的名', c5.givenName, '六');
+
+console.log('\n=== 13. 多段字段写回不能被转义（回归）===');
+// 真实 bug：setField(raw,'N','张;三;;;') 会把分号转义成 \;，
+// 服务端把整串当"姓"，名字段全丢
+const nWritten = setStructuredField(basic, 'N', ['张', '三', '', '', '']);
+const nVals = fieldValues(nWritten, 'N');
+eq('N 写回是裸分号五段', nVals, ['张;三;;;']);
+ok('N 里没有 \\; 转义', nWritten.indexOf('N:张\\;') < 0, '仍然被转义了');
+// 值里本身含分号时，该段必须转义，但段分隔符不能转
+const nWithSemi = setStructuredField(basic, 'N', ['张;复姓', '三', '', '', '']);
+const nVals2 = fieldValues(nWithSemi, 'N');
+eq('值内分号被转义、段分隔保留', nVals2, ['张;复姓;三;;;']);
 
 console.log('\n' + '='.repeat(46));
 console.log(`结果：通过 ${pass}，失败 ${fail}`);

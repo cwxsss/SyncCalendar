@@ -22,7 +22,7 @@ import { DavAccount, AccountStore, TYPE_CARDDAV } from './AccountStore';
 import { DavClient, DavCardDavClient, DavAddressBookEntry, DavAddressBookDiscovery,
   DavHttpError, RemoteItem } from './DavClient';
 import { VCardContact, VCardPhone, VCardEmail, VCardUtil } from './VCardUtil';
-import { ContactDb, ContactRow } from './ContactDb';
+import { ContactDb, ContactRow, PhoneJson, EmailJson } from './ContactDb';
 import { LogUtil } from './LogUtil';
 
 /** 单个地址簿的同步结果 */
@@ -43,6 +43,18 @@ export class ContactSyncResult {
   message: string = '';
   books: BookSyncResult[] = [];
   total: number = 0;
+  /** 反向同步：从系统通讯录推到远端的条数 */
+  pushedUp: number = 0;
+  /** 反向同步：系统侧改动与远端改动冲突、放弃上行的条数 */
+  conflicts: number = 0;
+}
+
+/** 单条联系人反向同步的判定结果 */
+class SysDiff {
+  /** 系统侧是否有实际改动 */
+  changed: boolean = false;
+  /** 显示名 */
+  name: string = '';
 }
 
 export class ContactService {
@@ -315,10 +327,179 @@ export class ContactService {
       books.push(br);
     }
 
+    // 远端拉完之后，再看系统通讯录有没有本地改动需要上行
+    if (permOk) {
+      try {
+        const up = await ContactService.syncFromSystem(context, hrefs, auth);
+        res.pushedUp = up.pushed;
+        res.conflicts = up.conflicts;
+      } catch (err) {
+        LogUtil.write(`反向同步异常（不影响下行结果）：${(err as BusinessError).message}`);
+      }
+    }
+
     res.books = books;
     res.total = await ContactDb.count(context);
     res.message = `同步完成，共 ${res.total} 位联系人`;
     return res;
+  }
+
+  /**
+   * ⭐ 反向同步：系统通讯录 → 本地库 → 远端。
+   *
+   * 只处理**已关联 sys_key** 的联系人。为什么不去发现"系统里新加的联系人"：
+   * 用户手机通讯录里有大量私人联系人（家人、同事、快递…），
+   * 盲目上传到 CardDAV 服务器既侵犯隐私也可能炸掉服务器配额。
+   * 要新增联系人请走 App 内「新建」。
+   *
+   * 冲突策略：远端 ETag 变化 + 系统侧也变化 → **远端优先**，
+   * 只记 conflicts 计数并提示用户，不做自动合并（自动合并容易丢数据）。
+   */
+  static async syncFromSystem(context: common.Context, bookHrefs: string[],
+    auth: string): Promise<Record<string, number>> {
+    const out: Record<string, number> = { 'pushed': 0, 'conflicts': 0 };
+    // 收集本账号已关联系统联系人的本地行
+    const rows: ContactRow[] = await ContactDb.listAll(context);
+    const bookKeys: Set<string> = new Set<string>();
+    for (const h of bookHrefs) {
+      bookKeys.add(DavClient.normalizeHref(h));
+    }
+    const linked: ContactRow[] = rows.filter((r: ContactRow): boolean =>
+      r.sysKey !== '' && r.deleted === 0 && bookKeys.has(r.bookKey));
+    if (linked.length === 0) {
+      return out;
+    }
+    LogUtil.write(`反向同步：检查 ${linked.length} 位已关联系统联系人的改动`);
+
+    for (const row of linked) {
+      try {
+        // 读系统侧当前状态
+        let sys: contact.Contact | null = null;
+        try {
+          sys = await contact.queryContact(context, row.sysKey);
+        } catch (err) {
+          // 系统侧被删了 → 只清关联，不删远端（避免误删服务器数据）
+          LogUtil.write(`系统联系人已不存在「${row.displayName}」，清除关联（保留远端）`);
+          await ContactDb.setSysKey(context, row.id, '');
+          continue;
+        }
+        if (sys === null) {
+          await ContactDb.setSysKey(context, row.id, '');
+          continue;
+        }
+        const sysModel: VCardContact = ContactService.fromSystem(sys);
+        const diff: SysDiff = ContactService.diffWithRow(row, sysModel);
+        if (!diff.changed) {
+          continue;
+        }
+        // 有改动 → 判断远端是否也被改过（查单个资源 etag，不拉全簿）
+        const remoteEtag: string = await DavCardDavClient.getResourceEtag(row.href, auth);
+        if (remoteEtag !== '' && row.etag !== '' && remoteEtag !== row.etag) {
+          // 两边都改了 → 保守：远端优先，只计数
+          out['conflicts'] = (out['conflicts'] ?? 0) + 1;
+          LogUtil.write(`冲突：远端与系统都改了「${diff.name}」，按远端优先，跳过上行`);
+          continue;
+        }
+        // 远端没变 → 用系统侧的值覆盖本地，然后走正常推送
+        await ContactService.applySysChanges(context, row, sysModel);
+        const ok: boolean = await ContactService.pushContact(context, row.id);
+        if (ok) {
+          out['pushed'] = (out['pushed'] ?? 0) + 1;
+          LogUtil.write(`已上行系统通讯录改动「${diff.name}」`);
+        }
+      } catch (err) {
+        LogUtil.write(`反向同步单条失败「${row.displayName}」：${(err as BusinessError).message}`);
+      }
+    }
+    LogUtil.write(`反向同步完成：上行 ${out['pushed']} 条，冲突跳过 ${out['conflicts']} 条`);
+    return out;
+  }
+
+  /**
+   * 比较本地库行与系统联系人，判断系统侧有没有实质改动。
+   * 只比对本应用建模的字段（姓名/公司/职位/备注/电话/邮箱），
+   * 头像、生日等系统里能填但这里不建模的字段不参与比较 ——
+   * 否则用户动一下头像就会被误判成"改动"并上传。
+   */
+  private static diffWithRow(row: ContactRow, sys: VCardContact): SysDiff {
+    const d = new SysDiff();
+    d.name = sys.displayName !== '' ? sys.displayName : row.displayName;
+    if (sys.displayName !== row.displayName) {
+      d.changed = true;
+      return d;
+    }
+    if (sys.org !== row.org || sys.title !== row.title || sys.note !== row.note) {
+      d.changed = true;
+      return d;
+    }
+    const localPhones: string[] = ContactDb.parsePhonesOf(row.phonesJson)
+      .map((p): string => p.value);
+    const sysPhones: string[] = sys.phones.map((p): string => p.value);
+    if (ContactService.normSet(localPhones) !== ContactService.normSet(sysPhones)) {
+      d.changed = true;
+      return d;
+    }
+    const localEmails: string[] = ContactDb.parseEmailsOf(row.emailsJson)
+      .map((e): string => e.value);
+    const sysEmails: string[] = sys.emails.map((e): string => e.value);
+    if (ContactService.normSet(localEmails) !== ContactService.normSet(sysEmails)) {
+      d.changed = true;
+    }
+    return d;
+  }
+
+  /** JSON 字符串数组 → string[]（解析失败返回空） */
+  private static parseJsonArray(json: string): string[] {
+    if (json === '') {
+      return [];
+    }
+    try {
+      return JSON.parse(json) as string[];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /**
+   * 归一化成可比较的字符串：去空白、去空项、排序。
+   * 顺序不同不算改动（用户调整电话顺序不该触发上传）。
+   */
+  private static normSet(list: string[]): string {
+    const cleaned: string[] = list
+      .map((v: string): string => v.trim())
+      .filter((v: string): boolean => v !== '');
+    cleaned.sort();
+    return cleaned.join('|');
+  }
+
+  /** 把系统侧的值写进本地库，并标记 dirty 等待推送 */
+  private static async applySysChanges(context: common.Context,
+    row: ContactRow, sys: VCardContact): Promise<void> {
+    const phonesJson: string = JSON.stringify(
+      sys.phones.map((p): PhoneJson => {
+        const j = new PhoneJson();
+        j.v = p.value;
+        j.t = p.type;
+        return j;
+      }));
+    const emailsJson: string = JSON.stringify(
+      sys.emails.map((e): EmailJson => {
+        const j = new EmailJson();
+        j.v = e.value;
+        j.t = e.type;
+        return j;
+      }));
+    const store = await ContactDb.getDb(context);
+    const values: Record<string, string | number> = {
+      'display_name': sys.displayName,
+      'org': sys.org,
+      'title': sys.title,
+      'note': sys.note,
+      'phones_json': phonesJson,
+      'emails_json': emailsJson,
+      'dirty': 1
+    };
+    await ContactDb.updateFields(context, row.id, values);
   }
 
   /**
@@ -594,9 +775,14 @@ export class ContactService {
       let raw: string = row.raw !== '' ? row.raw : VCardUtil.build(c, row.uid);
       // 就地改关键字段
       raw = VCardUtil.setField(raw, 'FN', c.displayName);
-      raw = VCardUtil.setField(raw, 'N',
-        `${c.familyName};${c.givenName};${c.middleName};${c.prefix};${c.suffix}`);
-      raw = VCardUtil.setField(raw, 'ORG', c.org);
+      // ⚠️ N 是五段结构，必须用 setStructuredField（逐段转义、段间裸分号）。
+      //    用 setField 会把分号转义成 \\;，服务端把整串当"姓"，名字段全丢。
+      raw = VCardUtil.setStructuredField(raw, 'N',
+        [c.familyName, c.givenName, c.middleName, c.prefix, c.suffix]);
+      // ORG 也是多段结构（公司;部门），这里只建模第一级，
+      // 用单段 setStructuredField 保证 org 内部的分号被正确转义
+      raw = c.org === '' ? VCardUtil.setField(raw, 'ORG', '')
+        : VCardUtil.setStructuredField(raw, 'ORG', [c.org]);
       raw = VCardUtil.setField(raw, 'TITLE', c.title);
       raw = VCardUtil.setField(raw, 'NOTE', c.note);
       raw = VCardUtil.setField(raw, 'REV', VCardUtil.utcStamp());

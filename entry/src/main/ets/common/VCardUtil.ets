@@ -574,6 +574,59 @@ export class VCardUtil {
   }
 
   /**
+   * 设置**多段结构化字段**（N / ORG / ADR）。
+   *
+   * 🔴 为什么不能用 setField（2026-11-11 发现）：
+   *   setField 对整个值做 escape()，把**段分隔符 `;` 也转义**成 `\;`：
+   *       setField(raw, 'N', '张;三;;;')
+   *       → N:张\;三\;\;\;      ← 服务端把整串当成"姓"，名字段全丢
+   *
+   *   正确做法：**逐段 escape，段之间拼裸 `;`**。
+   */
+  static setStructuredField(raw: string, name: string, segments: string[]): string {
+    const escaped: string[] = segments.map((v: string): string => VCardUtil.escape(v));
+    return VCardUtil.setFieldRaw(raw, name, escaped.join(';'));
+  }
+
+  /** 与 setField 相同，但**不对值做 escape**（调用方已完成转义） */
+  private static setFieldRaw(raw: string, name: string, literal: string): string {
+    const unfolded: string = VCardUtil.unfold(raw);
+    const lines: VLine[] = VCardUtil.splitLines(unfolded);
+    const upper: string = name.toUpperCase();
+    const hits: VLine[] = lines.filter((l: VLine): boolean => l.name === upper);
+    const lineText: string = `${upper}:${literal}`;
+
+    if (hits.length > 0) {
+      let out: string = '';
+      let cursor: number = 0;
+      for (let i = 0; i < hits.length; i++) {
+        const h: VLine = hits[i];
+        out += unfolded.substring(cursor, h.start);
+        if (i === 0 && literal !== '') {
+          out += lineText + '\n';
+        }
+        cursor = h.end;
+        if (cursor < unfolded.length && unfolded.charAt(cursor) === '\n') {
+          cursor += 1;
+        }
+      }
+      out += unfolded.substring(cursor);
+      return VCardUtil.tidyNewlines(out);
+    }
+    if (literal === '') {
+      return raw;
+    }
+    const endIdx: number = unfolded.lastIndexOf('END:VCARD');
+    if (endIdx < 0) {
+      return raw;
+    }
+    const before: string = unfolded.substring(0, endIdx);
+    const after: string = unfolded.substring(endIdx);
+    const sep: string = before.endsWith('\n') ? '' : '\n';
+    return VCardUtil.tidyNewlines(before + sep + lineText + '\n' + after);
+  }
+
+  /**
    * 批量设置 TEL / EMAIL / ADR 这类多值属性。
    * 语义＝**权威替换**：先删掉该类所有行，再按传入顺序写入。
    * （与 CalDAV 侧 PUT 的"权威替换"语义保持一致，避免本地删除的电话在远端残留）

@@ -883,6 +883,50 @@ export class DavCardDavClient {
     }
   }
 
+  /**
+   * 查**单个资源**的 ETag（PROPFIND Depth:0）。
+   *
+   * 反向同步用它判断"远端这段时间有没有被别人改过"：
+   *   etag 与本地记录一致 → 远端没变，系统侧改动可以安全上行
+   *   etag 变了            → 远端也改了，冲突，保守起来按远端优先
+   *
+   * 为什么不复用 reportCardEtags：那个是对整个地址簿发 REPORT，
+   * 为了查一条资源的 etag 拉回全簿列表，联系人多了会很浪费。
+   */
+  static async getResourceEtag(url: string, auth: string): Promise<string> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '0',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 20000
+      });
+      if (resp.responseCode === 404) {
+        return '';
+      }
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        LogUtil.write(`PROPFIND(单资源ETag) 异常 ${resp.responseCode}：${url}`);
+        return '';
+      }
+      const xml: string = resp.result as string;
+      return DavClient.extractTag(xml, 'getetag').replace(/"/g, '');
+    } catch (err) {
+      LogUtil.write(`PROPFIND(单资源ETag) 异常：${(err as Error).message}`);
+      return '';
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
   /** PUT 单张 vCard（Content-Type 为 text/vcard，不是 text/calendar） */
   static async putCard(url: string, auth: string, vcard: string): Promise<string> {
     const httpRequest = http.createHttp();

@@ -4,7 +4,7 @@ import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { relationalStore } from '@kit.ArkData';
-import { ContactDb, ContactRow } from '../common/ContactDb';
+import { ContactDb, ContactRow, PhoneJson, EmailJson } from '../common/ContactDb';
 import { ContactService } from '../common/ContactService';
 import { VCardPhone, VCardEmail, VCardContact, VCardUtil } from '../common/VCardUtil';
 import { LogUtil } from '../common/LogUtil';
@@ -107,10 +107,26 @@ struct ContactDetailPage {
         return;
       }
       // 更新内存模型并写回库
+      // ⚠️ 详情页只能编辑号码/邮箱本身，不能编辑类型（UI 简化为一行一个）。
+      //    所以必须**沿用原有类型**，否则用户改个号码就把 TYPE=CELL 弄丢了。
       const phones: string[] = this.linesToList(this.phonesText);
       const emails: string[] = this.linesToList(this.emailsText);
-      const phonesJson: string = JSON.stringify(phones);
-      const emailsJson: string = JSON.stringify(emails);
+      const oldPhones: VCardPhone[] = ContactDb.parsePhonesOf(row.phonesJson);
+      const oldEmails: VCardEmail[] = ContactDb.parseEmailsOf(row.emailsJson);
+      const phonesJson: string = JSON.stringify(
+        phones.map((v: string, i: number): PhoneJson => {
+          const j = new PhoneJson();
+          j.v = v;
+          j.t = i < oldPhones.length ? oldPhones[i].type : '';
+          return j;
+        }));
+      const emailsJson: string = JSON.stringify(
+        emails.map((v: string, i: number): EmailJson => {
+          const j = new EmailJson();
+          j.v = v;
+          j.t = i < oldEmails.length ? oldEmails[i].type : '';
+          return j;
+        }));
 
       const store = await ContactDb.getDb(ctx);
       const values: relationalStore.ValuesBucket = {

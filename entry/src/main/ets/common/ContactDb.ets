@@ -38,6 +38,17 @@ export class ContactRow {
   rev: string = '';
 }
 
+/** phones_json / emails_json 的元素：值 + 类型标签 */
+export class PhoneJson {
+  v: string = '';
+  t: string = '';
+}
+
+export class EmailJson {
+  v: string = '';
+  t: string = '';
+}
+
 const DB_NAME: string = 'sync_contacts.db';
 const TABLE: string = 'contacts';
 const META: string = 'contact_meta';
@@ -54,7 +65,7 @@ const META: string = 'contact_meta';
  * ⇒ 解析逻辑有任何影响输出结果的改动，就把这个数字 +1。
  *   启动时会比对，不一致就清空本地联系人缓存并强制全量重解析。
  */
-const PARSER_VERSION: number = 2;
+const PARSER_VERSION: number = 4;
 
 export class ContactDb {
   private static db: relationalStore.RdbStore | null = null;
@@ -136,8 +147,22 @@ export class ContactDb {
   static async upsert(context: common.Context, c: VCardContact, bookKey: string,
     etag: string): Promise<void> {
     const store = await ContactDb.getDb(context);
-    const phonesJson: string = JSON.stringify(c.phones.map((p): string => p.value));
-    const emailsJson: string = JSON.stringify(c.emails.map((e): string => e.value));
+    // ⭐ 存「值 + 类型」：只存值会让 TYPE=CELL/WORK 在回写时全丢。
+    //    旧数据是纯字符串数组，parsePhones 做兼容。
+    const phonesJson: string = JSON.stringify(
+      c.phones.map((p): PhoneJson => {
+        const j = new PhoneJson();
+        j.v = p.value;
+        j.t = p.type;
+        return j;
+      }));
+    const emailsJson: string = JSON.stringify(
+      c.emails.map((e): EmailJson => {
+        const j = new EmailJson();
+        j.v = e.value;
+        j.t = e.type;
+        return j;
+      }));
     const existing: ContactRow | null = await ContactDb.findByUid(context, bookKey, c.uid);
     if (existing === null) {
       const values: relationalStore.ValuesBucket = {
@@ -309,6 +334,22 @@ export class ContactDb {
   }
 
   /** 关联系统通讯录 key */
+  /**
+   * 按字段名批量更新一行（反向同步用）。
+   * 传 Record 而不是 ValuesBucket，是为了让调用方不必 import relationalStore。
+   */
+  static async updateFields(context: common.Context, id: number,
+    fields: Record<string, string | number>): Promise<void> {
+    const store = await ContactDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {};
+    for (const k of Object.keys(fields)) {
+      values[k] = fields[k];
+    }
+    const pred = new relationalStore.RdbPredicates(TABLE);
+    pred.equalTo('id', id);
+    await store.update(values, pred);
+  }
+
   static async setSysKey(context: common.Context, id: number, sysKey: string): Promise<void> {
     const store = await ContactDb.getDb(context);
     const values: relationalStore.ValuesBucket = { 'sys_key': sysKey };
@@ -368,7 +409,43 @@ export class ContactDb {
   // ───────────── 便捷转换 ─────────────
 
   /** ContactRow → 本地模型（列表展示与编辑用） */
+  /**
+   * ContactRow → 本地模型。
+   *
+   * 🔴 必须走 VCardUtil.parse(raw)，不能只从 contact 表的列拼。
+   *   2026-11-11 踩过：早先这里只填了 displayName/org/title/note，
+   *   **familyName / givenName 一直是空的**。于是推送回写时
+   *       setStructuredField(raw, 'N', ['', '', '', '', ''])
+   *   把服务器上好好的 `N:张;三;;;` 覆盖成 `N:;;;;` —— 姓和名双双丢失。
+   *   而且只有"编辑过一次"的联系人才会坏，平时看着完全正常。
+   *
+   *   raw 是权威来源（sync 时完整存了原文），所以以它为准；
+   *   列里的值作为兜底（raw 解析失败时仍有基本显示）。
+   */
   static toModel(r: ContactRow): VCardContact {
+    // 先按 raw 完整解析
+    const parsed: VCardContact | null = VCardUtil.parse(r.raw, r.href, r.etag);
+    if (parsed !== null) {
+      // 用表里的最新值覆盖解析结果（表是 dirty 编辑后最先更新的）
+      parsed.uid = r.uid !== '' ? r.uid : parsed.uid;
+      parsed.displayName = r.displayName !== '' ? r.displayName : parsed.displayName;
+      parsed.org = r.org;
+      parsed.title = r.title;
+      parsed.note = r.note;
+      parsed.rev = r.rev;
+      parsed.raw = r.raw;
+      // 电话/邮箱优先用表里的（含用户刚编辑的内容与类型）
+      const phones: VCardPhone[] = ContactDb.parsePhones(r.phonesJson);
+      if (phones.length > 0) {
+        parsed.phones = phones;
+      }
+      const emails: VCardEmail[] = ContactDb.parseEmails(r.emailsJson);
+      if (emails.length > 0) {
+        parsed.emails = emails;
+      }
+      return parsed;
+    }
+    // raw 解析失败 → 退回用列拼（至少能显示与推送基本字段）
     const c = new VCardContact();
     c.uid = r.uid;
     c.href = r.href;
@@ -384,17 +461,43 @@ export class ContactDb {
     return c;
   }
 
+  /** 对外暴露：页面保存时要用原有类型（避免重复实现） */
+  static parsePhonesOf(json: string): VCardPhone[] {
+    return ContactDb.parsePhones(json);
+  }
+
+  static parseEmailsOf(json: string): VCardEmail[] {
+    return ContactDb.parseEmails(json);
+  }
+
+  /**
+   * 解析 phones_json，兼容两种历史格式：
+   *   旧： ["138...", "139..."]                 （无类型）
+   *   新： [{"v":"138...","t":"CELL"}, ...]     （含类型）
+   */
   private static parsePhones(json: string): VCardPhone[] {
     const out: VCardPhone[] = [];
     if (json === '') {
       return out;
     }
     try {
-      const arr = JSON.parse(json) as string[];
-      for (const v of arr) {
+      const arr = JSON.parse(json) as (string | PhoneJson)[];
+      for (const item of arr) {
         const p = new VCardPhone();
-        p.value = v;
-        out.push(p);
+        // ⚠️ 不要用 typeof 判断：ArkTS 下从 JSON.parse 得到的元素
+        //    typeof 一律是 "object"，会走进 else 分支却又读不到 v。
+        //    改成「能否读到字符串型的 v」来区分新旧格式。
+        const asObj = item as PhoneJson;
+        if (asObj !== null && asObj !== undefined && typeof asObj.v === 'string'
+          && asObj.v !== '') {
+          p.value = asObj.v;   // 新格式 {v,t}
+          p.type = asObj.t !== undefined ? asObj.t : '';
+        } else {
+          p.value = String(item);  // 旧格式："138..."
+        }
+        if (p.value !== '' && p.value !== '[object Object]') {
+          out.push(p);
+        }
       }
     } catch (err) {
       LogUtil.write(`解析电话列表失败：${(err as Error).message}`);
@@ -408,11 +511,20 @@ export class ContactDb {
       return out;
     }
     try {
-      const arr = JSON.parse(json) as string[];
-      for (const v of arr) {
+      const arr = JSON.parse(json) as (string | EmailJson)[];
+      for (const item of arr) {
         const e = new VCardEmail();
-        e.value = v;
-        out.push(e);
+        const asObj = item as EmailJson;
+        if (asObj !== null && asObj !== undefined && typeof asObj.v === 'string'
+          && asObj.v !== '') {
+          e.value = asObj.v;
+          e.type = asObj.t !== undefined ? asObj.t : '';
+        } else {
+          e.value = String(item);
+        }
+        if (e.value !== '' && e.value !== '[object Object]') {
+          out.push(e);
+        }
       }
     } catch (err) {
       LogUtil.write(`解析邮箱列表失败：${(err as Error).message}`);
