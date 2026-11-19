@@ -750,9 +750,6 @@ export class SyncEngine {
               throw delErr as Error;
             }
           }
-              throw delErr as Error;
-            }
-          }
           await EventDb.purge(context, e.id);
           LogUtil.write(`推送删除（标题已脱敏）uid=${e.uid} → ${url}`);
         } else {
@@ -831,9 +828,6 @@ export class SyncEngine {
         }
         if (!remoteGone) {
           LogUtil.write(`推送删除重复系列失败(保留待推送)：uid=${uid} → ${(err as Error).message}`);
-          return;
-        }
-      }
           return;
         }
       }

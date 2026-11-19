@@ -4579,8 +4579,8 @@ struct Index {
     }
   }
 
-  /** 询问是否删除待办 */
-  private askDeleteTodo(t: DisplayEvent): void {
+  /** 询问是否删除待办（针对单条条目的二次确认） */
+  private confirmDeleteTodo(t: DisplayEvent): void {
     const label = t.title === '' ? '待办事项' : '「' + t.title + '」';
     this.getUIContext().showAlertDialog({
       title: '删除待办',
@@ -4632,155 +4632,6 @@ struct Index {
     this.pushTodoChange(ctx, t.id).catch((err: Error) => {
       LogUtil.write('同步删除待办失败: ' + err.message);
     });
-  }
-
-  /** 点击待办：打勾完成/取消完成，0ms 瞬间响应渲染，本地落库并后台双向推送到 CalDAV */
-  private async toggleTodo(t: DisplayEvent): Promise<void> {
-    const ctx = this.getUIContext().getHostContext();
-    // 判断是否为重复待办从未完成勾选为完成
-    if (!t.completed && (t.rrule !== '' || t.recurring)) {
-      const nextOcc = RruleUtil.nextOccurrence(t.rrule, t.startTime > 0 ? t.startTime : Date.now());
-      if (nextOcc > 0) {
-        // 重复待办自动推进到下一次发生时刻
-        this.todos = this.todos.map((item: DisplayEvent): DisplayEvent => {
-          if (item.id === t.id) {
-            const copy = new DisplayEvent();
-            copy.id = item.id;
-            copy.isSystem = item.isSystem;
-            copy.title = item.title;
-            copy.description = item.description;
-            copy.location = item.location;
-            copy.startTime = nextOcc;
-            copy.endTime = nextOcc;
-            copy.isAllDay = item.isAllDay;
-            copy.calKey = item.calKey;
-            copy.calName = item.calName;
-            copy.color = item.color;
-            copy.completed = false;
-            copy.recurring = item.recurring;
-            copy.writable = item.writable;
-            copy.kind = item.kind;
-            copy.rrule = item.rrule;
-            return copy;
-          }
-          return item;
-        });
-        // 瞬间同步更新选今日程列表
-        this.selectedDayEvents = this.selectedDayEvents.map((item: DisplayEvent): DisplayEvent => {
-          if (item.id === t.id && item.kind === 'todo') {
-            const copy = new DisplayEvent();
-            copy.id = item.id;
-            copy.isSystem = item.isSystem;
-            copy.title = item.title;
-            copy.description = item.description;
-            copy.location = item.location;
-            copy.startTime = nextOcc;
-            copy.endTime = nextOcc;
-            copy.isAllDay = item.isAllDay;
-            copy.calKey = item.calKey;
-            copy.calName = item.calName;
-            copy.color = item.color;
-            copy.completed = false;
-            copy.recurring = item.recurring;
-            copy.writable = item.writable;
-            copy.kind = item.kind;
-            copy.rrule = item.rrule;
-            return copy;
-          }
-          return item;
-        });
-        this.buildEventsByDay();
-        this.rebuildPages();
-        this.rebuildDayTimeline();
-        if (this.mode === 'agenda') {
-          this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
-        }
-        this.dataVersion++;
-
-        const nextDateStr: string = this.fmtDateCn(nextOcc);
-        this.getUIContext().getPromptAction().showToast({
-          message: `已完成本次，下期截止：${nextDateStr}`
-        });
-
-        if (ctx !== undefined) {
-          CardDataService.pushToAllForms(ctx).catch(() => {});
-          await EventDb.advanceTodo(ctx, t.id, nextOcc);
-          this.pushTodoChange(ctx, t.id).catch((err: Error) => {
-            LogUtil.write('待办后台同步失败: ' + err.message);
-          });
-        }
-        return;
-      }
-    }
-
-    // 常规待办完成 / 取消完成 或重复待办最后一期完成
-    const nextCompleted: boolean = !t.completed;
-    this.todos = this.todos.map((item: DisplayEvent): DisplayEvent => {
-      if (item.id === t.id) {
-        const copy = new DisplayEvent();
-        copy.id = item.id;
-        copy.isSystem = item.isSystem;
-        copy.title = item.title;
-        copy.description = item.description;
-        copy.location = item.location;
-        copy.startTime = item.startTime;
-        copy.endTime = item.endTime;
-        copy.isAllDay = item.isAllDay;
-        copy.calKey = item.calKey;
-        copy.calName = item.calName;
-        copy.color = item.color;
-        copy.completed = nextCompleted;
-        copy.recurring = item.recurring;
-        copy.writable = item.writable;
-        copy.kind = item.kind;
-        copy.rrule = item.rrule;
-        return copy;
-      }
-      return item;
-    });
-    // 瞬间同步更新选今日程列表，保证在日程视图中点击立即打勾或划线生效
-    this.selectedDayEvents = this.selectedDayEvents.map((item: DisplayEvent): DisplayEvent => {
-      if (item.id === t.id && item.kind === 'todo') {
-        const copy = new DisplayEvent();
-        copy.id = item.id;
-        copy.isSystem = item.isSystem;
-        copy.title = item.title;
-        copy.description = item.description;
-        copy.location = item.location;
-        copy.startTime = item.startTime;
-        copy.endTime = item.endTime;
-        copy.isAllDay = item.isAllDay;
-        copy.calKey = item.calKey;
-        copy.calName = item.calName;
-        copy.color = item.color;
-        copy.completed = nextCompleted;
-        copy.recurring = item.recurring;
-        copy.writable = item.writable;
-        copy.kind = item.kind;
-        copy.rrule = item.rrule;
-        return copy;
-      }
-      return item;
-    });
-    this.buildEventsByDay();
-    this.rebuildPages();
-    this.rebuildDayTimeline();
-    if (this.mode === 'agenda') {
-      this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
-    }
-    this.dataVersion++;
-
-    this.getUIContext().getPromptAction().showToast({
-      message: nextCompleted ? '已标记为完成' : '已取消完成'
-    });
-
-    if (ctx !== undefined) {
-      CardDataService.pushToAllForms(ctx).catch(() => {});
-      await EventDb.toggleTodoCompleted(ctx, t.id, nextCompleted);
-      this.pushTodoChange(ctx, t.id).catch((err: Error) => {
-        LogUtil.write('待办后台同步失败: ' + err.message);
-      });
-    }
   }
 
   private fmtTodoRepeat(rrule: string): string {
@@ -4865,7 +4716,7 @@ struct Index {
       .backgroundColor('#E64545')
       .borderRadius(12)
       .onClick(() => {
-        this.askDeleteTodo(t);
+        this.confirmDeleteTodo(t);
       })
     }
     .padding({ left: 6 })
