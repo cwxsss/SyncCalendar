@@ -236,15 +236,33 @@ export class MirrorInbound {
       // ⚠️ 先把 identifier 写回系统日历，让它变成"我们的"条目。
       //    否则下一次出站镜像会把同一条再加一遍 → 系统日历里出现重复。
       const identifier: string = `${bucket}|${uid}`;
-      const stamped: calendarManager.Event = ev;
-      stamped.identifier = identifier;
+      const stamped: calendarManager.Event = {
+        id: ev.id,
+        type: ev.type ?? calendarManager.EventType.NORMAL,
+        title: ev.title ?? '',
+        startTime: ev.startTime,
+        endTime: ev.endTime,
+        isAllDay: ev.isAllDay === true,
+        identifier: identifier
+      };
+      if (ev.description !== undefined && ev.description !== '') {
+        stamped.description = ev.description;
+      }
+      if (ev.location !== undefined && ev.location?.location !== '') {
+        stamped.location = ev.location;
+      }
+      if (ev.reminderTime !== undefined && ev.reminderTime.length > 0) {
+        stamped.reminderTime = ev.reminderTime;
+      }
+      if (ev.recurrenceRule !== undefined) {
+        stamped.recurrenceRule = ev.recurrenceRule;
+      }
       try {
         await cal.updateEvent(stamped);
       } catch (err) {
         const e = err as BusinessError;
-        res.skipped++;
-        LogUtil.write(`入站新建跳过：无法写回 identifier（${e.message}），避免重复`);
-        continue;
+        // 即使因系统权限限制未能打标 identifier，也绝不丢弃该事件，后续出站防重有 existingById 兜底
+        LogUtil.write(`入站新建写回 identifier 失败（${e.message}），继续保存本地并入库`);
       }
       const e: LocalEvent = new LocalEvent();
       e.uid = uid;
@@ -334,8 +352,13 @@ export class MirrorInbound {
     e.rrule = MirrorInbound.rruleOf(ev);
     e.recurring = e.rrule !== '';
     if (ev.reminderTime !== undefined && ev.reminderTime.length > 0) {
-      e.reminders = [...ev.reminderTime];
-      e.reminder = ev.reminderTime[0];
+      // 系统日历中"准时"为 0，映射为小褚日历代表准时的 -1（0 代表不提醒）
+      const mappedReminders: number[] = ev.reminderTime.map((m: number): number => m === 0 ? -1 : m);
+      e.reminders = mappedReminders;
+      e.reminder = mappedReminders[0];
+    } else {
+      e.reminders = [];
+      e.reminder = 0;
     }
     return e.title !== prevTitle || e.description !== prevDesc || e.location !== prevLoc
       || e.startTime !== prevStart || e.endTime !== prevEnd || e.isAllDay !== prevAllDay

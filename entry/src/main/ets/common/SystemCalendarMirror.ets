@@ -975,6 +975,7 @@ export class SystemCalendarMirror {
 
     // 现有镜像条目：identifier -> Event
     const existing: Map<string, calendarManager.Event> = new Map<string, calendarManager.Event>();
+    const existingById: Map<number, calendarManager.Event> = new Map<number, calendarManager.Event>();
     const sysEvents: calendarManager.Event[] = await SystemCalendarMirror.queryEvents(cal);
     // ⭐ 自动清洗系统日历中历史残留的重复节气条目（同日同名节气只保留一个）
     const seenSolarDay = new Set<string>();
@@ -982,6 +983,7 @@ export class SystemCalendarMirror {
       if (ev.id === undefined) {
         continue;
       }
+      existingById.set(ev.id, ev);
       const title = (ev.title ?? '').trim();
       if (isSolarTerm(title)) {
         const dayKey = `${title}_${SystemCalendarMirror.dayStart(ev.startTime)}`;
@@ -1012,7 +1014,19 @@ export class SystemCalendarMirror {
       want.add(occ.identifier);
       const desired: calendarManager.Event =
         SystemCalendarMirror.toSystemEvent(occ.src, occ.identifier, occ.start, occ.end);
-      const cur: calendarManager.Event | undefined = existing.get(occ.identifier);
+      let cur: calendarManager.Event | undefined = existing.get(occ.identifier);
+      if (cur === undefined) {
+        const prefix: string = `sc-${ref.bookId}-`;
+        if (occ.src.uid.startsWith(prefix)) {
+          const sysId: number = parseInt(occ.src.uid.substring(prefix.length), 10);
+          if (!isNaN(sysId) && existingById.has(sysId)) {
+            cur = existingById.get(sysId);
+            if (cur !== undefined && cur.identifier !== undefined && cur.identifier !== '') {
+              existing.delete(cur.identifier);
+            }
+          }
+        }
+      }
       if (cur === undefined) {
         toAdd.push(desired);
         continue;
@@ -1020,6 +1034,9 @@ export class SystemCalendarMirror {
       const diff: string = SystemCalendarMirror.diffOf(cur, desired);
       if (diff !== '') {
         desired.id = cur.id;
+        if (desired.reminderTime === undefined) {
+          desired.reminderTime = [];
+        }
         await cal.updateEvent(desired);
         res.updated++;
         if (logged < 5) { // 只记前 5 条，避免刷屏
@@ -1279,7 +1296,7 @@ export class SystemCalendarMirror {
     const kept: number[] = [];
     for (const r of reminders) {
       const m: number = (r === -1 ? 0 : r);
-      if ((r > 0 || r === -1) && base - m * 60000 > now) {
+      if (m >= 0 && base - m * 60000 > now) {
         kept.push(m);
       }
     }
@@ -1363,9 +1380,12 @@ export class SystemCalendarMirror {
     // ⭐ 0.0.8：提醒也要比较 —— 否则用户改了提醒时间，系统日历侧**永远不会更新**
     //   （旧版 diffOf 不比 reminderTime，改动被判定为"无差异" → 不触发 updateEvent）。
     //   ⚠️ 写入侧已过滤掉"已过期"的提醒（见 toSystemEvent / futureReminders），
-    //      所以这里的比较也用同一口径，避免"每轮都因提醒不同而重写"。
-    const curRem: number[] = cur.reminderTime ?? [];
-    const wantRem: number[] = want.reminderTime ?? [];
+    //      所以这里的比较也用同一口径（两边均过滤过期提醒），避免"每轮都因过期提醒被剥离而重复 updateEvent 导致手机弹通知"。
+    const now: number = Date.now();
+    const curRem: number[] = SystemCalendarMirror.futureReminders(
+      cur.reminderTime ?? [], want.startTime, want.isAllDay ?? false, now);
+    const wantRem: number[] = SystemCalendarMirror.futureReminders(
+      want.reminderTime ?? [], want.startTime, want.isAllDay ?? false, now);
     if (SystemCalendarMirror.reminderKey(curRem) !== SystemCalendarMirror.reminderKey(wantRem)) {
       return `reminder ${SystemCalendarMirror.reminderKey(curRem) || '(无)'} != ${SystemCalendarMirror.reminderKey(wantRem) || '(无)'}`;
     }

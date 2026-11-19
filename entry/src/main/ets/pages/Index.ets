@@ -24,7 +24,7 @@ import { IcsUtil, AttachMeta } from '../common/IcsUtil';
 import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
-import { MirrorInbound } from '../common/MirrorInbound';
+import { MirrorInbound, InboundResult } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
 import { TodoService } from '../common/TodoService';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
@@ -348,8 +348,24 @@ struct Index {
       this.detailEvent = null;
     }
 
-    // 无条件刷新：保证回到前台或编辑返回时即时重载所有日程和卡片
-    this.reloadAll().then((): Promise<void> => this.handlePendingSync());
+    // 无条件刷新：保证回到前台或编辑返回时即时重载所有日程和卡片，并对账系统日历新建/改动
+    this.reloadAll().then(async (): Promise<void> => {
+      await this.handlePendingSync();
+      const ctx = this.getUIContext().getHostContext();
+      if (ctx !== undefined) {
+        try {
+          const inboundRes: InboundResult = await MirrorInbound.reconcile(ctx);
+          if (inboundRes.created > 0 || inboundRes.updated > 0 || inboundRes.deleted > 0) {
+            await this.reloadEvents();
+            if (!this.syncing) {
+              this.syncAll(false).catch(() => {});
+            }
+          }
+        } catch (err) {
+          // 忽略对账异常
+        }
+      }
+    });
   }
 
   /** 卡片深链监听（App 已在后台运行时，onNewWant 改写 AppStorage 触发） */
