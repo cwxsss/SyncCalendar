@@ -2,7 +2,7 @@
 // 日程编辑页：新建 / 修改 / 删除日程（一律属于某个 CalDAV 日历本，不再支持"本机"日程）
 import { curves, router, KeyboardAvoidMode } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { DavAccount, AccountStore, CalSource, BookPalette, LOCAL_CAL_KEY } from '../common/AccountStore';
 import { EventDb, LocalEvent } from '../common/EventDb';
@@ -17,6 +17,7 @@ import { IcsUtil } from '../common/IcsUtil';
 import { RruleUtil } from '../common/RruleUtil';
 import { CalendarDataService, DraftTransfer } from '../common/CalendarDataService';
 import { PlaceSuggest, PlaceItem } from '../common/PlaceSuggest';
+import { PlaceParser, ParsedPlace } from '../common/PlaceParser';
 import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
 
 /** 重复系列某次发生的前后边界（用于 EXDATE / UNTIL / 拆分） */
@@ -118,6 +119,8 @@ struct EventEditPage {
   @State sheetShow: boolean = false;
   @State sheetMode: string = 'picker';
   @State pickerIsEnd: boolean = false;
+  /** 新建"非今天"日程时的默认开始小时（24 小时制） */
+  private static readonly DEFAULT_START_HOUR: number = 9;
   /** 弹层打开时的初始日期与时间（传给独立子组件 DateTimePickerSheetContent） */
   @State pickerInitDate: Date = new Date();
   @State pickerInitHour: number = 9;
@@ -284,12 +287,23 @@ struct EventEditPage {
         return;
       }
     }
-    // 新建：日期取所选日（未选则今天），时间取当前时刻；结束 = 开始 + 1 小时
+    // 新建：日期取所选日（未选则今天）。默认开始时刻分两种情况：
+    //   ① 今天  → 取当前时刻（"现在就记一笔"最自然；而且今天的 09:00 往往已经过了）
+    //   ② 非今天 → 固定 09:00（"现在几点"对别的日子毫无参考价值，09:00 才是通用默认）
+    // 结束时间统一 = 开始 + 1 小时。
     const base: number = AppStorage.get<number>('pendingEventDate') ?? Date.now();
-    const dayStart = new Date(new Date(base).getFullYear(), new Date(base).getMonth(),
-      new Date(base).getDate()).getTime();
+    const pickedDay = new Date(base);
+    const dayStart = new Date(pickedDay.getFullYear(), pickedDay.getMonth(),
+      pickedDay.getDate()).getTime();
     const now = new Date();
-    this.startMs = dayStart + now.getHours() * 3600000 + now.getMinutes() * 60000;
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if (dayStart === todayStart) {
+      // ① 今天：当前时刻
+      this.startMs = dayStart + now.getHours() * 3600000 + now.getMinutes() * 60000;
+    } else {
+      // ② 非今天：09:00
+      this.startMs = dayStart + EventEditPage.DEFAULT_START_HOUR * 3600000;
+    }
     this.endMs = this.startMs + 3600000;
     if (choices.length > 0) {
       this.chosenKey = choices[0].calKey;
@@ -464,6 +478,123 @@ struct EventEditPage {
     }
     .width('100%')
     .padding({ top: 4, bottom: 4 })
+  }
+
+  /**
+   * 从剪贴板粘贴并解析地点。
+   *
+   * ⚠️ 必须由 PasteButton 的 onClick 触发，权限仅在回调内有效。
+   *    在回调外调用 pasteboard.getData() 会因缺少权限而失败。
+   */
+  private async pastePlace(): Promise<void> {
+    this.cancelSuggestTimer();
+    let text: string = '';
+    try {
+      const sys = pasteboard.getSystemPasteboard();
+      const has: boolean = await sys.hasData();
+      if (!has) {
+        this.toast('剪贴板是空的');
+        return;
+      }
+      const data: pasteboard.PasteData = await sys.getData();
+      text = data.getPrimaryText();
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`粘贴读取失败: ${e.code} ${e.message}`);
+      this.toast('无法读取剪贴板');
+      return;
+    }
+    if (text === undefined || text === null || text.trim() === '') {
+      this.toast('剪贴板里没有文字');
+      return;
+    }
+    await this.resolvePastedText(text.trim());
+  }
+
+  /**
+   * 把粘贴到的文本解析成地点。
+   *
+   * 三级降级（从准到松）：
+   *  ① 高德链接 → 直接有坐标，无需检索
+   *  ② 微信文本 → 拆出名称，用**名称**检索（实测命中率最高）
+   *  ③ 名称搜不到 → 用完整地址再搜一次
+   *  ④ 都失败 → 把原文填进地点栏，提示用户手动确认
+   *
+   * 第 ④ 步兜底很重要：宁可让用户自己看一眼，
+   * 也不能因为解析失败就清空输入框或卡住保存。
+   */
+  private async resolvePastedText(text: string): Promise<void> {
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+    let parsed: ParsedPlace | null = null;
+    try {
+      parsed = await PlaceParser.parse(text, ctx);
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`粘贴解析异常: ${e.message}`);
+    }
+
+    // 解析不出东西 → 原文填入，让用户自行判断
+    if (parsed === null) {
+      this.lastAppliedText = text;
+      this.location = text;
+      this.toast('已填入，请确认地点是否正确');
+      return;
+    }
+
+    // 有坐标（高德链接）：直接用，坐标已包含在解析结果里
+    if (parsed.hasCoord) {
+      const locText: string = PlaceParser.mergeForLocationText(parsed.name, parsed.address);
+      this.lastAppliedText = locText !== '' ? locText : text;
+      this.location = this.lastAppliedText;
+      this.placePicked = true;
+      this.toast('已从链接解析地点');
+      return;
+    }
+
+    // 无坐标（微信文本）：名称优先检索，失败再用地址
+    const tryKeywords: string[] = [];
+    if (parsed.name !== '') {
+      tryKeywords.push(parsed.name);
+    }
+    if (parsed.address !== '' && parsed.address !== parsed.name) {
+      tryKeywords.push(parsed.address);
+    }
+    if (tryKeywords.length === 0) {
+      tryKeywords.push(text);
+    }
+
+    for (let i = 0; i < tryKeywords.length; i++) {
+      const kw: string = tryKeywords[i];
+      try {
+        let items: PlaceItem[] = await PlaceSuggest.query(kw, ctx);
+        if (items.length === 0) {
+          items = await PlaceSuggest.search(kw, ctx);
+        }
+        if (items.length > 0) {
+          // 命中：直接应用第一条（与用户点选候选等价）
+          const best: PlaceItem = items[0];
+          this.placePicked = true;
+          this.lastAppliedText = best.locationText;
+          this.location = best.locationText;
+          this.toast('已匹配到地点');
+          return;
+        }
+      } catch (err) {
+        LogUtil.write(`粘贴检索失败(${kw}): ${(err as BusinessError).message}`);
+      }
+    }
+
+    // 全部检索失败：填原文，不阻塞
+    const fallback: string = parsed.name !== '' ? parsed.name : parsed.address;
+    this.lastAppliedText = fallback !== '' ? fallback : text;
+    this.location = this.lastAppliedText;
+    this.placePicked = true;
+    this.toast('已填入，请确认地点是否正确');
+  }
+
+  /** 轻量提示（复用页面已有的 toast 机制；没有就静默） */
+  private toast(msg: string): void {
+    this.getUIContext().getPromptAction().showToast({ message: msg, duration: 1800 });
   }
 
   /** 选中一条候选：写进地点输入框并收起列表 */
@@ -744,7 +875,8 @@ struct EventEditPage {
       this.endMs = dayStart + days * 86400000 - 1;
     } else {
       const s = new Date(this.startMs);
-      this.startMs = new Date(s.getFullYear(), s.getMonth(), s.getDate(), 9, 0).getTime();
+      this.startMs = new Date(s.getFullYear(), s.getMonth(), s.getDate()).getTime()
+        + EventEditPage.DEFAULT_START_HOUR * 3600000;
       this.endMs = this.startMs + 3600000;
     }
   }
@@ -1447,7 +1579,8 @@ struct EventEditPage {
   }
 
   build() {
-    Column({ space: 14 }) {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 14 }) {
       // 顶部（与内容区左右对齐，避免贴边误触）
       Row({ space: 6 }) {
         Text('取消')
@@ -1927,6 +2060,33 @@ struct EventEditPage {
                 }
               })
               .id('placeAnchor')
+            // ⭐ 粘贴地址：系统 PasteButton 安全控件
+            //    用它而不是自绘按钮 + pasteboard.getData()，原因见 pastePlace() 注释：
+            //    READ_PASTEBOARD 是受限权限，普通应用申请会被拒绝。
+            //    PasteButton 无需声明权限、无需弹窗，权限仅在 onClick 内有效。
+            // ⭐ PasteButton：安全控件，点击时临时获得剪贴板读权限
+            //    （无需申请 READ_PASTEBOARD —— 那是受限权限，普通应用申请会被拒）
+            //
+            // ⚠️ icon/text/buttonType **只能走构造参数**，写成链式属性会编译报错。
+            //    文字内容由系统枚举决定（PasteDescription 只有 PASTE 一个值，即「粘贴」）。
+            // 外观与右边的「地图」按钮保持一致：同字号、同色、同底色、同圆角、同高度。
+            PasteButton({
+              text: PasteDescription.PASTE,
+              // ⚠️ 必须用 Normal，不能用 Capsule：
+              //    按 SDK 文档，Capsule / Circle 下 borderRadius **不生效**，
+              //    圆角由按钮类型自动决定（= 两端全圆），与「地图」的圆角矩形不一致。
+              //    只有 Normal / ROUNDED_RECTANGLE 才认 borderRadius。
+              buttonType: ButtonType.Normal
+            })
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .backgroundColor($r('app.color.card_bg'))
+              .height(44)
+              .padding({ left: 12, right: 12 })
+              .borderRadius(12)
+              .onClick(() => {
+                this.pastePlace();
+              })
             // 在地图上选点（系统地图界面，可选可搜可周边）
             Text('地图')
               .fontSize(13)
@@ -2006,50 +2166,76 @@ struct EventEditPage {
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
       .align(Alignment.Top)
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: 12 })
+      .backgroundColor($r('app.color.page_bg'))
+      // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+
+      // ===== 居中弹层 =====
+      if (this.sheetShow) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => {
+            this.sheetShow = false;
+          })
+        this.centerSheet()
+      }
     }
     .width('100%')
     .height('100%')
-    .padding({ top: 12 })
-    .backgroundColor($r('app.color.page_bg'))
-    // 沉浸式：背景延伸到状态栏/导航条区域（只扩绘制、不移动子组件）
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    // ⚠️ 整个页面**只允许一个 bindSheet**：挂两个时后者会覆盖前者，
-    //    表现为"时间选择框白框一闪而过"（范围弹层顶掉了它）。
-    //    这里用 sheetMode 在同一个弹层里切换内容。
-    .bindSheet($$this.sheetShow, this.bottomSheet(), {
-      height: this.sheetMode === 'scope' ? 320 : (this.sheetMode === 'repeatEnd' ? 340 : (this.sheetMode === 'customReminder' ? 360 : 380)),
-      showClose: false,
-      dragBar: true,
-      backgroundColor: $r('app.color.card_bg')
-    })
   }
 
-  /** ⭐ 唯一的底部弹层：按 sheetMode 切换显示"时间选择"/"重复范围选择"/"重复截止日期" */
+  /**
+   * 居中弹层（自绘覆盖层，与待办页一致）。
+   *
+   * 原来用 bindSheet 从底部弹出，用户反馈"点完之后选择框在下面出来，操作不顺畅"。
+   * 改成屏幕居中，视线不用上下跳。
+   *
+   * 为什么不用 bindSheet：SDK 的 SheetOptions 没有 position/alignment，只能底部弹。
+   */
   @Builder
-  bottomSheet() {
+  centerSheet() {
     if (this.sheetMode === 'scope') {
       this.scopeSheet()
     } else if (this.sheetMode === 'repeatEnd') {
-      RepeatEndSheetContent({
-        initDate: this.pickerInitDate,
-        onConfirm: (d: Date) => {
-          this.repeatUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-          this.sheetShow = false;
-        }
-      })
+      Column() {
+        RepeatEndSheetContent({
+          initDate: this.pickerInitDate,
+          onConfirm: (d: Date) => {
+            this.repeatUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+            this.sheetShow = false;
+          }
+        })
+      }
+      .width('86%')
+      .padding(18)
+      .borderRadius(16)
+      .backgroundColor($r('app.color.card_bg'))
     } else if (this.sheetMode === 'customReminder') {
       this.customReminderSheet()
     } else {
-      DateTimePickerSheetContent({
-        pickerTitle: this.pickerIsEnd ? '选择结束时间' : '选择开始时间',
-        isAllDay: this.allDay,
-        initDate: this.pickerInitDate,
-        initHour: this.pickerInitHour,
-        initMin: this.pickerInitMin,
-        onConfirm: (d: Date, h: number, m: number) => {
-          this.onPickerConfirm(d, h, m);
-        }
-      })
+      Column() {
+        DateTimePickerSheetContent({
+          pickerTitle: this.pickerIsEnd ? '选择结束时间' : '选择开始时间',
+          isAllDay: this.allDay,
+          initDate: this.pickerInitDate,
+          initHour: this.pickerInitHour,
+          initMin: this.pickerInitMin,
+          onConfirm: (d: Date, h: number, m: number) => {
+            this.onPickerConfirm(d, h, m);
+          }
+        })
+      }
+      .width('86%')
+      .padding(18)
+      .borderRadius(16)
+      .backgroundColor($r('app.color.card_bg'))
     }
   }
 
@@ -2086,8 +2272,10 @@ struct EventEditPage {
           this.sheetShow = false;
         })
     }
-    .width('100%')
-    .padding({ left: 20, right: 20 })
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
   @Builder
@@ -2398,8 +2586,10 @@ struct EventEditPage {
       .width('100%')
       .padding({ left: 16, right: 16, bottom: 12 })
     }
-    .width('100%')
-    .height('100%')
+    .width('86%')
+    .padding(18)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.card_bg'))
   }
 
   @Builder
@@ -2435,6 +2625,13 @@ class CalendarDataBridge {
         const detected: boolean = acc.calendarWritable.length > i
           ? acc.calendarWritable[i] !== '0' : true;
         if (!detected || manualKeys.includes(`${acc.id}_${i}`)) {
+          continue;
+        }
+        // ⭐ 只列**能放日程**的本：纯待办本（COMP_SET 只有 VTODO）写不进 VEVENT。
+        //    'both' / 'unknown' 保留，理由同 Index.openTodoCreator。
+        const comp: string = i < acc.calendarComps.length && acc.calendarComps[i] !== ''
+          ? acc.calendarComps[i] : 'unknown';
+        if (comp === 'todo') {
           continue;
         }
         const s = new CalSourceWithHref();

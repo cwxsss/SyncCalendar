@@ -161,8 +161,13 @@ export class ReminderService {
         LogUtil.write(`取消全部提醒后系统仍剩 ${before} 条`);
       }
       const now: number = Date.now();
-      const rows: LocalEvent[] =
+      // ⭐ #38 日程 + 待办一起排提醒。两类分别查（过滤条件不同：
+      //    待办要求 completed=0，日程无此概念），合并后统一处理。
+      const eventRows: LocalEvent[] =
         await EventDb.queryRemindable(context, now, now + ReminderService.WINDOW);
+      const todoRows: LocalEvent[] =
+        await EventDb.queryRemindableTodos(context, now, now + ReminderService.WINDOW);
+      const rows: LocalEvent[] = eventRows.concat(todoRows);
       // 提醒静音的日历本（如别人分享的本）：其中所有日程都不再提醒
       const muted: string[] = await AppSettings.getMutedReminderKeys(context);
       // ⭐⭐ 已镜像到系统日历的本：由系统日历负责提醒，App 不再重复排（消除"提醒两次"）
@@ -194,6 +199,8 @@ export class ReminderService {
           }
           const d = new Date(remindAt);
           const calName: string = await ReminderService.calName(context, e.calKey);
+          // #38 文案按类型区分：待办是"到期"，日程是"开始"
+          const isTodo: boolean = e.kind === 'todo';
           const request: reminderAgentManager.ReminderRequestCalendar = {
             reminderType: reminderAgentManager.ReminderType.REMINDER_TYPE_CALENDAR,
             dateTime: {
@@ -204,12 +211,16 @@ export class ReminderService {
               minute: d.getMinutes(),
               second: 0
             },
-            title: '日程提醒',
-            content: (rem === -1 || rem === 0)
-              ? `「${calName}」中的「${e.title}」现在开始`
-              : `「${calName}」中的「${e.title}」将在 ${rem} 分钟后开始`,
+            title: isTodo ? '待办提醒' : '日程提醒',
+            content: isTodo
+              ? ((rem === -1 || rem === 0)
+                ? `「${calName}」中的待办「${e.title}」现在到期`
+                : `「${calName}」中的待办「${e.title}」将在 ${rem} 分钟后到期`)
+              : ((rem === -1 || rem === 0)
+                ? `「${calName}」中的「${e.title}」现在开始`
+                : `「${calName}」中的「${e.title}」将在 ${rem} 分钟后开始`),
             notificationId: (e.id * 10 + (rem === -1 ? 9 : rem)) % 100000,
-            expiredContent: '该日程已开始',
+            expiredContent: isTodo ? '该待办已到期' : '该日程已开始',
             ringDuration: 5,
             snoozeTimes: 0,
             timeInterval: 0

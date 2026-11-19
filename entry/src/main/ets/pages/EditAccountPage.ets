@@ -24,13 +24,26 @@ export class EditCalendarItem {
   href: string;
   name: string;
   color: string; // 服务器定义的颜色（calendar-color），可能为空
+  /** ⭐ COMP_SET 'event' / 'todo' / 'both' / 'unknown'（见 DavCalendarEntry.comps） */
+  comps: string;
   selected: boolean;
 
-  constructor(href: string, name: string, color: string) {
+  constructor(href: string, name: string, color: string, comps: string = 'unknown') {
     this.href = href;
     this.name = name;
     this.color = color;
+    this.comps = comps;
     this.selected = false;
+  }
+
+  /** 是否待办本（纯待办或混合） */
+  isTodoBook(): boolean {
+    return this.comps === 'todo' || this.comps === 'both';
+  }
+
+  /** 是否日历本（纯日历、混合、或服务器未声明） */
+  isEventBook(): boolean {
+    return this.comps === 'event' || this.comps === 'both' || this.comps === 'unknown';
   }
 }
 
@@ -179,7 +192,7 @@ struct EditAccountPage {
         return;
       }
       const list: EditCalendarItem[] = disc.entries.map((e: DavCalendarEntry): EditCalendarItem =>
-        new EditCalendarItem(e.href, e.displayName, e.color));
+        new EditCalendarItem(e.href, e.displayName, e.color, e.comps));
       if (list.length === 0) {
         LogUtil.write('编辑账号：未发现任何日历本');
         this.statusMsg = DavDiscovery.emptyHint(this.acc.serverUrl, this.acc.username);
@@ -246,6 +259,7 @@ struct EditAccountPage {
       target.calendarHrefs = newHrefs;
       target.calendarNames = selectedItems.map((c: EditCalendarItem): string => c.name);
       target.calendarColors = selectedItems.map((c: EditCalendarItem): string => c.color);
+      target.calendarComps = selectedItems.map((c: EditCalendarItem): string => c.comps);
       LogUtil.write(`编辑账号保存：id=${target.id}，新勾选 ${selectedItems.length}/${this.calendarList.length} 个日历本`);
       // 按 href 求出「旧序号 → 新序号」，迁移已落库日程到正确的 calKey
       // ⭐ 迁移前必须先删掉被取消勾选日历本的行（按 href）：
@@ -530,6 +544,22 @@ struct EditCalendarRow {
 
   build() {
     Row({ space: 12 }) {
+      // ⭐ SVG_ICON 类型图标：放在颜色圆点**前面**，
+      //    让用户先看清"这本是日历还是待办"，再看它是什么颜色。
+      //
+      //    用 SVG 而不是字符：字符图标（▦ / ✓）依赖系统字体字形，
+      //    笔画粗细与视觉重量不统一，跨设备还可能缺字形变成方框。
+      //    这两个 SVG 共用同一套笔触（stroke 2、round 端点、24×24），
+      //    渲染成 16vp 时重量一致。
+      //
+      //    混合本（both）：显示待办图标（它确实能存待办），
+      //    但用户看名字/颜色仍能分辨，不必塞两个图标挤在一行。
+      Image(this.item.comps === 'todo' || this.item.comps === 'both'
+        ? $r('app.media.ic_todo_book')
+        : $r('app.media.ic_event_book'))
+        .width(16)
+        .height(16)
+        .objectFit(ImageFit.Contain)
       if (this.item.color !== '') {
         Circle()
           .width(12)

@@ -3,8 +3,10 @@
 import { curves, router } from '@kit.ArkUI';
 import { buffer } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { DavAccount, AccountStore, TYPE_CALDAV } from '../common/AccountStore';
-import { DavClient, DavCalendarDiscovery, DavCalendarEntry } from '../common/DavClient';
+import { DavAccount, AccountStore, TYPE_CALDAV, TYPE_CARDDAV } from '../common/AccountStore';
+import { DavClient, DavCalendarDiscovery, DavCalendarEntry, DavAddressBookDiscovery,
+  DavAddressBookEntry } from '../common/DavClient';
+import { ContactService } from '../common/ContactService';
 import { DavDiscovery, DiscoverResult, DavCapability } from '../common/DavDiscovery';
 import { LogUtil } from '../common/LogUtil';
 
@@ -40,6 +42,8 @@ struct CalendarListPage {
   private serverUrl: string = '';
   private username: string = '';
   private password: string = '';
+  /** 本次添加的是 CalDAV 日历还是 CardDAV 通讯录 */
+  private accountType: string = TYPE_CALDAV;
 
   aboutToAppear(): Promise<void> {
     return this.initPage();
@@ -50,6 +54,8 @@ struct CalendarListPage {
     if (ctx !== undefined) {
       LogUtil.init(ctx);
     }
+    const t: string | undefined = AppStorage.get<string>('pendingAccountType');
+    this.accountType = (t === undefined || t === '') ? TYPE_CALDAV : t;
     this.serverUrl = AppStorage.get<string>('pendingDavUrl') ?? '';
     this.username = AppStorage.get<string>('pendingDavUsername') ?? '';
     this.password = AppStorage.get<string>('pendingDavPassword') ?? '';
@@ -61,7 +67,11 @@ struct CalendarListPage {
       this.statusOk = false;
       return;
     }
-    await this.fetchCalendars();
+    if (this.accountType === TYPE_CARDDAV) {
+      await this.fetchAddressBooks();
+    } else {
+      await this.fetchCalendars();
+    }
   }
 
   /**
@@ -88,6 +98,66 @@ struct CalendarListPage {
       const e = err as BusinessError;
       console.error(`Base64 编码失败: ${e.message}`);
       return '';
+    }
+  }
+
+  /**
+   * CardDAV：发现地址簿并填充列表。
+   * 与日历侧最大的不同：地址簿没有颜色概念，且必须先把家目录找对
+   * （群晖是 /carddav/，Nextcloud 是 /remote.php/dav/addressbooks/<user>/）。
+   */
+  private async fetchAddressBooks(): Promise<void> {
+    const token: string = this.encodeBasicAuth();
+    if (token === '') {
+      this.isLoading = false;
+      this.statusMsg = '凭据编码失败：请在真机或模拟器上运行';
+      this.statusOk = false;
+      return;
+    }
+    const auth: string = 'Basic ' + token;
+    this.isLoading = true;
+    this.statusMsg = '正在查找通讯录地址簿…';
+    try {
+      const disc: DavAddressBookDiscovery = await ContactService.discoverAddressBooks(
+        this.serverUrl, this.username, auth);
+      this.isLoading = false;
+      if (disc.statusCode === 401) {
+        this.statusMsg = '服务器拒绝凭据（401）：请返回检查用户名与密码。若服务器开启了二次验证，请使用「应用密码」';
+        this.statusOk = false;
+        return;
+      }
+      if (disc.entries.length === 0) {
+        // ⚠️ 207 但零地址簿，与 405「不是 DAV 端点」是两回事，提示要分开写，
+        //    否则用户会照着 405 的思路去改地址，白折腾。
+        const body: string = disc.statusCode === 207
+          ? `服务器接受了请求但没返回地址簿（207）。\n\n`
+            + '常见原因：\n'
+            + '1) 地址层级不对 —— 群晖要填到「用户名」那一层：\n'
+            + '   https://你的域名/carddav/你的用户名/\n'
+            + '2) 该账号下确实还没有地址簿（在 Synology Contacts 里新建一个）'
+          : `没有找到地址簿（服务器返回 ${disc.statusCode}）。\n\n`
+            + '请确认：\n'
+            + '1) 该服务器开启了 CardDAV（群晖需安装「Synology Contacts」）\n'
+            + '2) 地址可填域名，本页会自动尝试 /carddav/<用户名>/ 等常见路径';
+        this.statusMsg = body;
+        this.statusOk = false;
+        return;
+      }
+      const list: CalendarItem[] = disc.entries.map((e: DavAddressBookEntry): CalendarItem =>
+        new CalendarItem(e.href, e.displayName, ''));
+      for (const item of list) {
+        LogUtil.write(`发现地址簿：「${item.name}」${item.href}`);
+      }
+      this.calendarList = list;
+      this.updateSelectionState();
+      this.statusMsg = `发现 ${list.length} 个地址簿，请勾选要同步的通讯录`;
+      this.statusOk = true;
+    } catch (err) {
+      const e = err as BusinessError;
+      LogUtil.write(`查找地址簿失败：${e.message}`);
+      this.isLoading = false;
+      this.statusMsg = `查找地址簿失败：${e.message}`;
+      this.statusOk = false;
     }
   }
 
@@ -169,13 +239,13 @@ struct CalendarListPage {
       return;
     }
     if (this.accountName.trim() === '') {
-      this.statusMsg = '请先给这个日历账户起一个名字';
+      this.statusMsg = this.accountType === TYPE_CARDDAV ? '请先给这个通讯录账户起一个名字' : '请先给这个日历账户起一个名字';
       this.statusOk = false;
       return;
     }
     const selectedItems: CalendarItem[] = this.calendarList.filter((c: CalendarItem) => c.selected);
     if (selectedItems.length === 0) {
-      this.statusMsg = '请至少勾选一个日历本';
+      this.statusMsg = this.accountType === TYPE_CARDDAV ? '请至少勾选一个地址簿' : '请至少勾选一个日历本';
       this.statusOk = false;
       return;
     }
@@ -203,7 +273,9 @@ struct CalendarListPage {
       await AccountStore.addAccount(context, acc);
       AppStorage.setOrCreate<string>('pendingSyncAccountId', acc.id);
       this.getUIContext().getPromptAction()
-        .showToast({ message: `账号已保存，共 ${selectedItems.length} 个日历本` });
+        .showToast({ message: this.accountType === TYPE_CARDDAV
+          ? `账号已保存，共 ${selectedItems.length} 个地址簿`
+          : `账号已保存，共 ${selectedItems.length} 个日历本` });
       this.statusMsg = '保存成功';
       this.statusOk = true;
       this.clearPendingCredentials();

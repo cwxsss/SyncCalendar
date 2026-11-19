@@ -92,13 +92,30 @@ export class LocalEvent {
   kind: string = 'event';   // 'event' 日程 | 'todo' 待办（VTODO，只读展示）
   completed: boolean = false; // 待办是否已完成（STATUS:COMPLETED）
   rrule: string = '';       // 原始 RRULE（空 = 非重复）；显示时按规则展开多次发生
+  /** ⭐ 待办的 DTSTART（重复规则的基准日，毫秒；0 = 该条没有 DTSTART）。
+   *  与 startTime 必须分开：startTime 对 VTODO 是**截止时间 DUE**，
+   *  而 DTSTART 是 RRULE 的起点，两者语义不同、不能互相覆盖。 */
+  dtstart: number = 0;
   exdate: string = '';      // 原始 EXDATE 排除日期，分号分隔
   /** ⭐ RECURRENCE-ID：本行"覆盖"的是主事件的哪一次发生（毫秒，0 = 无/旧数据未回填）。
    *  只改标题时它等于 startTime；**把某次发生改期**时它才是原始时刻——
    *  排除主事件对应发生时必须用它，否则原时间会残留成"幽灵日程"。 */
   recurrenceId: number = 0;
+  /**
+   * 优先级，用 **iCal 原生值**：1=最高 … 9=最低，0=未设置。
+   * 直接存原生值，写回时零转换，也不会与服务器上其他客户端写下的值语义不一致。
+   */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 iCal CATEGORIES，多值用逗号连接） */
+  categories: string = '';
   reminder: number = 0;     // 主提醒提前分钟数（第一个提醒，兼容旧字段），0 = 不提醒
   reminders: number[] = []; // 全部提醒提前分钟数（多选），按添加顺序
+  /** 父任务 UID（空 = 顶层任务）。对应 VTODO 的 RELATED-TO:RELTYPE=PARENT。
+   *  用 UID 而非本地 id：父子关系是服务器资源属性，跨设备同步时 UID 才稳定。 */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串：[{name,mime,size,base64}]，空 = 无附件。
+   *  base64 直接存库，同步时拼 ATTACH 行零转换。 */
+  attachments: string = '';
 }
 
 /** 远端事件条目（REPORT 解析结果） */
@@ -109,6 +126,10 @@ export class RemoteEvent {
   title: string = '';
   description: string = '';
   location: string = '';
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
   startTime: number = 0;
   endTime: number = 0;
   isAllDay: boolean = false;
@@ -116,10 +137,24 @@ export class RemoteEvent {
   isTodo: boolean = false;    // VTODO 待办
   completed: boolean = false; // VTODO STATUS:COMPLETED
   rrule: string = '';         // 原始 RRULE
+  dtstart: number = 0;        // ⭐ VTODO 的 DTSTART（RRULE 基准），与 startTime(DUE) 分开
   exdate: string = '';        // 原始 EXDATE（分号分隔）
   recurrenceId: number = 0;   // 原始 RECURRENCE-ID（毫秒；0 = 无）
   reminder: number = 0;       // 主提醒提前分钟数（第一个提醒，兼容旧字段）
   reminders: number[] = [];   // 全部提醒提前分钟数（多选）
+  /** 父任务 UID（空 = 顶层任务）。 */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串（含 base64），空 = 无附件。 */
+  attachments: string = '';
+  /**
+   * ⭐ REMOTE_PATH 服务器上的真实资源文件名（REPORT 返回的 href 末段，已含 URL 编码）。
+   *
+   * 为什么不能用 uid 拼：服务器不保证「资源文件名 = ICS 里的 UID」。
+   * 家书 CalDav.php 用 `preg_replace('/[^A-Za-z0-9._-]/', '_', $uid)` 生成文件名，
+   * UID `movie-188@familybook` 的真实资源是 `movie-188_familybook.ics`。
+   * 猜错 ⇒ DELETE/PUT 打到不存在的路径 ⇒ 404，服务器上删不掉、或写出重复资源。
+   */
+  remotePath: string = '';
 }
 
 export class EventDb {
@@ -190,6 +225,31 @@ export class EventDb {
     }
     try {
       await store.executeSql("ALTER TABLE events ADD COLUMN rrule TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN parent_uid TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN attachments TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql('ALTER TABLE events ADD COLUMN priority INTEGER DEFAULT 0');
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql("ALTER TABLE events ADD COLUMN categories TEXT DEFAULT ''");
+    } catch (err) {
+      // 列已存在
+    }
+    try {
+      await store.executeSql('ALTER TABLE events ADD COLUMN dtstart INTEGER DEFAULT 0');
     } catch (err) {
       // 列已存在
     }
@@ -273,12 +333,16 @@ export class EventDb {
     const e = new LocalEvent();
     e.id = rs.getLong(rs.getColumnIndex('id'));
     e.uid = rs.getString(rs.getColumnIndex('uid'));
+    e.dtstart = rs.getLong(rs.getColumnIndex('dtstart'));
     e.calKey = rs.getString(rs.getColumnIndex('cal_key'));
     e.href = rs.getString(rs.getColumnIndex('href'));
     e.remotePath = rs.getString(rs.getColumnIndex('remote_path'));
     e.title = rs.getString(rs.getColumnIndex('title'));
     e.description = rs.getString(rs.getColumnIndex('description'));
     e.location = rs.getString(rs.getColumnIndex('location'));
+    e.priority = rs.getLong(rs.getColumnIndex('priority'));
+    const cats: string = rs.getString(rs.getColumnIndex('categories'));
+    e.categories = cats === undefined || cats === null ? '' : cats;
     e.startTime = rs.getLong(rs.getColumnIndex('start_time'));
     e.endTime = rs.getLong(rs.getColumnIndex('end_time'));
     e.isAllDay = rs.getLong(rs.getColumnIndex('is_all_day')) === 1;
@@ -294,6 +358,10 @@ export class EventDb {
     e.recurrenceId = rs.getLong(rs.getColumnIndex('recurrence_id'));
     e.reminder = rs.getLong(rs.getColumnIndex('reminder'));
     // 多提醒（逗号分隔分钟数）；旧数据无该列时回退单提醒
+    const pUid: string = rs.getString(rs.getColumnIndex('parent_uid'));
+    e.parentUid = (pUid === undefined || pUid === null) ? '' : pUid;
+    const att: string = rs.getString(rs.getColumnIndex('attachments'));
+    e.attachments = (att === undefined || att === null) ? '' : att;
     const remStr: string = rs.getString(rs.getColumnIndex('reminders'));
     if (remStr !== '') {
       e.reminders = remStr.split(',').map((s: string): number => Number(s))
@@ -326,7 +394,11 @@ export class EventDb {
       'exdate': e.exdate,
       'recurrence_id': e.recurrenceId,
       'reminder': e.reminders.length > 0 ? e.reminders[0] : 0,
-      'reminders': e.reminders.map((n: number): string => String(n)).join(',')
+      'reminders': e.reminders.map((n: number): string => String(n)).join(','),
+      'priority': e.priority,
+      'categories': e.categories,
+      'parent_uid': e.parentUid,
+      'attachments': e.attachments
     };
     return bucket;
   }
@@ -428,6 +500,90 @@ export class EventDb {
   }
 
   /** 全部未删除的待办（VTODO），未完成在前、按截止时间升序 */
+  /** 按本地行 id 查一行（待办完成时用来取 uid / href / remotePath / etag） */
+  /** 更新待办的完成状态与 etag（推送成功后调用，保证本地与服务器一致） */
+  /** 保存循环规则与基准（设置/取消循环后调用） */
+  static async updateTodoRecurrence(context: common.Context, id: number,
+    rrule: string, dtstart: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'rrule': rrule,
+      'dtstart': dtstart,
+      'recurring': rrule !== '' ? 1 : 0,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  /**
+   * 循环待办"完成一轮"后更新本地：推后的基准/截止 + 清除完成态。
+   *
+   * ⚠️ 必须同时把 completed 置 0、dirty 清掉：
+   *    否则界面会显示成"已完成"，而服务器上其实是"下一轮未完成"，两边不一致。
+   */
+  static async updateTodoAfterRound(context: common.Context, id: number,
+    dtstart: number, dueMs: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'dtstart': dtstart,
+      'start_time': dueMs,
+      'end_time': dueMs,
+      'completed': 0,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  /** 更新待办内容字段（标题 / 备注 / 截止时间）与 etag */
+  static async updateTodoFields(context: common.Context, id: number, title: string,
+    desc: string, dueMs: number, etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'title': title,
+      'description': desc,
+      'start_time': dueMs,
+      'etag': etag,
+      'dirty': 0
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  static async setTodoCompleted(context: common.Context, id: number, completed: boolean,
+    etag: string): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const values: relationalStore.ValuesBucket = {
+      'completed': completed ? 1 : 0,
+      'dirty': 0,
+      'etag': etag
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(values, predicates);
+  }
+
+  static async queryById(context: common.Context, id: number): Promise<LocalEvent | null> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    const rs = await store.query(predicates);
+    try {
+      if (rs.goToNextRow()) {
+        return EventDb.fromRow(rs);
+      }
+      return null;
+    } finally {
+      rs.close();
+    }
+  }
+
   static async queryTodos(context: common.Context): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
@@ -469,6 +625,72 @@ export class EventDb {
   }
 
   /** 未来 7 天内需要提醒的日程（reminder > 0），按开始时间升序 */
+  /**
+   * 查"未来窗口内需要提醒的未完成待办"（#38）。
+   *
+   * 与 queryRemindable（日程）的区别：
+   *   - `kind='todo'` 而不是 'event'
+   *   - **必须 `completed=0`** —— 已完成的待办不该再响
+   *   - 待办的提醒基准同样是 start_time（loadTodos 把 DUE 存进 startTime）
+   */
+  /**
+   * 单独更新待办的子任务/附件属性（updateTodoFields 只管标题/备注/截止）。
+   * @param touchParent true=写 parent_uid（空串=清空），false=不动
+   * @param touchAttach true=写 attachments（空串=清空），false=不动
+   */
+  static async setTodoHierarchy(context: common.Context, id: number, parentUid: string,
+    attachments: string, touchParent: boolean, touchAttach: boolean): Promise<void> {
+    if (!touchParent && !touchAttach) {
+      return;
+    }
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {};
+    if (touchParent) {
+      (bucket as Record<string, string>)['parent_uid'] = parentUid;
+    }
+    if (touchAttach) {
+      (bucket as Record<string, string>)['attachments'] = attachments;
+    }
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  /** 单独更新待办的提醒列表（updateTodoFields 只管标题/备注/截止三字段） */
+  static async setTodoReminders(context: common.Context, id: number,
+    reminders: number[]): Promise<void> {
+    const store = await EventDb.getDb(context);
+    const bucket: relationalStore.ValuesBucket = {
+      'reminder': reminders.length > 0 ? reminders[0] : 0,
+      'reminders': reminders.map((n: number): string => String(n)).join(',')
+    };
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('id', id);
+    await store.update(bucket, predicates);
+  }
+
+  static async queryRemindableTodos(context: common.Context, from: number,
+    to: number): Promise<LocalEvent[]> {
+    const store = await EventDb.getDb(context);
+    const predicates = new relationalStore.RdbPredicates('events');
+    predicates.equalTo('deleted', 0).and().equalTo('kind', 'todo')
+      .and().equalTo('completed', 0)
+      .and().greaterThan('reminder', 0)
+      .and().greaterThanOrEqualTo('start_time', from)
+      .and().lessThanOrEqualTo('start_time', to)
+      .orderByAsc('start_time').limitAs(50);
+    const rs = await store.query(predicates);
+    const list: LocalEvent[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        list.push(EventDb.fromRow(rs));
+      }
+    } finally {
+      rs.close();
+    }
+    return list;
+  }
+
   static async queryRemindable(context: common.Context, from: number, to: number): Promise<LocalEvent[]> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
@@ -521,16 +743,23 @@ export class EventDb {
     //    原先对每条都 `existing.find(...)` ⇒ O(n·m)（工作本 735 行 → 54 万次比较，
     //    每次还要现拼 `uid_startTime_recId` 字符串），2184 行全库累计近 100 万次。
     //    卡片后台同步的时间预算只有 9 秒，这笔开销吃不起 → 预先建 Map，改成 O(1) 查。
-    //    语义与 `existing.find(x => !x.dirty && x.uid===r.uid && x.startTime===r.startTime
-    //    && x.recurrenceId===r.recurrenceId)` 完全一致：dirty 行不入索引、同键取**最先**出现的那行。
+    //    dirty 行不入 `keyed`、同键取**最先**出现的那行。
+    //    ⭐ 但仅排除出 keyed不够（见下方 REVIVE_GUARD）：还需单独索引 dirty 行并主动拦截，
+    //       否则远端数据查不到 key 会走新增分支，反而插出重复行。
     const keyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
-    const dirtyDeletedUids: Set<string> = new Set<string>();
+    // ⭐ REVIVE_GUARD dirty 行**单独**建索引，而不是只从 keyed 里排除。
+    //    只排除不够：远端数据 keyed 查不到 → 走"新增"分支 → 又插一行，
+    //    本地就出现两行（用户改的 + 远端旧版），表现为"改完又变回去/出现两条"。
     const dirtyKeyed: Map<string, LocalEvent> = new Map<string, LocalEvent>();
+    // ⭐ 本地已标记删除、还没推给服务器的 uid 集合。
+    //    按 uid 而非 key：删重复系列时本地只留主事件标 deleted，
+    //    但远端还有一串 RECURRENCE-ID 实例行，key 各不相同，只有 uid 能整族挡住。
+    const dirtyDeletedUids: Set<string> = new Set<string>();
     for (const e of existing) {
+      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
       if (e.dirty && e.deleted) {
         dirtyDeletedUids.add(e.uid);
       }
-      const k: string = `${e.uid}_${e.startTime}_${e.recurrenceId}`;
       if (e.dirty) {
         if (!dirtyKeyed.has(k)) {
           dirtyKeyed.set(k, e);
@@ -553,11 +782,12 @@ export class EventDb {
         continue; // 同一资源内的重复条目 → 只保留一条
       }
       seenKeys.add(key);
+      // ⭐ REVIVE_GUARD 本地已删待推送 → 远端旧版本一律忽略，防止死灰复燃
       if (dirtyDeletedUids.has(r.uid)) {
-        continue; // 本地刚被用户删除待推送，忽略远端旧版本，防止被死灰复燃
+        continue;
       }
+      // ⭐ 本地有未推送的修改 → 保留本地版本，绝不能让远端旧版覆盖或重复插入
       if (dirtyKeyed.has(key)) {
-        // 本地该事件有修改待推送，保留本地版本，忽略远端旧版本，绝不能作为新事件重复插入
         continue;
       }
       const found: LocalEvent | undefined = keyed.get(key);
@@ -567,6 +797,7 @@ export class EventDb {
         e.uid = r.uid;
         e.calKey = calKey;
         e.href = href;
+        // ⭐ REMOTE_PATH 优先用服务器真实文件名；为空时才退回按 uid 猜（本地新建等场景）
         e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
         e.title = r.title;
         e.description = r.description;
@@ -585,6 +816,10 @@ export class EventDb {
         e.recurrenceId = r.recurrenceId;
         e.reminder = r.reminder;
         e.reminders = r.reminders;
+        e.priority = r.priority;
+        e.categories = r.categories;
+        e.parentUid = r.parentUid;
+        e.attachments = r.attachments;
         await store.insert('events', EventDb.toBucket(e));
         added++;
       } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
@@ -593,12 +828,15 @@ export class EventDb {
         || found.isAllDay !== r.isAllDay || found.title !== r.title
         || found.description !== r.description || found.location !== r.location
         || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
+        || found.priority !== r.priority || found.categories !== r.categories
+        || found.parentUid !== r.parentUid || found.attachments !== r.attachments
         || found.href !== href) {
         // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填；
         // href 变化也要更新——服务器上日历本被删除重建后集合 URL 变了，
         // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
         // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
         found.href = href;
+        // 服务器上资源被改名时同步更新，否则后续 DELETE/PUT 会打到旧路径
         if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
           found.remotePath = r.remotePath;
         }
@@ -619,19 +857,34 @@ export class EventDb {
         found.recurrenceId = r.recurrenceId;
         found.reminder = r.reminder;
         found.reminders = r.reminders;
+        found.priority = r.priority;
+        found.categories = r.categories;
+        found.parentUid = r.parentUid;
+        found.attachments = r.attachments;
         const up = new relationalStore.RdbPredicates('events');
         up.equalTo('id', found.id);
         await store.update(EventDb.toBucket(found), up);
         updated++;
       } else {
         unchanged++;
-        // etag 未变也要校正 href：日历本被删除重建后集合 URL 变化，etag 比对仍然全部命中，
-        // 不在这里刷新的话旧 URL 会一直残留在行上（见上方更新分支的注释）
+        // ⭐ UNCHANGED_REMOTE_PATH etag 未变是**常态路径**（REPORT 只给 etag，
+        //    未变就直接复用本地行、不 GET）。实测 742 行里 99% 走这里。
+        //    若只在"更新分支"回填 remotePath，对存量数据等于无效 ——
+        //    历史行里存的是旧的 uid 猜测值，而 DELETE/PUT 正是用它拼 URL，
+        //    拼错就 404（服务器上删不掉）。
+        //    所以这里必须一并校正 href 与 remotePath。
+        const hb: relationalStore.ValuesBucket = {};
         if (found.href !== href) {
           found.href = href;
+          hb['href'] = href;
+        }
+        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+          found.remotePath = r.remotePath;
+          hb['remote_path'] = r.remotePath;
+        }
+        if (Object.keys(hb).length > 0) {
           const hp = new relationalStore.RdbPredicates('events');
           hp.equalTo('id', found.id);
-          const hb: relationalStore.ValuesBucket = { 'href': href };
           await store.update(hb, hp);
         }
       }

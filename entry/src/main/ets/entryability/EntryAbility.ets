@@ -43,10 +43,12 @@ export default class EntryAbility extends UIAbility {
   private handleWidgetParam(want: Want): void {
     const params = want.parameters;
     if (params !== undefined) {
+      // ⭐ 白名单：日程卡片发 'add'，待办卡片发 'addTodo'（新建待办）/ 'openTodo'（进待办页）。
+      //    之前只认 'add'，待办卡片点 ＋ 毫无反应 —— 参数被静默丢弃。
       const raw = params['widgetAction'];
-      if (typeof raw === 'string' && raw === 'add') {
-        AppStorage.setOrCreate<string>('widgetAction', 'add');
-        LogUtil.write('卡片添加入口：已设置 widgetAction=add');
+      if (typeof raw === 'string' && (raw === 'add' || raw === 'addTodo' || raw === 'openTodo')) {
+        AppStorage.setOrCreate<string>('widgetAction', raw);
+        LogUtil.write(`卡片入口：已设置 widgetAction=${raw}`);
       }
       // 卡片点击进入日历时，定位到卡片当前显示的那一天（用户可能已翻到其他日期）
       const od = params['openDate'];

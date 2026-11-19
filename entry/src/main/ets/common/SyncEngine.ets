@@ -159,16 +159,26 @@ export class SyncEngine {
       const href: string = acc.calendarHrefs[i];
       const calKey: string = `${acc.id}_${i}`;
       const calName: string = i < acc.calendarNames.length ? acc.calendarNames[i] : `日历本${i}`;
-
-      // ⭐ #92 5xx 阶梯退避：若该本仍在退避冷却期内，直接跳过本轮同步，不发请求
-      if (i < acc.calendarNextRetry.length && acc.calendarNextRetry[i] > Date.now()) {
-        const remainingSec: number = Math.round((acc.calendarNextRetry[i] - Date.now()) / 1000);
-        LogUtil.write(`日历本[${i}]「${calName}」处于退避期（剩余 ${remainingSec} 秒），跳过`);
+      // ⭐ 退避检查（#92）：上次该本 5xx 后约定的重试时间还没到，本轮直接跳过，
+      //    不发任何请求。这是"日历本地址变化导致 500 时不要反复打服务器"的落点。
+      const nextRetry: number = i < acc.calendarNextRetry.length ? acc.calendarNextRetry[i] : 0;
+      if (nextRetry > Date.now()) {
+        const waitSec: number = Math.ceil((nextRetry - Date.now()) / 1000);
+        LogUtil.write(`日历本[${i}]「${calName}」处于退避期（还需等 ${waitSec} 秒），本轮跳过`);
         continue;
       }
-
       LogUtil.write(`日历本[${i}]「${calName}」开始同步：${href}`);
       const t1: number = Date.now();
+      // ⭐ 纯待办本（COMP_SET 只有 VTODO）不跑 event 通道。
+      //    实测群晖：对纯待办本做 event 的 REPORT 会返回文件列表，
+      //    里面其实是 VTODO 文件，被 parseEvents 解析成 0 条日程却仍落库
+      //    → 本地库出现 kind='event' 记录，而所在本是待办本。
+      //    后果：这条"假日程"在待办列表看不到（列表只查 kind='todo'），
+      //    但点它编辑会走日程通道，报"需要联网 + 日历本需可写"。
+      const thisComps: string = i < acc.calendarComps.length ? acc.calendarComps[i] : '';
+      if (thisComps === 'todo') {
+        LogUtil.write(`日历本[${i}]「${calName}」是纯待办本(COMP_SET=todo)，跳过 event 通道`);
+      } else {
       let items: RemoteItem[] = [];
       try {
         items = await DavClient.reportEtags(href, auth);
@@ -178,7 +188,9 @@ export class SyncEngine {
           deadIdxs.push(i);
           continue;
         }
-        // ⭐ #92 5xx 错误不再连坐整个账号，改为该本单独退避
+        // ⭐ #92 5xx（含 500）不再连坐：只跳过这一个本，其他本继续同步。
+        //    场景：日历本地址变更 / 服务器临时故障 → 对该本请求返回 500。
+        //    旧行为是 throw，导致整个账号同步失败，正常的本也白跑一轮。
         if (err instanceof DavHttpError && (err as DavHttpError).status >= 500) {
           const st: number = (err as DavHttpError).status;
           const fails: number = SyncEngine.bumpFailCount(acc, i);
@@ -191,6 +203,36 @@ export class SyncEngine {
         throw err as Error;
       }
       LogUtil.write(`日历本[${i}]「${calName}」REPORT 返回 ${items.length} 个资源`);
+      // ⭐ SYNC_TODOS 同步该本里的待办（VTODO）。
+      //    原来整个同步流程只处理 VEVENT，`DavClient.reportTodos` 写了却没人调用，
+      //    导致待办数据从来不会从服务器拉下来 ——
+      //    用户取消勾选本（触发 pruneStaleHrefs 清行）后再勾回来，待办就永久消失了。
+      //    放在这里（VEVENT 处理之前）单独走一遍，不影响原有日程逻辑。
+      try {
+        const todoItems: RemoteItem[] = await DavClient.reportTodos(href, auth);
+        if (todoItems.length > 0) {
+          const todoRemote: RemoteEvent[] = [];
+          for (const ti of todoItems) {
+            try {
+              const raw: string = await DavClient.getRawStrict(ti.href, auth);
+              const parsed: RemoteEvent[] = IcsUtil.parseTodos(raw);
+              for (const pr of parsed) {
+                pr.etag = ti.etag;
+                todoRemote.push(pr);
+              }
+            } catch (e) {
+              LogUtil.write(`待办 GET 失败(跳过) ${ti.href}`);
+            }
+          }
+          if (todoRemote.length > 0) {
+            await EventDb.applyRemote(context, calKey, href, todoRemote, true);
+            LogUtil.write(`日历本[${i}]「${calName}」待办同步：${todoRemote.length} 条`);
+          }
+        }
+      } catch (e) {
+        // 待办同步失败不能影响日程同步（很多服务器对 VTODO 查询返回 403/不支持）
+        LogUtil.write(`日历本[${i}]「${calName}」待办同步失败(忽略)：${(e as BusinessError).message ?? ''}`);
+      }
       // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
       const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
       const byUid: Map<string, LocalEvent[]> = new Map();
@@ -232,8 +274,9 @@ export class SyncEngine {
         if (!fullRefetch && group !== undefined && group.length > 0 && !group[0].dirty
           && group[0].etag === it.etag) {
           // etag 未变：直接用本地行还原远端数据（含 reminder 等完整字段）
+          const rp: string = it.href.substring(it.href.lastIndexOf('/') + 1);
           for (const row of group) {
-            remote.push(SyncEngine.rowToRemote(row, it.etag));
+            remote.push(SyncEngine.rowToRemote(row, it.etag, rp));
           }
           continue;
         }
@@ -252,6 +295,11 @@ export class SyncEngine {
               return [];
             }
             const resUid: string = SyncEngine.resUidFromHref(it.href);
+            // ⭐ REMOTE_PATH 服务器真实资源文件名（href 末段，已含 URL 编码）。
+            //    绝不能用 `encodeURIComponent(uid) + '.ics'` 去猜：
+            //    家书 CalDav.php 用 preg_replace('/[^A-Za-z0-9._-]/','_',uid) 生成文件名，
+            //    UID `movie-188@familybook` 的真实资源是 `movie-188_familybook.ics`。
+            //    猜错 ⇒ DELETE/PUT 打到不存在的路径 ⇒ 404，服务器上删不掉、或写出重复资源。
             const fileName: string = DavClient.fileNameFromHref(it.href);
             const parsed: RemoteEvent[] = IcsUtil.parse(raw);
             const out: RemoteEvent[] = [];
@@ -289,6 +337,8 @@ export class SyncEngine {
       const stat: string = await EventDb.applyRemote(context, calKey, href, remote, false);
       LogUtil.write(`日历本[${i}]「${calName}」日程落库完成：${stat}，耗时 ${Math.round((Date.now() - t1) / 1000)} 秒`);
       changed += remote.length;
+      } // end else（非纯待办本才跑 event 通道）
+
       // 3) 拉取该日历本下的待办（VTODO，只读展示，拉取失败不影响日程同步）
       try {
         const todoItems = await DavClient.reportTodos(href, auth);
@@ -312,6 +362,8 @@ export class SyncEngine {
         LogUtil.write(`日历本[${i}]「${calName}」待办：REPORT ${todoItems.length} 个资源，解析 ${remoteTodos.length} 条，${tstat}`);
       } catch (err) {
         // ⭐ #92 待办通道的 5xx 也要记退避。
+        //    原注释「待办失败不影响日程同步」针对的是 403（服务器不支持 VTODO），
+        //    那是能力问题；5xx 是服务器真故障，必须一并退避，否则本坏了还每轮打服务器。
         if (err instanceof DavHttpError && (err as DavHttpError).status >= 500) {
           const st: number = (err as DavHttpError).status;
           const fails: number = SyncEngine.bumpFailCount(acc, i);
@@ -325,6 +377,8 @@ export class SyncEngine {
         }
       }
       // ⭐ #92 该本本轮走完了（两通道都没抛出可退避的错误）→ 视为恢复，清空退避记录。
+      //    注意：上面若因 5xx 记了退避，这里的 clear 会把刚记的清掉 ——
+      //    所以只在"本轮没有新的失败记录"时才清。
       if (!(i < acc.calendarNextRetry.length && acc.calendarNextRetry[i] > Date.now())) {
         SyncEngine.clearBackoff(acc, i);
       }
@@ -571,11 +625,19 @@ export class SyncEngine {
   }
 
   /** 本地行 → 远端事件（etag 未变的资源复用本地完整数据，含 reminder） */
-  private static rowToRemote(e: LocalEvent, etag: string): RemoteEvent {
+  /**
+   * ⭐ REMOTE_PATH 第三个参数是当前 REPORT 返回的真实资源文件名（href 末段）。
+   *
+   * 为什么必须从外面传进来：本地行的 remotePath 可能是历史数据用 uid 猜出来的，
+   * 也可能是空的（本地新建后还没同步成功）。而 REPORT 的 href 反映的是
+   * **此刻服务器上的真实文件名**，比本地任何值都可靠。
+   */
+  private static rowToRemote(e: LocalEvent, etag: string, remotePath: string): RemoteEvent {
     const r = new RemoteEvent();
     r.uid = e.uid;
     r.remotePath = e.remotePath;
     r.etag = etag;
+    r.remotePath = remotePath !== '' ? remotePath : e.remotePath;
     r.title = e.title;
     r.description = e.description;
     r.location = e.location;
@@ -667,19 +729,27 @@ export class SyncEngine {
       }
       try {
         if (e.deleted) {
+          // ⭐ DELETE_404_PURGE 单条路径：deleteRemote 内部已把 404 视作成功，
+          //    这里再显式兜一层 410（Gone），并保证无论哪种"远端已无"都清本地。
+          let gone: boolean = false;
           try {
             await DavClient.deleteRemote(url, auth);
+            gone = true;
           } catch (delErr) {
             if (delErr instanceof DavHttpError) {
-              const st = (delErr as DavHttpError).status;
+              const st: number = (delErr as DavHttpError).status;
               if (st === 401) {
                 throw delErr as Error;
               }
-              if (st !== 404 && st !== 410) {
-                throw delErr as Error;
+              if (st === 404 || st === 410) {
+                gone = true;
+                LogUtil.write(`单条资源在服务器上已不存在(${st})，直接清理本地：uid=${e.uid}`);
               }
-              LogUtil.write(`服务器上该单条资源已不存在(${st})，直接清理本地：uid=${e.uid}`);
-            } else {
+            }
+            if (!gone) {
+              throw delErr as Error;
+            }
+          }
               throw delErr as Error;
             }
           }
@@ -740,22 +810,30 @@ export class SyncEngine {
     }
     // 整个系列被删除（主事件行 deleted 或触发者标记删除且无存活 master）→ DELETE 资源 + 清掉该 uid 全部本地行
     if (master.deleted || trigger.deleted) {
+      // ⭐ DELETE_404_PURGE 404/410 = 服务器上本就没有这个资源。
+      //    必须当成"删除成功"继续往下清本地，不能 return ——
+      //    否则本地行永远留着，用户看到"删不掉的日程"，且每次同步都重复失败。
+      //    典型诱因：remotePath 用 uid 猜错（服务器真实文件名不同）⇒ DELETE 打到不存在的路径。
+      let remoteGone: boolean = false;
       try {
         await DavClient.deleteRemote(url, auth);
+        remoteGone = true;
       } catch (err) {
         if (err instanceof DavHttpError) {
-          const st = (err as DavHttpError).status;
+          const st: number = (err as DavHttpError).status;
           if (st === 401) {
             throw err as Error;
           }
           if (st === 404 || st === 410) {
-            LogUtil.write(`服务器上该重复系列已不存在(${st})，直接清理本地：uid=${uid}`);
-          } else {
-            LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
-            return;
+            remoteGone = true;
+            LogUtil.write(`重复系列资源在服务器上已不存在(${st})，直接清理本地：uid=${uid}`);
           }
-        } else {
-          LogUtil.write(`推送删除重复系列失败：uid=${uid} → ${(err as Error).message}`);
+        }
+        if (!remoteGone) {
+          LogUtil.write(`推送删除重复系列失败(保留待推送)：uid=${uid} → ${(err as Error).message}`);
+          return;
+        }
+      }
           return;
         }
       }

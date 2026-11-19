@@ -30,6 +30,7 @@ export class DraftTransfer {
 /** 界面展示用事件 */
 export class DisplayEvent {
   id: number = 0;          // 本地库 id 或系统日历事件 id
+  uid: string = '';        // 服务器 UID（待办父子关系用它匹配 parentUid）
   isSystem: boolean = false;
   title: string = '';
   description: string = '';
@@ -44,6 +45,21 @@ export class DisplayEvent {
   kind: string = 'event';     // 'event' | 'todo'
   recurring: boolean = false; // 是否为重复日程展开出的发生
   rrule: string = '';         // 原始重复规则（待办/日程）
+  /** ⭐ 待办的 RRULE 原文（空 = 非循环）。与 recurring 不同：
+   *  recurring 只说"重不重复"，这里带的是"多久重复一次"。 */
+  recurRule: string = '';
+  /** 待办的 DTSTART（重复基准，毫秒；0 = 无） */
+  dtstart: number = 0;
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
+  /** 提醒提前分钟数（多选），空 = 不提醒 */
+  reminders: number[] = [];
+  /** 父任务 UID（空 = 顶层任务），对应 RELATED-TO */
+  parentUid: string = '';
+  /** 附件 JSON 数组字符串（含 base64），空 = 无附件 */
+  attachments: string = '';
   writable: boolean = true;   // 所属日历本是否可写（只读时点击显示详情而非编辑）
 }
 
@@ -137,6 +153,9 @@ export class CalendarDataService {
           const detected: boolean = acc.calendarWritable.length > i
             ? acc.calendarWritable[i] !== '0' : true;
           s.writable = detected && !manualKeys.includes(s.calKey);
+          // 透传本支持的类型（新建待办/日程时据此过滤，避免把待办写进纯日历本）
+          s.comps = i < acc.calendarComps.length && acc.calendarComps[i] !== ''
+            ? acc.calendarComps[i] : 'unknown';
           sources.push(s);
         }
       }
@@ -431,6 +450,11 @@ export class CalendarDataService {
       const found = sources.find((s: CalSource): boolean => s.calKey === key);
       return found !== undefined ? found.color : '#9AA0A6';
     };
+    // ⭐ 待办按日历本分组显示需要"本名"；原来只带 calKey，分组标题无法显示
+    const nameOf = (key: string): string => {
+      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      return found !== undefined ? found.name : '';
+    };
     try {
       const rows: LocalEvent[] = await EventDb.queryTodos(context);
       for (const e of rows) {
@@ -439,6 +463,7 @@ export class CalendarDataService {
         }
         const d = new DisplayEvent();
         d.id = e.id;
+        d.uid = e.uid;
         d.isSystem = false;
         d.title = e.title;
         d.description = e.description;
@@ -447,10 +472,18 @@ export class CalendarDataService {
         d.endTime = e.endTime;
         d.isAllDay = e.isAllDay;
         d.calKey = e.calKey;
+        d.calName = nameOf(e.calKey);
         d.color = colorOf(e.calKey);
         d.completed = e.completed;
         d.kind = 'todo';
         d.rrule = e.rrule;
+        d.priority = e.priority;
+        d.categories = e.categories;
+        d.reminders = e.reminders;
+        d.parentUid = e.parentUid;
+        d.attachments = e.attachments;
+        d.recurRule = e.rrule;
+        d.dtstart = e.dtstart;
         d.recurring = e.rrule !== '';
         result.push(d);
       }

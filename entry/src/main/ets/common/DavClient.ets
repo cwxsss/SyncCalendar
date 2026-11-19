@@ -18,6 +18,15 @@ export class DavColorEntry {
   color: string = '';  // 规范化后的 #RRGGBB，可能为空
   writable: boolean = true; // current-user-privilege 是否含 write 权限（默认可写）
   privilegeKnown: boolean = false; // 服务器是否返回了 current-user-privilege-set（未返回时需要写探测）
+  /**
+   * ⭐ COMP_SET 该集合支持的组件类型（来自 supported-calendar-component-set）。
+   *   'event'   = 纯日历本（只有 VEVENT）
+   *   'todo'    = 纯待办本（只有 VTODO）
+   *   'both'    = 混合本（两者都有）
+   *   'unknown' = 服务器未声明该属性（老实现常见）→ 按日历对待，保持兼容
+   */
+  comps: string = 'unknown';
+
 }
 
 /** 日历本集合条目（"添加/编辑账号"页列日历本用） */
@@ -25,6 +34,8 @@ export class DavCalendarEntry {
   href: string = '';        // 完整 URL（已补全域名）
   displayName: string = ''; // 显示名（服务器未给 displayname 时回退为路径末段）
   color: string = '';       // 规范化后的 #RRGGBB，可能为空
+  /** ⭐ COMP_SET 'event' 纯日历 / 'todo' 纯待办 / 'both' 混合 / 'unknown' 服务器未声明 */
+  comps: string = 'unknown';
 }
 
 /**
@@ -61,6 +72,8 @@ export class DavClient {
       'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
       '<d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
       '<d:current-user-privilege-set/>' +
+      // ⭐ COMP_SET 让服务器告诉我们这本是日历还是待办
+      '<c:supported-calendar-component-set xmlns:c="urn:ietf:params:xml:ns:caldav"/>' +
       '</d:prop></d:propfind>';
     const httpRequest = http.createHttp();
     try {
@@ -104,6 +117,7 @@ export class DavClient {
           color = DavClient.normalizeHex(DavClient.extractTag(block, 'calendar-color'));
         }
         entry.color = color;
+        entry.comps = DavClient.parseComps(block);
         // 写权限：current-user-privilege-set 存在且不含任何 write 权限 → 只读
         const privSet: string = DavClient.extractTag(block, 'current-user-privilege-set');
         if (privSet !== '') {
@@ -124,6 +138,33 @@ export class DavClient {
   }
 
   /**
+   * ⭐ COMP_SET 解析 supported-calendar-component-set，归一成四类：
+   *   event / todo / both / unknown
+   *
+   * 为什么 unknown 要单独存在：很多服务器（含自研实现）压根不返回这个属性。
+   * 这时不能武断判成"不是待办本"，否则用户原本能用的日历会被当成待办、
+   * 或者反过来把纯日历标成待办 —— 保守按"日历"对待，不破坏既有行为。
+   */
+  static parseComps(block: string): string {
+    const seg: string = DavClient.extractTag(block, 'supported-calendar-component-set');
+    if (seg === '') {
+      return 'unknown';
+    }
+    const event: boolean = /name\s*=\s*["']VEVENT["']/i.test(seg);
+    const todo: boolean = /name\s*=\s*["']VTODO["']/i.test(seg);
+    if (event && todo) {
+      return 'both';
+    }
+    if (todo) {
+      return 'todo';
+    }
+    if (event) {
+      return 'event';
+    }
+    return 'unknown';
+  }
+
+  /**
    * PROPFIND 列出某账号下所有「日历集合」（resourcetype 含 calendar）。
    *
    * 供「添加账号 / 编辑账号」两页复用，取代它们各自维护的一份同逻辑拷贝 ——
@@ -136,6 +177,7 @@ export class DavClient {
       '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/" ' +
       'xmlns:ical="http://apple.com/ns/ical/"><d:prop>' +
       '<d:displayname/><d:resourcetype/><cs:getcolor/><ical:calendar-color/>' +
+      '<c:supported-calendar-component-set xmlns:c="urn:ietf:params:xml:ns:caldav"/>' +
       '</d:prop></d:propfind>';
     const httpRequest = http.createHttp();
     const out = new DavCalendarDiscovery();
@@ -197,6 +239,9 @@ export class DavClient {
         entry.href = href.startsWith('http') ? href : origin + href;
         entry.displayName = name;
         entry.color = color;
+        entry.comps = DavClient.parseComps(block);
+        // COMPS_LOG 诊断：确认服务器有没有声明组件类型
+        LogUtil.write(`日历本组件类型 ${entry.displayName} → ${entry.comps}`);
         out.entries.push(entry);
       }
       return out;
@@ -248,6 +293,37 @@ export class DavClient {
   /** Basic Auth 头 */
   static authHeader(username: string, password: string): string {
     return 'Basic ' + buffer.from(`${username}:${password}`).toString('base64');
+  }
+
+  /**
+   * GET 拉取单个资源原文，**失败抛错**（与 getRaw 相反）。
+   *
+   * 为什么需要严格版：待办写回要"先 GET 原文、改字段、再 PUT"。
+   * 若 GET 失败却拿到一个 `"HTTP 404"` 之类的字符串并当 ICS 内容 PUT 回去，
+   * 会把服务器上那条待办**覆盖成一句错误信息**（数据破坏）。
+   * 原 getRaw 保留原行为不动（诊断用，已有调用方）。
+   */
+  static async getRawStrict(url: string, auth: string): Promise<string> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'text/calendar; charset=utf-8',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        connectTimeout: 10000,
+        readTimeout: 20000,
+        expectDataType: http.HttpDataType.STRING
+      });
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `拉取待办原文失败，服务器返回 ${resp.responseCode}`);
+      }
+      return resp.result as string;
+    } finally {
+      httpRequest.destroy();
+    }
   }
 
   /** GET 拉取单个资源的原始 ICS（调试诊断用） */
@@ -414,6 +490,52 @@ export class DavClient {
     return DavClient.reportComponents(href, auth, 'VTODO', '');
   }
 
+  /** PROPFIND Depth:1 列出某集合下所有资源的文件名（诊断用，不做组件过滤） */
+  static async listNames(href: string, auth: string): Promise<string[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(href, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 30000
+      });
+      const xml: string = resp.result as string;
+      LogUtil.write(`PROPFIND诊断 状态=${resp.responseCode} 响应体=${xml.length}字符`);
+      const out: string[] = [];
+      const re = /<[\w-]*:?href>([^<]+)<\/[\w-]*:?href>/gi;
+      let m: RegExpExecArray | null = re.exec(xml);
+      while (m !== null) {
+        const h: string = m[1];
+        if (h.indexOf('.ics') >= 0) {
+          out.push(decodeURIComponent(h.substring(h.lastIndexOf('/') + 1)));
+        }
+        m = re.exec(xml);
+      }
+      return out;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /** 不带 comp-filter 的全量 calendar-query（诊断用） */
+  static async reportAll(href: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' +
+      '<d:prop><d:getetag/><c:calendar-data/></d:prop>' +
+      '<c:filter><c:comp-filter name="VCALENDAR"/></c:filter>' +
+      '</c:calendar-query>';
+    return DavClient.reportRaw(href, auth, body, 'ALL');
+  }
+
   /** 通用 REPORT：按组件类型过滤拉取 calendar-data + getetag */
   private static async reportComponents(href: string, auth: string,
     compName: string, timeRange: string): Promise<RemoteItem[]> {
@@ -424,6 +546,12 @@ export class DavClient {
       `<c:comp-filter name="${compName}">` +
       timeRange +
       '</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>';
+    return DavClient.reportRaw(href, auth, body, compName);
+  }
+
+  /** 通用 REPORT 执行器：传完整 body，返回解析后的资源列表 */
+  static async reportRaw(href: string, auth: string, body: string,
+    compName: string): Promise<RemoteItem[]> {
     const httpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await httpRequest.request(href, {
@@ -450,6 +578,8 @@ export class DavClient {
       }
       const xml: string = resp.result as string;
       LogUtil.write(`HTTP REPORT(${compName}) 响应体 ${xml.length} 字符`);
+      LogUtil.write(`REPORT-诊断(${compName}) 前200字符: ${xml.substring(0, 200)}`);
+      LogUtil.write(`REPORT-诊断(${compName}) 含VTODO=${xml.indexOf('BEGIN:VTODO') >= 0} 含VEVENT=${xml.indexOf('BEGIN:VEVENT') >= 0} 响应数=${(xml.match(/<[\w-]*:?response[\s>]/gi) || []).length}`);
       const originMatch = /https?:\/\/[^/]+/i.exec(href);
       const origin: string = originMatch !== null ? originMatch[0] : '';
       const items: RemoteItem[] = [];
@@ -471,8 +601,17 @@ export class DavClient {
         const item = new RemoteItem();
         item.href = resHref.startsWith('http') ? resHref : origin + resHref;
         item.etag = etag;
-        item.ics = block.substring(start, end + 'END:VCALENDAR'.length);
+        // 还原 XML 实体（日程文本里出现 < & 时同样需要）
+        item.ics = DavClient.unescapeXmlEntities(
+          block.substring(start, end + 'END:VCALENDAR'.length));
         items.push(item);
+      }
+      LogUtil.write(`诊断 blocks=${blocks.length} items=${items.length} xml长=${xml.length}`);
+      for (let bi = 0; bi < blocks.length; bi++) {
+        const bb: string = blocks[bi];
+        if (!/<[\w-]*:?response[\s>]/i.test(bb)) { continue; }
+        const h: string = DavClient.extractTag(bb, "href");
+        LogUtil.write(`诊断 block${bi} len=${bb.length} href=[${h.substring(0,50)}] VCAL=${bb.indexOf("BEGIN:VCALENDAR")>=0} VTODO=${bb.indexOf("BEGIN:VTODO")>=0}`);
       }
       return items;
     } finally {
@@ -543,10 +682,347 @@ export class DavClient {
    * 与「十亿笑声」实体炸弹这类解析器层面的攻击面。
    * 另外 `tag` 只由本文件内的代码常量传入，不来自远端数据，故无需防注入。
    */
+  /**
+   * 还原 XML 实体。
+   *
+   * 🔴 为什么必须有（2026-11-11 实测群晖发现）：
+   *   vCard 正文是作为 **XML 文本节点**塞在 address-data 里的，
+   *   `<` `>` `&` 会被服务端转义成 `&lt;` `&gt;` `&amp;`。
+   *   例如群晖的标签行：
+   *       上传：item1.X-ABLABEL:_$!<CELL>!$_
+   *       回读：item1.X-ABLABEL:_$!&lt;CELL&gt;!$_
+   *   若不还原就存库，`&lt;` 会进入 raw 原文；下次「就地改字段 → PUT 回写」
+   *   就把 `&lt;` 写进服务器，**标签被永久写坏**，而且界面上看不出来。
+   *
+   * CalDAV 侧同理（SUMMARY 里出现 `<` 或 `&` 时会踩到），两处统一处理。
+   * ⚠️ 只还原五个预定义实体，不引入实体解析（避开 XXE，与 extractTag 一致）。
+   */
+  static unescapeXmlEntities(s: string): string {
+    if (s.indexOf('&') < 0) {
+      return s;
+    }
+    return s.replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      // &amp; 必须最后替换，否则 "&amp;lt;" 会被错误还原成 "<"
+      .replace(/&amp;/g, '&');
+  }
+
   static extractTag(xml: string, tag: string): string {
     const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
     const regex: RegExp = new RegExp(pattern, 'i');
     const match = regex.exec(xml);
-    return match !== null ? match[2].trim() : '';
+    // 属性值同样是 XML 文本节点，可能带实体（如 displayname 含 & 或 <）
+    return match !== null ? DavClient.unescapeXmlEntities(match[2].trim()) : '';
+  }
+}// ===== CardDAV 支持（#10）=====
+// 说明：地址簿（addressbook）与日历本（calendar）在 DAV 层面是**并列的两类集合**，
+// 发现方式相同（PROPFIND Depth:1 看 resourcetype），但内容类型不同：
+//   日历本 → calendar-query / calendar-data / BEGIN:VEVENT
+//   地址簿 → addressbook-query / address-data / BEGIN:VCARD
+// 这两组方法刻意与日历侧分开，不复用 reportComponents —— 两者的 XML 命名空间
+// （urn:ietf:params:xml:ns:caldav vs ...:carddav）与解析入口都不一样，
+// 硬凑一个"通用"函数会让两边都看不懂。
+
+/** 地址簿条目（添加账号时勾选用） */
+export class DavAddressBookEntry {
+  href: string = '';
+  displayName: string = '';
+  /** 服务器声明的描述（addressbook-description），可能为空 */
+  description: string = '';
+  /** 是否可写（current-user-privilege-set），未知时按可写处理 */
+  writable: boolean = true;
+}
+
+/** 地址簿发现结果（带状态码，便于区分 401 与其它异常） */
+export class DavAddressBookDiscovery {
+  statusCode: number = 0;
+  entries: DavAddressBookEntry[] = [];
+}
+
+export class DavCardDavClient {
+  /**
+   * PROPFIND Depth:1 列出地址簿集合。
+   * 判据＝resourcetype 含 `addressbook` —— 与日历侧"含 calendar"同理，
+   * 不能只看 displayname 或路径（服务器可任意命名集合）。
+   */
+  static async listAddressBooks(serverUrl: string, auth: string): Promise<DavAddressBookDiscovery> {
+    const requestBody: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop>' +
+      '<d:displayname/><d:resourcetype/>' +
+      '<d:current-user-privilege-set/>' +
+      '<card:addressbook-description/>' +
+      // supported-address-data 告诉服务器我们接受 vCard 3.0
+      '<card:supported-address-data/>' +
+      '</d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    const out = new DavAddressBookDiscovery();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(serverUrl, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: requestBody,
+        connectTimeout: 10000,
+        readTimeout: 20000
+      });
+      out.statusCode = resp.responseCode;
+      LogUtil.write(`HTTP PROPFIND(地址簿) ${serverUrl} → ${resp.responseCode}`);
+      if (resp.responseCode !== 207 && resp.responseCode !== 200) {
+        return out;
+      }
+      const xml: string = resp.result as string;
+      const originMatch = /https?:\/\/[^/]+/i.exec(serverUrl);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const href: string = DavClient.extractTag(block, 'href');
+        if (href === '') {
+          continue;
+        }
+        const resourcetype: string = DavClient.extractTag(block, 'resourcetype');
+        // 🔴 只认 addressbook。有些服务器（群晖）会在地址簿下再嵌套别的集合，
+        //    用 calendar 误判会把它当日历本，反之亦然。
+        if (!/addressbook/i.test(resourcetype)) {
+          continue;
+        }
+        const entry = new DavAddressBookEntry();
+        entry.href = href.startsWith('http') ? href : origin + href;
+        let name: string = DavClient.extractTag(block, 'displayname');
+        if (name === '') {
+          const segs: string[] = href.split('/').filter((s: string): boolean => s !== '');
+          if (segs.length > 0) {
+            const last: string = segs[segs.length - 1];
+            try {
+              name = decodeURIComponent(last);
+            } catch (err) {
+              name = last;
+            }
+          } else {
+            name = href;
+          }
+        }
+        entry.displayName = name;
+        entry.description = DavClient.extractTag(block, 'addressbook-description');
+        // 权限：只有明确出现 "write" 才算不可写，未返回则按可写（兼容缺省服务器）
+        const priv: string = DavClient.extractTag(block, 'current-user-privilege-set');
+        if (priv !== '' && !/>\s*write\s*</i.test(priv)) {
+          entry.writable = false;
+        }
+        LogUtil.write(`发现地址簿：「${entry.displayName}」${entry.href} 可写=${entry.writable}`);
+        out.entries.push(entry);
+      }
+      return out;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * REPORT addressbook-query 拉取地址簿内全部 vCard。
+   * 不传过滤器＝拉全部（联系人数量级远小于日程，且没有可靠时间范围可过滤）。
+   */
+  static async reportCards(bookHref: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop><d:getetag/><card:address-data content-type="text/vcard" version="3.0"/></d:prop>' +
+      '</card:addressbook-query>';
+    return DavCardDavClient.reportCardsRaw(bookHref, auth, body);
+  }
+
+  /** 只拉 ETag（不拉正文），用于"没变化就不重新解析" */
+  static async reportCardEtags(bookHref: string, auth: string): Promise<RemoteItem[]> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">' +
+      '<d:prop><d:getetag/></d:prop>' +
+      '</card:addressbook-query>';
+    return DavCardDavClient.reportCardsRaw(bookHref, auth, body);
+  }
+
+  private static async reportCardsRaw(bookHref: string, auth: string, body: string): Promise<RemoteItem[]> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(bookHref, {
+        method: 'REPORT' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '1',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 60000
+      });
+      console.info(`REPORT(CARD) ${bookHref} 响应码: ${resp.responseCode}`);
+      LogUtil.write(`HTTP REPORT(CARD) ${bookHref} → ${resp.responseCode}`);
+      if (resp.responseCode === 401) {
+        throw new DavHttpError(401, '服务器拒绝凭据(401)');
+      }
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `服务器返回状态码 ${resp.responseCode}`);
+      }
+      const xml: string = resp.result as string;
+      LogUtil.write(`HTTP REPORT(CARD) 响应体 ${xml.length} 字符`);
+      const originMatch = /https?:\/\/[^/]+/i.exec(bookHref);
+      const origin: string = originMatch !== null ? originMatch[0] : '';
+      const items: RemoteItem[] = [];
+      const blocks: string[] = xml.split(/<\/[\w-]*:?response>/i);
+      for (const block of blocks) {
+        if (!/<[\w-]*:?response[\s>]/i.test(block)) {
+          continue;
+        }
+        const resHref: string = DavClient.extractTag(block, 'href');
+        if (resHref === '') {
+          continue;
+        }
+        const item = new RemoteItem();
+        item.href = resHref.startsWith('http') ? resHref : origin + resHref;
+        item.etag = DavClient.extractTag(block, 'getetag').replace(/"/g, '');
+        // address-data 里可能是 CDATA 包裹，也可能直接是文本
+        const start: number = block.indexOf('BEGIN:VCARD');
+        const end: number = block.indexOf('END:VCARD');
+        if (start >= 0 && end >= 0) {
+          // 还原 XML 实体（见 unescapeXmlEntities 的说明）
+          item.ics = DavClient.unescapeXmlEntities(
+            block.substring(start, end + 'END:VCARD'.length));
+        } else {
+          // 只要 ETag 的查询走到这里，正文为空是正常的
+          item.ics = '';
+        }
+        items.push(item);
+      }
+      LogUtil.write(`REPORT(CARD) 解析出 ${items.length} 个资源`);
+      return items;
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * 查**单个资源**的 ETag（PROPFIND Depth:0）。
+   *
+   * 反向同步用它判断"远端这段时间有没有被别人改过"：
+   *   etag 与本地记录一致 → 远端没变，系统侧改动可以安全上行
+   *   etag 变了            → 远端也改了，冲突，保守起来按远端优先
+   *
+   * 为什么不复用 reportCardEtags：那个是对整个地址簿发 REPORT，
+   * 为了查一条资源的 etag 拉回全簿列表，联系人多了会很浪费。
+   */
+  static async getResourceEtag(url: string, auth: string): Promise<string> {
+    const body: string = '<?xml version="1.0" encoding="utf-8"?>' +
+      '<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>';
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: 'PROPFIND' as http.RequestMethod,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Depth': '0',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: body,
+        connectTimeout: 10000,
+        readTimeout: 20000
+      });
+      if (resp.responseCode === 404) {
+        return '';
+      }
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        LogUtil.write(`PROPFIND(单资源ETag) 异常 ${resp.responseCode}：${url}`);
+        return '';
+      }
+      const xml: string = resp.result as string;
+      return DavClient.extractTag(xml, 'getetag').replace(/"/g, '');
+    } catch (err) {
+      LogUtil.write(`PROPFIND(单资源ETag) 异常：${(err as Error).message}`);
+      return '';
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /** PUT 单张 vCard（Content-Type 为 text/vcard，不是 text/calendar） */
+  static async putCard(url: string, auth: string, vcard: string): Promise<string> {
+    const httpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await httpRequest.request(url, {
+        method: http.RequestMethod.PUT,
+        header: {
+          'Authorization': auth,
+          'Content-Type': 'text/vcard; charset=utf-8',
+          'User-Agent': 'SyncCalendar/1.0'
+        },
+        extraData: vcard,
+        connectTimeout: 10000,
+        readTimeout: 30000
+      });
+      console.info(`PUT(CARD) ${url} 响应码: ${resp.responseCode}`);
+      LogUtil.write(`HTTP PUT(CARD) ${url} → ${resp.responseCode}`);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new DavHttpError(resp.responseCode, `推送失败，服务器返回 ${resp.responseCode}`);
+      }
+      const headers = resp.header as Record<string, string>;
+      if (headers !== undefined && headers !== null) {
+        const etag = headers['ETag'] ?? headers['etag'] ?? '';
+        return typeof etag === 'string' ? etag.replace(/"/g, '') : '';
+      }
+      return '';
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  /**
+   * 地址簿端点的候选路径。
+   * 群晖：/carddav/ ；Nextcloud：/remote.php/dav/addressbooks/<user>/ ；
+   * Radicale：/<user>/ ；Baïkal：/dav.php/addressbooks/<user>/
+   */
+  static addressBookCandidates(base: string, username: string): string[] {
+    const out: string[] = [];
+    const m = /^https?:\/\/[^/]+/i.exec(base.trim());
+    if (m === null) {
+      return out;
+    }
+    const origin: string = m[0];
+    const u: string = encodeURIComponent(username);
+    const push = (p: string): void => {
+      const full: string = origin + p;
+      if (out.indexOf(full) < 0) {
+        out.push(full);
+      }
+    };
+    // 让用户填的地址本身先试（最常见：直接填对了地址簿家目录）
+    // ArkTS 无全局 URL 构造器，手工取 origin 之后的路径部分
+    const rest: string = base.trim().substring(origin.length);
+    push(rest === "" ? "/" : rest);
+    // 群晖 Synology Contacts
+    // 🔴 实测（2026-11-11）：`/carddav/` 只返回"集合自己"，**不列子地址簿**；
+    //    真正能列出地址簿的是 `/carddav/<用户名>/`。
+    //    只填域名时若只试 `/carddav/`，会得到 207 但 entries=0，
+    //    表现为"没有找到地址簿（服务器返回 207）"—— 极难排查。
+    //    ⇒ 带用户名的路径必须排在前面。
+    push(`/carddav/${u}/`);
+    push('/carddav/');
+    push('/carddav');
+    // Nextcloud / ownCloud
+    push(`/remote.php/dav/addressbooks/${u}/`);
+    push('/remote.php/dav/addressbooks/');
+    // Baïkal
+    push(`/dav.php/addressbooks/${u}/`);
+    // Radicale
+    push(`/${u}/`);
+    push('/');
+    return out;
   }
 }

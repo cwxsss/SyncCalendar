@@ -50,6 +50,24 @@ export class CardAllDay {
   isAllDay: boolean = true;
 }
 
+/** 待办卡片单条（4x4 / 6x4 列表用，带 localId 以支持卡片内直接打勾） */
+export class TodoCardItem {
+  /** 本地库主键 —— 卡片"打勾完成"时靠它定位要改哪一行 */
+  id: number = 0;
+  title: string = '';
+  /** 截止时间文字：'今天 18:00' / '明天' / '无日期' */
+  dueText: string = '';
+  /**
+   * 副行文字：截止时间 · 日历本（与 App 内 todoSubtitle 同款呈现）。
+   * 在数据侧拼好，卡片侧直接显示，避免各卡片各拼一遍导致不一致。
+   */
+  subText: string = '';
+  color: string = '#007DFF';
+  calName: string = '';
+  /** 是否已完成（已完成的不出现在待办卡片列表里，此字段留作扩展） */
+  completed: boolean = false;
+}
+
 /** 卡片整体数据 */
 export class CardData {
   eventsJson: string = '[]';
@@ -82,6 +100,15 @@ export class CardData {
   rangeCount: number = 0;    // 当前所选天数范围内的全部日程总数
   multiDayJson: string = '[]'; // CardDayGroup[] JSON（供多日列表渲染）
   nextRefreshMinutes: number = 30; // 智能计算的下次最佳刷新间隔（分钟，紧贴下一日程起止时刻）
+  // ===== 待办卡片专用字段（isTodoCard=true 时才有效）=====
+  /** 待办卡片列表：TodoCardItem[] JSON（按截止时间升序，未完成在前） */
+  todoListJson: string = '[]';
+  /** 未完成待办总数（2x2 / 2x4 卡片大数字） */
+  todoCount: number = 0;
+  /** 今日到期待办数（卡片副标题用） */
+  todoTodayCount: number = 0;
+  /** 是否待办卡片（卡片侧据此切换渲染分支） */
+  isTodoCard: boolean = false;
 }
 
 interface FormOffsetInfo {
@@ -243,17 +270,45 @@ export class CardDataService {
   }
 
   /** App 内同步完成后调用：刷新所有已添加的卡片 */
-  static async pushToAllForms(context: common.Context): Promise<void> {
+  /**
+   * 把待办数据合并进日程数据对象。
+   *
+   * ⭐ 抽出来的原因： EntryFormAbility.pushData 与 CardDataService.pushToAllForms
+   * 是两条独立的推送路径，之前只有前者做了合并，后者漏了 ⇒
+   * 待办卡片永远显示 0 条（todoCount 停在默认值）。
+   * 两处共用同一段逻辑，避免再出现"改一处忘一处"。
+   */
+  private static mergeTodoInto(ev: CardData, td: CardData): void {
+    ev.todoListJson = td.todoListJson;
+    ev.todoCount = td.todoCount;
+    ev.todoTodayCount = td.todoTodayCount;
+  }
+
+  /**
+   * @param excludeTodoId 乐观更新用：临时把该待办从**所有卡片**的列表与计数中排除
+   *                      （只影响卡片显示，不动数据库）。0 表示不排除。
+   */
+  static async pushToAllForms(context: common.Context, excludeTodoId: number = 0): Promise<void> {
     // 先恢复持久化的 formId（App 重启后内存注册表为空）
     await CardDataService.loadPersistedFormIds(context);
     if (CardDataService.formIds.length === 0) {
       return;
+    }
+    // ⭐ 待办数据与 dayOffset 无关（待办不翻页），只构建一次
+    let todoData: CardData | null = null;
+    try {
+      todoData = await CardDataService.buildTodoCardData(context, excludeTodoId);
+    } catch (err) {
+      console.error(`待办卡片数据构建失败: ${(err as BusinessError).message}`);
     }
     // 各卡片可能翻到了不同日期 → 按偏移分组构建，避免把用户翻走的日期拽回今天
     const cache: Map<string, formBindingData.FormBindingData> =
       new Map<string, formBindingData.FormBindingData>();
     const dataCache: Map<string, CardData> = new Map<string, CardData>();
     const fallbackData: CardData = await CardDataService.buildCardData(context, 0);
+    if (todoData !== null) {
+      CardDataService.mergeTodoInto(fallbackData, todoData);
+    }
     const fallback: formBindingData.FormBindingData =
       formBindingData.createFormBindingData(fallbackData);
     cache.set('0_1', fallback);
@@ -267,6 +322,9 @@ export class CardDataService {
       let cardDataObj: CardData | undefined = dataCache.get(cacheKey);
       if (binding === undefined || cardDataObj === undefined) {
         cardDataObj = await CardDataService.buildCardData(context, off, days);
+        if (todoData !== null) {
+          CardDataService.mergeTodoInto(cardDataObj, todoData);
+        }
         binding = formBindingData.createFormBindingData(cardDataObj);
         cache.set(cacheKey, binding);
         dataCache.set(cacheKey, cardDataObj);
@@ -533,7 +591,7 @@ export class CardDataService {
       data.multiDayJson = JSON.stringify(multiDayGroups);
       data.rangeCount = multiDayGroups.reduce((acc: number, g: CardDayGroup): number => acc + g.count, 0);
 
-      // ===== 2x4 卡片右侧：**当前时间之后最近的 2 条**日程 =====
+      // ===== 2x4 卡片右侧：**当前时间之后最近的若干条**日程（卡片可滚动，最多 15 条）=====
       // 规则：只取"还没开始"的有时间日程（startTime >= now），
       //      **排除全天 / 跨天**，按开始时间升序取前 2 条。
       //      不再区分"进行中 / 即将开始" —— 卡片上不再显示这些字样。
@@ -623,6 +681,111 @@ export class CardDataService {
       LogUtil.write(`卡片数据刷新：${items.length} 条，跨度 ${data.cardDays} 天(${data.rangeCount} 条)，今日 ${data.todayCount} 条，进行中 ${ongoingItems.length} 条，时间轴 ${tl.blocks.length} 块，下次刷新 ${data.nextRefreshMinutes} 分钟后`);
     } catch (err) {
       LogUtil.write(`卡片数据刷新失败: ${JSON.stringify(err)}`);
+    }
+    return data;
+  }
+
+  /**
+   * 卡片列表最多输出多少条待办。
+   * ⭐ 统一为 15：所有待办卡片都已改为可滚动（List + 虚拟化），
+   *    不必再为了"一屏放得下"而按卡片尺寸给不同上限。
+   */
+  private static readonly MAX_TODO_ITEMS: number = 15;
+
+  /**
+   * 构建**待办卡片**数据。
+   *
+   * 与 buildCardData 的区别：不查日程，只查 VTODO；输出 todoListJson + 统计数字。
+   * 复用同一个 CardData 类，靠 isTodoCard 标记，卡片侧据此走不同渲染分支
+   *（这样 FormExtension 的推送逻辑不用区分两种卡片，一套 binding 推所有卡片即可）。
+   */
+  /** @param excludeId 乐观更新用：临时把该 localId 从列表与计数中排除（不动数据库） */
+  static async buildTodoCardData(context: common.Context, excludeId: number = 0): Promise<CardData> {
+    const data = new CardData();
+    data.isTodoCard = true;
+    try {
+      LogUtil.init(context);
+      const now = new Date();
+      const weekCn: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      const fullWeekCn: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+      data.dateText = `今天 ${now.getMonth() + 1}月${now.getDate()}日 ${weekCn[now.getDay()]}`;
+      data.lunarText = LunarUtil.lunarDayText(now.getTime());
+      data.dateMd = `${now.getMonth() + 1}月${now.getDate()}日`;
+      data.weekday = fullWeekCn[now.getDay()];
+      data.dayOffset = 0;
+      data.isToday = true;
+      data.selectedDate = CardDataService.startOfDay(now.getTime());
+
+      const sources = await CalendarDataService.loadSources(context);
+      const todos: DisplayEvent[] = await CalendarDataService.loadTodos(context, sources);
+
+      // 只保留未完成；excludeId>0 时额外剔除该条（乐观更新，仅影响卡片显示）
+      const undone: DisplayEvent[] = todos.filter((e: DisplayEvent): boolean =>
+        !e.completed && (excludeId <= 0 || e.id !== excludeId));
+      const todayStart: number = CardDataService.startOfDay(now.getTime());
+      const todayEnd: number = todayStart + 86400000;
+
+      // 排序：有截止时间在前按升序；无截止时间在后（新建的在前）
+      const withDue: DisplayEvent[] = undone
+        .filter((e: DisplayEvent): boolean => e.endTime > 0)
+        .sort((a: DisplayEvent, b: DisplayEvent): number => a.endTime - b.endTime);
+      const noDue: DisplayEvent[] = undone
+        .filter((e: DisplayEvent): boolean => e.endTime <= 0)
+        .sort((a: DisplayEvent, b: DisplayEvent): number => b.id - a.id);
+
+      const orderedList: DisplayEvent[] = withDue.concat(noDue);
+      const p2 = (n: number): string => n < 10 ? '0' + n : String(n);
+
+      const items: TodoCardItem[] = [];
+      for (const e of orderedList) {
+        if (items.length >= CardDataService.MAX_TODO_ITEMS) {
+          break;
+        }
+        const it = new TodoCardItem();
+        it.id = e.id;
+        it.title = e.title === '' ? '(无标题)' : e.title;
+        it.color = e.color;
+        it.calName = e.calName;
+        it.completed = e.completed;
+        // 截止时间文字：今天 / 明天 / 昨天 / 逾期 / 具体日期 / 无日期
+        if (e.endTime <= 0) {
+          it.dueText = '无日期';
+        } else {
+          const due = new Date(e.endTime);
+          const dueDay: number = CardDataService.startOfDay(e.endTime);
+          const diffDays: number = Math.round((dueDay - todayStart) / 86400000);
+          const hm: string = `${p2(due.getHours())}:${p2(due.getMinutes())}`;
+          // 是否为"当天 0 点整" —— 只有日期的待办，不显示 00:00
+          const dateOnly: boolean = due.getHours() === 0 && due.getMinutes() === 0;
+          const timePart: string = dateOnly ? '' : ' ' + hm;
+          if (diffDays === 0) {
+            it.dueText = '今天' + timePart;
+          } else if (diffDays === 1) {
+            it.dueText = '明天' + timePart;
+          } else if (diffDays === -1) {
+            it.dueText = '昨天' + timePart;
+          } else if (diffDays < -1) {
+            it.dueText = `逾期 ${Math.abs(diffDays)} 天`;
+          } else if (diffDays > 1 && diffDays <= 7) {
+            it.dueText = `${due.getMonth() + 1}月${due.getDate()}日${timePart}`;
+          } else {
+            it.dueText = `${due.getMonth() + 1}/${due.getDate()}${timePart}`;
+          }
+        }
+        // 副行：截止时间 · 日历本（本名为空时只显示截止时间）
+        it.subText = it.calName !== '' ? `${it.dueText} · ${it.calName}` : it.dueText;
+        items.push(it);
+      }
+
+      data.todoListJson = JSON.stringify(items);
+      data.todoCount = undone.length;
+      data.todoTodayCount = withDue.filter((e: DisplayEvent): boolean =>
+        e.endTime >= todayStart && e.endTime < todayEnd).length;
+      // 今日到期条数也塞进 todayCount，让 2x2/2x4 复用同一套大数字排版
+      data.todayCount = data.todoCount;
+      LogUtil.write(`待办卡片数据刷新：未完成 ${undone.length} 条，今日到期 ${data.todoTodayCount} 条，列表输出 ${items.length} 条`);
+    } catch (err) {
+      LogUtil.write(`待办卡片数据刷新失败: ${JSON.stringify(err)}`);
     }
     return data;
   }

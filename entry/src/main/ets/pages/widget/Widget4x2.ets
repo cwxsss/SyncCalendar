@@ -30,7 +30,7 @@ struct Widget4x2Card {
   /** 卡片当前显示的那一天 0 点毫秒 —— 点卡片进 App 时定位到这一天 */
   @LocalStorageProp('selectedDate') selectedDate: number = 0;
 
-  /** 右侧最多渲染 2 条（数据侧已裁剪，这里再兜底截断） */
+  /** 右侧列表数据（可滚动；数据侧已按时间升序并限制在 15 条内） */
   private parseOngoing(): CardItem2x4[] {
     try {
       return JSON.parse(this.ongoingJson) as CardItem2x4[];
@@ -123,7 +123,7 @@ struct Widget4x2Card {
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+    .padding({ left: 6, right: 8, top: 4, bottom: 4 })
     .borderRadius(8)
     .backgroundColor('#F5F7FA')
     .onClick(() => {
@@ -224,17 +224,17 @@ struct Widget4x2Card {
         .strokeWidth(0.5)
         .color('#E5E5E5')
 
-      // ===== 右半：当前时间之后日程（支持向下滑动查看）=====
+      // ===== 右半：未来日程列表（可滚动，最多 15 条，支持向下滑动查看）=====
       Column() {
         if (this.parseOngoing().length === 0) {
           this.emptyHint()
         } else {
-          List({ space: 6 }) {
+          List({ space: 4 }) {
             ForEach(this.parseOngoing(), (item: CardItem2x4, idx: number) => {
               ListItem() {
                 this.ongoingRow(item)
               }
-            }, (item: CardItem2x4, idx: number) => `${idx}_${item.title}_${item.time}_${item.dateTag}`)
+            }, (item: CardItem2x4, idx: number) => `${idx}_${item.time}_${item.title}_${item.dateTag}`)
           }
           .width('100%')
           .layoutWeight(1)

@@ -3,11 +3,22 @@
 import { LocalEvent, RemoteEvent } from './EventDb';
 import { addLocalDays, normalizeAllDayRange, normalizeSingleDayIfFestival } from './LunarUtil';
 
+/** 解析 ATTACH 行得到的单个附件元数据（Index.ets 弹层也会用到，故 export） */
+export class AttachMeta {
+  name: string = '';
+  mime: string = '';
+  base64: string = '';
+}
+
 /** 解析出的远端日程（内部中间结构） */
 class ParsedEvent {
   uid: string = '';
   title: string = '';
   description: string = '';
+  /** 优先级，iCal 原生值：1=最高 … 9=最低，0=未设置 */
+  priority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  categories: string = '';
   location: string = '';
   startTime: number = 0;
   endTime: number = 0;
@@ -235,21 +246,669 @@ export class IcsUtil {
     return 0;
   }
 
+  /**
+   * ⭐ 在**服务器原文**上改写某个 VTODO 的完成状态，返回新的整份 ICS。
+   *
+   * 为什么不从本地字段重建：VTODO 上还有 SUMMARY / DESCRIPTION / DUE / PRIORITY /
+   * CATEGORIES / X-* 等大量字段，本地库只保存了其中少数几个。
+   * 若按本地字段重新拼一份 VTODO 再 PUT，等于**把没保存的字段全部删掉**（丢用户数据）。
+   * 因此这里只做"在原文上精确改那几行"，其余内容原样保留。
+   *
+   * 改动范围（按 RFC 5545，三者要一起维护，否则各客户端显示不一致）：
+   *   - `STATUS:COMPLETED` ⇄ `STATUS:NEEDS-ACTION`
+   *   - `COMPLETED:<UTC时间>`（完成时写入，取消完成时删除）
+   *   - `PERCENT-COMPLETE:100` ⇄ `PERCENT-COMPLETE:0`
+   *
+   * @param ics      服务器上的原始 .ics 全文
+   * @param uid      目标待办的 UID（一个资源里理论上只有一个 VTODO，但仍按 uid 定位更稳）
+   * @param done     true=标记完成；false=取消完成
+   * @returns        改写后的完整 ICS（调用方直接 PUT）
+   */
+  static rewriteTodoCompletion(ics: string, uid: string, done: boolean): string {
+    const crlf: string = '\r\n';
+    // 折行还原（RFC 5545 允许续行，续行以空格/Tab 开头）
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+    const nowUtc: string = IcsUtil.fmtUtcNow();
+
+    // ---------- 第 1 遍：找出"含目标 uid 的 VTODO"的 [begin, end] 行号区间 ----------
+    // 必须两遍：RFC 5545 不规定字段顺序，UID 可能出现在 STATUS 之后。
+    // 单遍实现会漏改（实测风险：STATUS 在前时 matched 仍为 false → 用户点了没反应）。
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let targetOrdinal: number = -1; // 目标 VTODO 是第几个块（0 基），供插入段按结构定位
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    let blockIdx: number = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        blockIdx++;
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+          targetOrdinal = blockIdx;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      // 找不到目标 uid：原样返回（调用方会 PUT 回去，内容未变，等于无操作）
+      return ics;
+    }
+
+    // ---------- 第 2 遍：在区间内改写状态字段 ----------
+    const out: string[] = [];
+    let sawStatus: boolean = false;
+    let sawPercent: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('STATUS:')) {
+        sawStatus = true;
+        out.push(done ? 'STATUS:COMPLETED' : 'STATUS:NEEDS-ACTION');
+        continue;
+      }
+      if (u.startsWith('COMPLETED')) {
+        continue; // 丢弃旧的，完成时下面统一补
+      }
+      if (u.startsWith('PERCENT-COMPLETE')) {
+        sawPercent = true;
+        out.push(done ? 'PERCENT-COMPLETE:100' : 'PERCENT-COMPLETE:0');
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺字段则在目标 VTODO 的 END 之前补齐（有的客户端缺 STATUS 就不显示完成态）
+    const extra: string[] = [];
+    if (!sawStatus) {
+      extra.push(done ? 'STATUS:COMPLETED' : 'STATUS:NEEDS-ACTION');
+    }
+    if (done) {
+      extra.push('COMPLETED:' + nowUtc);
+    }
+    if (!sawPercent) {
+      extra.push(done ? 'PERCENT-COMPLETE:100' : 'PERCENT-COMPLETE:0');
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // ⭐ 插入点必须按"结构"定位，不能按行号：
+    //    改动可能删掉了旧的 COMPLETED 行，out 与第一遍的 lines 行号已不对齐，
+    //    用行号定位会把字段写到 END:VTODO 之外（实测会落到 END:VCALENDAR 之后，
+    //    结构非法，部分服务端直接 400）。
+    //    这里重新数 VTODO 块，找到"第 targetOrdinal 个"块的 END 行插进去。
+    const result: string[] = [];
+    let vtodoIdx: number = -1;   // 当前处于第几个 VTODO 块内（-1=不在块内）
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        // 走到目标块的 END 之前先补字段
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
+        // ⚠️ 不要重置 vtodoIdx：它是全局块序号，重置会让下一块从 0 重新数，
+        //    多 VTODO 文件里永远匹配不到 targetOrdinal（静默失败）。
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      // 兜底（理论上不会发生）：退回到"整份文本末尾 END:VCALENDAR 之前"插入
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const head: string = tail0.substring(0, idxVc);
+        const tail: string = tail0.substring(idxVc);
+        const merged: string = head + extra.join(crlf) + crlf + tail;
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
+  /**
+   * 在**服务器原文**上改写 VTODO 的内容字段，返回新的整份 ICS。
+   *
+   * 只改三项，其余（PRIORITY / CATEGORIES / X-* / STATUS / COMPLETED …）原样保留：
+   *   - SUMMARY     标题
+   *   - DESCRIPTION 备注
+   *   - DUE         截止时间（dueMs<=0 → 删除该行）
+   *
+   * 与 rewriteTodoCompletion 相同的两遍处理：
+   *   ① 先定位含目标 uid 的 VTODO 块（RFC 5545 不规定字段顺序，不能边扫边改）
+   *   ② 再在块内替换/删除目标字段，缺失的在 END:VTODO 前补齐
+   */
+  static rewriteTodoFields(ics: string, uid: string, title: string,
+    desc: string, dueMs: number, priority: number = -1, categories: string = '',
+    location: string = '', reminders: number[] = [], parentUid: string = '',
+    attachments: string = '', touchParent: boolean = false,
+    touchAttach: boolean = false): string {
+    // priority === -1 表示"本次不改优先级"；0 表示"清空优先级"。
+    // 用 -1 而不是 0 做哨兵，因为 0 本身是合法语义（无优先级）。
+    const touchPriority: boolean = priority >= 0;
+    const touchCategories: boolean = categories !== '';
+    const touchLocation: boolean = location !== '';
+    const crlf: string = '\r\n';
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+
+    // ---- 第 1 遍：定位目标 VTODO 块 ----
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      return ics; // 找不到目标，原样返回
+    }
+
+    // ---- 第 2 遍：块内改写 ----
+    const out: string[] = [];
+    let sawSummary: boolean = false;
+    let sawDesc: boolean = false;
+    let sawDue: boolean = false;
+    let inAlarm: boolean = false;
+    let sawPriority: boolean = false;
+    let sawCategories: boolean = false;
+    let sawLocation: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('SUMMARY')) {
+        sawSummary = true;
+        if (title !== '') {
+          out.push('SUMMARY:' + IcsUtil.escape(title));
+        }
+        continue;
+      }
+      if (u.startsWith('DESCRIPTION')) {
+        sawDesc = true;
+        if (desc !== '') {
+          out.push('DESCRIPTION:' + IcsUtil.escape(desc));
+        }
+        continue;
+      }
+      if (u.startsWith('DUE')) {
+        sawDue = true;
+        if (dueMs > 0) {
+          out.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+        }
+        continue;
+      }
+      // 提醒：整段丢弃旧 VALARM，末尾按新列表重建（比逐行改 TRIGGER 简单且不会漏 ACTION/DESCRIPTION）
+      if (reminders.length > 0 && (u.startsWith('BEGIN:VALARM') || inAlarm)) {
+        if (u.startsWith('BEGIN:VALARM')) { inAlarm = true; }
+        if (u.startsWith('END:VALARM')) { inAlarm = false; }
+        continue;
+      }
+      // 父任务：touched 时才改写，否则原样保留（不误删别人写的 RELATED-TO）
+      if (u.startsWith('RELATED-TO')) {
+        if (touchParent) {
+          if (parentUid !== '') {
+            out.push(IcsUtil.parentLine(parentUid));
+          }
+          // parentUid 空 → 删除该行
+          continue;
+        }
+        out.push(line);
+        continue;
+      }
+      // 附件：touched 时整段重建（删所有旧 ATTACH，末尾统一写新的）
+      if (u.startsWith('ATTACH')) {
+        if (touchAttach) {
+          continue; // 丢弃旧 ATTACH，末尾统一写
+        }
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('PRIORITY') && touchPriority) {
+        sawPriority = true;
+        if (priority >= 1 && priority <= 9) {
+          out.push('PRIORITY:' + priority);
+        }
+        // priority===0 → 清空，不 push（等于删除该行）
+        continue;
+      }
+      if (u.startsWith('CATEGORIES') && touchCategories) {
+        sawCategories = true;
+        out.push('CATEGORIES:' + IcsUtil.escape(categories));
+        continue;
+      }
+      if (u.startsWith('LOCATION') && touchLocation) {
+        sawLocation = true;
+        out.push('LOCATION:' + IcsUtil.escape(location));
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺失字段补齐
+    const extra: string[] = [];
+    if (!sawSummary && title !== '') {
+      extra.push('SUMMARY:' + IcsUtil.escape(title));
+    }
+    if (!sawDesc && desc !== '') {
+      extra.push('DESCRIPTION:' + IcsUtil.escape(desc));
+    }
+    if (!sawDue && dueMs > 0) {
+      extra.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+    }
+    if (!sawPriority && touchPriority && priority >= 1 && priority <= 9) {
+      extra.push('PRIORITY:' + priority);
+    }
+    if (!sawCategories && touchCategories) {
+      extra.push('CATEGORIES:' + IcsUtil.escape(categories));
+    }
+    if (!sawLocation && touchLocation) {
+      extra.push('LOCATION:' + IcsUtil.escape(location));
+    }
+    if (touchParent && parentUid !== '') {
+      extra.push(IcsUtil.parentLine(parentUid));
+    }
+    if (touchAttach) {
+      const metas: AttachMeta[] = IcsUtil.jsonToAttachMeta(attachments);
+      for (const m of metas) {
+        extra.push(IcsUtil.attachLine(m));
+      }
+    }
+    // 提醒整体重建（上面已把旧 VALARM 整段跳过）
+    if (reminders.length > 0) {
+      const alarms: string = IcsUtil.valarms(reminders);
+      if (alarms !== '') {
+        // 去掉末尾的 CRLF（extra 每项会由 join(crlf) 拼接，带尾部换行会多一个空行）
+        let a: string = alarms;
+        while (a.length >= 2 && a.charAt(a.length - 2) === '\r' && a.charAt(a.length - 1) === '\n') {
+          a = a.substring(0, a.length - 2);
+        }
+        extra.push(a);
+      }
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // 按**结构**定位插入点（不能按行号：上面可能删掉了 DUE 行，行号已不对齐）
+    const result: string[] = [];
+    let vtodoIdx: number = -1;
+    let targetOrdinal: number = -1;
+    // 重新数出目标的块序号
+    {
+      let n: number = -1;
+      let inBlk: boolean = false;
+      let has: boolean = false;
+      for (let i = 0; i < out.length; i++) {
+        const u: string = upperOf(out[i]);
+        if (u.startsWith('BEGIN:VTODO')) {
+          n++;
+          inBlk = true;
+          has = false;
+          continue;
+        }
+        if (u.startsWith('UID:') && inBlk && out[i].substring(4).trim() === uid) {
+          has = true;
+          continue;
+        }
+        if (u.startsWith('END:VTODO') && inBlk) {
+          if (has && targetOrdinal < 0) {
+            targetOrdinal = n;
+          }
+          inBlk = false;
+        }
+      }
+    }
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
+        // ⚠️ 不要重置 vtodoIdx：它是全局块序号，重置会让下一块从 0 重新数，
+        //    多 VTODO 文件里永远匹配不到 targetOrdinal（静默失败）。
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const merged: string = tail0.substring(0, idxVc) + extra.join(crlf) + crlf
+          + tail0.substring(idxVc);
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
+  /**
+   * 按 FREQ 把时间往后推一个周期（用于"完成一个循环任务 → 生成下一次"）。
+   *
+   * ⚠️ 月份/年份推进要处理"月末溢出"：
+   *    1 月 31 日 + 1 个月 在 JS 里会得到 3 月 3 日（2 月没有 31 日）。
+   *    RFC 5545 规定这类"不存在的日期"应当**跳过**而非顺延，
+   *    但对家务类待办来说"顺延到 3 号"比"跳过整个月"更符合直觉，
+   *    这里采用**钳制到当月最后一天**（1/31 → 2/28），并注释说明取舍。
+   *
+   * @param freq  DAILY / WEEKLY / MONTHLY / YEARLY
+   * @param fromMs 基准时间
+   * @returns 下一周期的时间（同一天内时分秒保持不变）
+   */
+  /** 从 RRULE 原文取出 FREQ 值（DAILY / WEEKLY / MONTHLY / YEARLY）；取不到返回 DAILY */
+  static freqOfRrule(rrule: string): string {
+    const parts: string[] = rrule.split(';');
+    for (const part of parts) {
+      const idx: number = part.indexOf('=');
+      if (idx <= 0) {
+        continue;
+      }
+      const key: string = part.substring(0, idx).trim().toUpperCase();
+      if (key === 'FREQ') {
+        return part.substring(idx + 1).trim().toUpperCase();
+      }
+    }
+    return 'DAILY';
+  }
+
+  static incForFreq(freq: string, fromMs: number): number {
+    const d: Date = new Date(fromMs);
+    const f: string = freq.toUpperCase();
+    if (f === 'DAILY') {
+      return fromMs + 86400000;
+    }
+    if (f === 'WEEKLY') {
+      return fromMs + 7 * 86400000;
+    }
+    if (f === 'MONTHLY') {
+      const y: number = d.getFullYear();
+      const m: number = d.getMonth() + 1;
+      const day: number = d.getDate();
+      const lastDayOfNext: number = new Date(y, m + 1, 0).getDate();
+      return new Date(y, m, Math.min(day, lastDayOfNext),
+        d.getHours(), d.getMinutes(), d.getSeconds()).getTime();
+    }
+    if (f === 'YEARLY') {
+      const y: number = d.getFullYear() + 1;
+      const m: number = d.getMonth();
+      const day: number = d.getDate();
+      // 2/29 → 次年 2/28（闰年才有 29）
+      const lastDay: number = new Date(y, m + 1, 0).getDate();
+      return new Date(y, m, Math.min(day, lastDay),
+        d.getHours(), d.getMinutes(), d.getSeconds()).getTime();
+    }
+    return fromMs + 86400000;
+  }
+
+  /**
+   * 在**服务器原文**上写入循环规则（RRULE + DTSTART + DUE）。
+   *
+   * 只在这三处动，其余字段（SUMMARY/DESCRIPTION/PRIORITY/X-* …）原样保留。
+   *
+   * @param rrule   规则原文，如 `FREQ=WEEKLY`；空串 = 取消循环（删除 RRULE/DTSTART，保留 DUE）
+   * @param dtstart 重复基准（毫秒）；<=0 时用 dueMs 兜底
+   * @param dueMs   本轮的截止时间（毫秒）；<=0 表示无截止
+   */
+  static rewriteTodoRecurrence(ics: string, uid: string, rrule: string,
+    dtstart: number, dueMs: number): string {
+    const crlf: string = '\r\n';
+    const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
+    const lines: string[] = unfolded.split(/\r?\n/).map((s: string): string => s.replace(/\r$/, ''));
+    const upperOf = (s: string): string => s.toUpperCase();
+    const hasRule: boolean = rrule.trim() !== '';
+
+    // ---- 第 1 遍：定位目标 VTODO 块（RFC 5545 不规定字段顺序，必须两遍）----
+    let targetBegin: number = -1;
+    let targetEnd: number = -1;
+    let curBegin: number = -1;
+    let curHasUid: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const u: string = upperOf(lines[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        curBegin = i;
+        curHasUid = false;
+        continue;
+      }
+      if (u.startsWith('UID:') && curBegin >= 0) {
+        if (lines[i].substring(4).trim() === uid) {
+          curHasUid = true;
+        }
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (curBegin >= 0 && curHasUid && targetBegin < 0) {
+          targetBegin = curBegin;
+          targetEnd = i;
+        }
+        curBegin = -1;
+        curHasUid = false;
+      }
+    }
+    if (targetBegin < 0) {
+      return ics;
+    }
+
+    // ---- 第 2 遍：块内替换/删除 RRULE、DTSTART、DUE ----
+    const out: string[] = [];
+    let sawRule: boolean = false;
+    let sawStart: boolean = false;
+    let sawDue: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const u: string = upperOf(line);
+      const inTarget: boolean = i > targetBegin && i < targetEnd;
+      if (!inTarget) {
+        out.push(line);
+        continue;
+      }
+      if (u.startsWith('RRULE')) {
+        sawRule = true;
+        if (hasRule) {
+          out.push('RRULE:' + rrule.trim());
+        }
+        continue; // 取消循环时整行丢掉
+      }
+      if (u.startsWith('DTSTART')) {
+        sawStart = true;
+        if (hasRule && dtstart > 0) {
+          out.push('DTSTART:' + IcsUtil.fmtIcsTime(dtstart, false));
+        }
+        continue;
+      }
+      if (u.startsWith('DUE')) {
+        sawDue = true;
+        if (dueMs > 0) {
+          out.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+        }
+        continue;
+      }
+      out.push(line);
+    }
+
+    // 缺字段补齐
+    const extra: string[] = [];
+    if (hasRule) {
+      if (!sawRule) {
+        extra.push('RRULE:' + rrule.trim());
+      }
+      if (!sawStart && dtstart > 0) {
+        extra.push('DTSTART:' + IcsUtil.fmtIcsTime(dtstart, false));
+      }
+      if (!sawDue && dueMs > 0) {
+        extra.push('DUE:' + IcsUtil.fmtIcsTime(dueMs, false));
+      }
+    }
+    if (extra.length === 0) {
+      const plain: string = out.join(crlf);
+      return plain.endsWith(crlf) ? plain : plain + crlf;
+    }
+
+    // 按**结构**定位插入点（改动会删行，行号已不对齐）
+    let targetOrdinal: number = -1;
+    {
+      let n: number = -1;
+      let inBlk: boolean = false;
+      let has: boolean = false;
+      for (let i = 0; i < out.length; i++) {
+        const u: string = upperOf(out[i]);
+        if (u.startsWith('BEGIN:VTODO')) {
+          n++;
+          inBlk = true;
+          has = false;
+          continue;
+        }
+        if (u.startsWith('UID:') && inBlk && out[i].substring(4).trim() === uid) {
+          has = true;
+          continue;
+        }
+        if (u.startsWith('END:VTODO') && inBlk) {
+          if (has && targetOrdinal < 0) {
+            targetOrdinal = n;
+          }
+          inBlk = false;
+        }
+      }
+    }
+    // ⭐ RRULE_IDX_FIX vtodoIdx 是**全局块序号**，只在 BEGIN:VTODO 自增。
+    //    之前在这里的 END:VTODO 分支把它重置成 -1，导致每块都从 0 重新数，
+    //    多 VTODO 文件里永远匹配不到 targetOrdinal（第 2 块应为 1）⇒ RRULE 加不上。
+    const result: string[] = [];
+    let vtodoIdx: number = -1;
+    let inserted: boolean = false;
+    for (let i = 0; i < out.length; i++) {
+      const u: string = upperOf(out[i]);
+      if (u.startsWith('BEGIN:VTODO')) {
+        vtodoIdx++;
+        result.push(out[i]);
+        continue;
+      }
+      if (u.startsWith('END:VTODO')) {
+        if (!inserted && vtodoIdx === targetOrdinal) {
+          for (const ex of extra) {
+            result.push(ex);
+          }
+          inserted = true;
+        }
+        result.push(out[i]);
+        continue;
+      }
+      result.push(out[i]);
+    }
+    if (!inserted) {
+      const tail0: string = result.join(crlf);
+      const idxVc: number = tail0.lastIndexOf('END:VCALENDAR');
+      if (idxVc > 0) {
+        const merged: string = tail0.substring(0, idxVc) + extra.join(crlf) + crlf
+          + tail0.substring(idxVc);
+        return merged.endsWith(crlf) ? merged : merged + crlf;
+      }
+      for (const ex of extra) {
+        result.push(ex);
+      }
+    }
+    const text2: string = result.join(crlf);
+    return text2.endsWith(crlf) ? text2 : text2 + crlf;
+  }
+
   /** 解析 VCALENDAR 中的 VTODO 待办列表（待办为只读展示，不参与推送） */
   static parseTodos(ics: string): RemoteEvent[] {
     const unfolded: string = ics.replace(/\r?\n[ \t]/g, '');
     const lines: string[] = unfolded.split(/\r?\n/);
     const parsed: RemoteEvent[] = [];
     let current: RemoteEvent | null = null;
+    let curAttaches: AttachMeta[] = [];
     for (const line of lines) {
       const upper: string = line.toUpperCase();
       if (upper.startsWith('BEGIN:VTODO')) {
         current = new RemoteEvent();
         current.isTodo = true;
+        curAttaches = [];
         continue;
       }
       if (upper.startsWith('END:VTODO')) {
         if (current !== null && current.uid !== '') {
+          // 附件：把收集到的 AttachMeta 序列化成 JSON 存进 RemoteEvent
+          if (curAttaches.length > 0) {
+            current.attachments = IcsUtil.attachMetaToJson(curAttaches);
+          }
           parsed.push(current);
         }
         current = null;
@@ -273,10 +932,28 @@ export class IcsUtil {
         current.description = IcsUtil.unescape(value);
       } else if (propName === 'LOCATION') {
         current.location = IcsUtil.unescape(value);
+      } else if (propName === 'PRIORITY') {
+        // iCal 原生值：1=最高 … 9=最低，0/缺失=未设置。直接存，不二次映射。
+        const pv: number = parseInt(value, 10);
+        current.priority = isNaN(pv) ? 0 : pv;
+      } else if (propName === 'CATEGORIES') {
+        // 多标签用逗号分隔；iCal 允许多个 CATEGORIES 行，这里取最后一行即可
+        // （本应用写回时只写一行，读别人的多行时最后一行足够用）
+        current.categories = IcsUtil.unescape(value);
       } else if (propName === 'RRULE') {
         current.recurring = true;
-        current.rrule = value;
-      } else if (propName === 'DUE' || propName === 'DTSTART') {
+        // ⭐ 保存规则原文：原来只置了 recurring 标志，规则本身被丢掉，
+        //    导致「知道它重复，但不知道多久重复一次」。
+        current.rrule = value.trim();
+      } else if (propName === 'DTSTART') {
+        // ⭐ DTSTART 单独存：它是 RRULE 的重复基准，**不是**截止时间。
+        //    原来与 DUE 共用 startTime，谁后出现谁覆盖 ⇒ 循环任务基准错乱。
+        const isDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
+        const t = IcsUtil.parseTime(value, isDateOnly, IcsUtil.isUtcTzid(propPart));
+        if (t !== null) {
+          current.dtstart = t.time;
+        }
+      } else if (propName === 'DUE') {
         const isDateOnly: boolean = IcsUtil.isDateOnlyProp(propPart);
         const t = IcsUtil.parseTime(value, isDateOnly, IcsUtil.isUtcTzid(propPart));
         if (t !== null) {
@@ -288,6 +965,20 @@ export class IcsUtil {
       } else if (propName === 'STATUS') {
         if (value.toUpperCase() === 'COMPLETED') {
           current.completed = true;
+        }
+      } else if (propName === 'RELATED-TO') {
+        // 父任务 UID。RELTYPE 参数默认 PARENT（本应用的语义）；
+        // 其他客户端可能不带参数，值就是父 UID，直接取。
+        current.parentUid = value;
+      } else if (propName === 'ATTACH') {
+        // 只收集内联 base64；URI 形式（ATTACH:http://...）暂不落库（服务器不支持托管，
+        // 且外部链接意义不大）。别人客户端写入的 URI 附件这里跳过、不报错。
+        if (propPart.toUpperCase().includes('ENCODING=BASE64')) {
+          const meta = new AttachMeta();
+          meta.base64 = value;
+          meta.mime = IcsUtil.paramValue(propPart, 'FMTTYPE');
+          meta.name = IcsUtil.paramValue(propPart, 'X-FILENAME');
+          curAttaches.push(meta);
         }
       }
     }
@@ -312,6 +1003,161 @@ export class IcsUtil {
       'CALSCALE:GREGORIAN\r\n' +
       IcsUtil.vevent(e, now) +
       'END:VCALENDAR\r\n';
+  }
+
+  /**
+   * 从零构造一份 VTODO 资源（新建待办用）。
+   *
+   * @param uid   待办全局唯一标识
+   * @param title 标题
+   * @param desc  备注（可为空，空则不写 DESCRIPTION）
+   * @param dueMs 截止时间毫秒（0 = 无截止时间，不写 DUE）
+   * @param dueIsDateOnly 截止时间是否"只有日期无时刻"（true 写 `DUE;VALUE=DATE`）
+   */
+  static buildTodo(uid: string, title: string, desc: string, dueMs: number,
+    dueIsDateOnly: boolean, priority: number = 0, categories: string = '',
+    location: string = '', reminders: number[] = [], parentUid: string = '',
+    attachments: string = ''): string {
+    const now: string = IcsUtil.fmtUtcNow();
+    let out: string = 'BEGIN:VCALENDAR\r\n' +
+      'VERSION:2.0\r\n' +
+      'PRODID:-//SyncCalendar//Calendar//CN\r\n' +
+      'CALSCALE:GREGORIAN\r\n' +
+      'BEGIN:VTODO\r\n' +
+      `UID:${uid}\r\n` +
+      `DTSTAMP:${now}\r\n` +
+      `SUMMARY:${IcsUtil.escape(title)}\r\n`;
+    if (desc !== '') {
+      out += `DESCRIPTION:${IcsUtil.escape(desc)}\r\n`;
+    }
+    if (dueMs > 0) {
+      if (dueIsDateOnly) {
+        out += `DUE;VALUE=DATE:${IcsUtil.fmtIcsTime(dueMs, true)}\r\n`;
+      } else {
+        out += `DUE:${IcsUtil.fmtIcsTime(dueMs, false)}\r\n`;
+      }
+    }
+    // 新建待办一律"未开始"，完成态由 setCompleted 切换到 COMPLETED
+    out += 'STATUS:NEEDS-ACTION\r\n';
+    out += IcsUtil.todoExtras(priority, categories, location);
+    if (parentUid !== '') {
+      out += IcsUtil.parentLine(parentUid) + '\r\n';
+    }
+    // 附件：内联 base64，可多条
+    const metas: AttachMeta[] = IcsUtil.jsonToAttachMeta(attachments);
+    for (const m of metas) {
+      out += IcsUtil.attachLine(m) + '\r\n';
+    }
+    // VALARM：VTODO 的 TRIGGER 相对 DUE（RFC 5545 §3.8.6.3），
+    // 所以复用现有 valarm() 生成的 -PT5M 就是"到期前 5 分钟"
+    out += IcsUtil.valarmsPublic(reminders);
+    out += 'END:VTODO\r\n';
+    out += 'END:VCALENDAR\r\n';
+    return out;
+  }
+
+  /**
+   * 生成 VTODO 的扩展属性行（PRIORITY / CATEGORIES / LOCATION）。
+   *
+   * 抽成方法的原因：新建（buildTodo）与改写（rewriteTodoFields）都要写这三行，
+   * 逻辑必须一致，否则新建的和改过的会生成不同结构。
+   *
+   * @param priority  iCal 原生值 1(最高)…9(最低)；0 或非法值 = 不写
+   * @param categories 逗号分隔的标签；空 = 不写
+   * @param location   地点文本；空 = 不写
+   */
+  /** 从属性串里取参数值（如 propPart = "ATTACH;FMTTYPE=text/plain;X-FILENAME=报告.pdf"）。 */
+  private static paramValue(propPart: string, paramName: string): string {
+    const parts: string[] = propPart.split(';');
+    for (let i = 1; i < parts.length; i++) {
+      const seg: string = parts[i];
+      const eq: number = seg.indexOf('=');
+      if (eq > 0 && seg.substring(0, eq).toUpperCase() === paramName.toUpperCase()) {
+        return seg.substring(eq + 1).replace(/^"|"$/g, '');
+      }
+    }
+    return '';
+  }
+
+  /** AttachMeta[] → JSON 字符串（存库用）。 */
+  static attachMetaToJson(list: AttachMeta[]): string {
+    if (list.length === 0) {
+      return '';
+    }
+    const arr: string[] = [];
+    for (const a of list) {
+      arr.push(JSON.stringify({ name: a.name, mime: a.mime, base64: a.base64 }));
+    }
+    return '[' + arr.join(',') + ']';
+  }
+
+  /** JSON 字符串 → AttachMeta[]（解析库值用）。 */
+  static jsonToAttachMeta(json: string): AttachMeta[] {
+    if (json === '') {
+      return [];
+    }
+    try {
+      const arr = JSON.parse(json) as Record<string, string>[];
+      const out: AttachMeta[] = [];
+      for (const o of arr) {
+        const m = new AttachMeta();
+        m.name = o.name ?? '';
+        m.mime = o.mime ?? 'application/octet-stream';
+        m.base64 = o.base64 ?? '';
+        if (m.base64 !== '') {
+          out.push(m);
+        }
+      }
+      return out;
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 生成一条内联 base64 的 ATTACH 行（已折行）。 */
+  private static attachLine(meta: AttachMeta): string {
+    let head: string = 'ATTACH';
+    if (meta.mime !== '') {
+      head += `;FMTTYPE=${meta.mime}`;
+    }
+    head += ';ENCODING=BASE64;VALUE=BINARY';
+    if (meta.name !== '') {
+      // 逗号/分号属性值里要转义；文件名通常是中文或普通字符，稳妥起见转义
+      head += `;X-FILENAME=${meta.name}`;
+    }
+    return IcsUtil.foldLine(head + ':' + meta.base64);
+  }
+
+  /** 生成 RELATED-TO 行（父任务）。 */
+  private static parentLine(parentUid: string): string {
+    return `RELATED-TO;RELTYPE=PARENT:${parentUid}`;
+  }
+
+  /**
+   * RFC 5545 折行：本工程**有意不折**，直通返回。
+   *
+   * 为什么不做折行：
+   * 1. 现有 SUMMARY/DESCRIPTION/LOCATION/CATEGORIES 一贯整行输出，未做折行；
+   * 2. 目标服务器（群晖）实测 3792 字符整行 ATTACH 也能 PUT→201、GET 原样保留；
+   * 3. 折行是 RFC 5545 的 SHOULD 而非 MUST；一致性优先；
+   * 4. 折行若按 75 字符硬切，会把 UTF-8 中文名（如「报告.pdf」）拦腰切断成乱码。
+   */
+  static foldLine(line: string): string {
+    return line;
+  }
+
+  static todoExtras(priority: number, categories: string, location: string): string {
+    let out: string = '';
+    if (priority >= 1 && priority <= 9) {
+      out += `PRIORITY:${priority}\r\n`;
+    }
+    if (categories !== '') {
+      out += `CATEGORIES:${IcsUtil.escape(categories)}\r\n`;
+    }
+    if (location !== '') {
+      out += `LOCATION:${IcsUtil.escape(location)}\r\n`;
+    }
+    return out;
   }
 
   /**
@@ -461,6 +1307,11 @@ export class IcsUtil {
   }
 
   /** 由提醒分钟数组生成多个 VALARM（已规范化去重） */
+  /** 供待办侧复用的公开包装（VTODO 的 VALARM 与 VEVENT 格式相同） */
+  static valarmsPublic(minutes: number[]): string {
+    return IcsUtil.valarms(minutes);
+  }
+
   private static valarms(minutes: number[]): string {
     let out: string = '';
     for (const m of minutes) {

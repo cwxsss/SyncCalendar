@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 日历本图标：线性风格，与 todo_book 同一套笔触（stroke 2, round 端点） -->
+  <rect x="3" y="5" width="18" height="16" rx="3" fill="none" stroke="#666666" stroke-width="2"/>
+  <path d="M3 10 H21" fill="none" stroke="#666666" stroke-width="2" stroke-linecap="round"/>
+  <!-- 两个挂环 -->
+  <path d="M8 3 V7" fill="none" stroke="#666666" stroke-width="2" stroke-linecap="round"/>
+  <path d="M16 3 V7" fill="none" stroke="#666666" stroke-width="2" stroke-linecap="round"/>
+  <!-- 日期格：用两个小方块暗示"日程格" -->
+  <rect x="7" y="13" width="3.5" height="3.5" rx="1" fill="#666666"/>
+  <rect x="13.5" y="13" width="3.5" height="3.5" rx="1" fill="#666666"/>
+</svg>

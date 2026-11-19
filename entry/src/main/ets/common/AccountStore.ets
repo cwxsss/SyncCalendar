@@ -58,6 +58,14 @@ export class DavAccount {
   /** 各日历本写权限（'1'=可写 '0'=只读），与 calendarHrefs 一一对应；空数组表示未知（按可写处理） */
   calendarWritable: string[] = [];
   /**
+   * ⭐ COMP_SET 各日历本支持的组件类型，与 calendarHrefs 一一对应：
+   *   'event'   纯日历本（只有 VEVENT）
+   *   'todo'    纯待办本（只有 VTODO）
+   *   'both'    混合本
+   *   'unknown' 服务器未声明 → 按日历对待（旧数据也走这里，保持兼容）
+   */
+  calendarComps: string[] = [];
+  /**
    * ⭐ 各本连续失败次数（#92）：与 calendarHrefs 同下标。
    *   null 表示该位无记录（旧数据或从未失败）。
    */
@@ -80,6 +88,14 @@ export class CalSource {
   source: string = 'dav'; // 'dav' | 'system' | 'local'
   visible: boolean = true;
   writable: boolean = true; // 只读日历本中的日程只能查看详情，不能编辑
+  /**
+   * 本支持哪些组件（来自服务器 COMP_SET 声明）：
+   *   'event'   纯日历本（新建日程可选，新建待办不可选）
+   *   'todo'    纯待办本（反过来）
+   *   'both'    两者都可
+   *   'unknown' 服务器未声明 → 两边都按可用处理（旧数据兼容）
+   */
+  comps: string = 'unknown';
 }
 
 /** 与 UI 无关的调色板 */
@@ -499,10 +515,14 @@ export class AccountStore {
       acc.calendarWritable = parts[11] === '' ? [] : parts[11].split(';');
     }
     if (parts.length >= 13) {
-      acc.calendarFailCount = AccountStore.parseNumArray(parts[12]);
+      acc.calendarComps = parts[12] === '' ? [] : parts[12].split(';');
     }
+    // ⭐ #92 退避记录（旧数据没有这两段，缺省为空 = 从不退避）
     if (parts.length >= 14) {
-      acc.calendarNextRetry = AccountStore.parseNumArray(parts[13]);
+      acc.calendarFailCount = AccountStore.parseNumArray(parts[13]);
+    }
+    if (parts.length >= 15) {
+      acc.calendarNextRetry = AccountStore.parseNumArray(parts[14]);
     }
     return acc;
   }
@@ -523,6 +543,7 @@ export class AccountStore {
       acc.calendarColors.join(';'),
       safe(acc.id),
       acc.calendarWritable.join(';'),
+      acc.calendarComps.join(';'),
       acc.calendarFailCount.join(';'),
       acc.calendarNextRetry.join(';')
     ];
@@ -597,6 +618,7 @@ export class AccountStore {
             a.calendarNames = o['calendarNames'] !== undefined ? o['calendarNames'] as string[] : [];
             a.calendarColors = o['calendarColors'] !== undefined ? o['calendarColors'] as string[] : [];
             a.calendarWritable = o['calendarWritable'] !== undefined ? o['calendarWritable'] as string[] : [];
+            a.calendarComps = o['calendarComps'] !== undefined ? o['calendarComps'] as string[] : [];
             a.calendarFailCount = o['calendarFailCount'] !== undefined ? o['calendarFailCount'] as number[] : [];
             a.calendarNextRetry = o['calendarNextRetry'] !== undefined ? o['calendarNextRetry'] as number[] : [];
             a.itemCount = o['itemCount'] !== undefined ? o['itemCount'] as number : 0;

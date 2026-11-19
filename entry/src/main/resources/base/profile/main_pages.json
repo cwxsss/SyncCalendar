@@ -7,6 +7,8 @@
     "pages/EditAccountPage",
     "pages/EventEditPage",
     "pages/SettingsPage",
-    "pages/TodoEditPage"
+    "pages/TodoEditPage",
+    "pages/ContactListPage",
+    "pages/ContactDetailPage"
   ]
 }

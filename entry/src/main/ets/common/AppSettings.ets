@@ -63,11 +63,20 @@ export class AppSettings {
   static readonly FEATURES_URL: string = 'https://synccalendar.yangyq.net/sf.html';
   /** 使用帮助网址 */
   static readonly HELP_URL: string = 'https://synccalendar.yangyq.net/uh.html';
+  /**
+   * ⭐ 问题反馈网址。
+   *
+   * 换到 FeedLite（多站点共用一套反馈平台），`?sw=` 指定本项目站点标识。
+   * 旧地址 synccalendar.yangyq.net/feedback/ 是自建 PHP 论坛，
+   * 里面还有 3 条历史反馈（含一条完整 PR 贡献），服务暂不删除。
+   */
+  static readonly FEEDBACK_URL: string = 'https://feedlite.yangyq.net/?sw=synccalendar';
   /** 文档标题（内置浏览器标题栏用） */
   static readonly PRIVACY_TITLE: string = '隐私政策';
   static readonly AGREEMENT_TITLE: string = '用户服务协议';
   static readonly FEATURES_TITLE: string = '软件特性';
   static readonly HELP_TITLE: string = '使用帮助';
+  static readonly FEEDBACK_TITLE: string = '问题反馈';
 
   /**
    * 是否已同意《隐私政策》与《用户协议》（首启同意弹窗）。

@@ -3,6 +3,9 @@
 // 混合展示 DAV 与系统日历；每分钟自动同步；可"回到今天"
 import { curves, display, router, window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
 import { geoLocationManager } from '@kit.LocationKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
@@ -17,12 +20,13 @@ import { TipsPanel } from '../common/TipsPanel';
 import { DocViewer } from '../common/DocViewer';
 import { EventDb, LocalEvent, RemoteEvent } from '../common/EventDb';
 import { RruleUtil } from '../common/RruleUtil';
-import { IcsUtil } from '../common/IcsUtil';
+import { IcsUtil, AttachMeta } from '../common/IcsUtil';
 import { DavClient, RemoteItem } from '../common/DavClient';
 import { SystemCalendarImport } from '../common/SystemCalendarImport';
 import { SystemCalendarMirror } from '../common/SystemCalendarMirror';
 import { MirrorInbound } from '../common/MirrorInbound';
 import { ScreenKeeper } from '../common/ScreenKeeper';
+import { TodoService } from '../common/TodoService';
 import { TimelineUtil, TimelineBlock, TimelineGroup, DayTimeline, ViewRange } from '../common/TimelineUtil';
 import { HolidayUtil, HolidayInfo } from '../common/HolidayUtil';
 import { SmartDateParser, ParsedEventInfo } from '../common/SmartDateParser';
@@ -34,16 +38,45 @@ class MonthCell {
   inMonth: boolean = false;
   isToday: boolean = false;
   lunar: string = ''; // 农历（初一时显示月名）
+  hasEvent: boolean = false;
   hasEvents: boolean = false; // 是否有日程（日期下方小红点）
   events: DisplayEvent[] = []; // 该日日程列表（全月展开视图展示）
   holidayBadge: string = ''; // '休' | '班'
   holidayType: string = '';  // 'holiday' | 'workday'
 }
 
+/**
+ * 待办列表的扁平行。
+ */
+class TodoFlatRow {
+  role: string = '';
+  text: string = '';
+  group: TodoGroup | undefined = undefined;
+  event: DisplayEvent | undefined = undefined;
+  extraTop: number = 0;
+
+  keyOf(idx: number): string {
+    if (this.role === 'item' && this.event !== undefined) {
+      return `i${this.event.id}_${this.event.completed}`;
+    }
+    if (this.role === 'header' && this.group !== undefined) {
+      return `h${this.group.calKey}`;
+    }
+    return `c${idx}`;
+  }
+}
+
+class TodoGroup {
+  calKey: string = '';
+  name: string = '';
+  color: string = '#007DFF';
+  items: DisplayEvent[] = [];
+}
+
 const WEEK_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 视图前后顺序（决定手势/标签切换时的转场方向）：月 → 周 → 列表 */
-const VIEW_ORDER: string[] = ['month', 'month_expanded', 'week', 'agenda'];
+const VIEW_ORDER: string[] = ['month', 'month_expanded', 'week', 'agenda', 'todo'];
 
 @Entry
 @Component
@@ -63,9 +96,59 @@ struct Index {
   @State events: DisplayEvent[] = [];
   @State todos: DisplayEvent[] = []; // 待办（VTODO，单独展示）
   @State quickTodoText: string = ''; // 待办快速输入框文本
+  @State todoBusy: boolean = false;  // 正在写回待办状态（防连点）
+  // ⭐ 待办新建模式：true=新建（弹层显示日历本选择），false=编辑既有待办
+  @State todoCreating: boolean = false;
+  // 新建待办时可选的日历本（铺开供用户选，与新建日程一致）
+  @State todoBooks: CalSource[] = [];
+  // 新建待办时选中的日历本 calKey
+  @State todoCreateBookKey: string = '';
+  // calKey → 日历本集合 URL 的映射（CalSource 本身不带 href，需从账号解析）
+  private todoBookHrefs: Map<string, string> = new Map<string, string>();
+
+  // ⭐ TODO_EDITOR 待办编辑弹框状态
+  @State todoEditShow: boolean = false;
+  @State todoEditId: number = 0;
+  @State todoEditTitle: string = '';
+  @State todoEditDesc: string = '';
+  @State todoEditDueMs: number = 0;      // 0 = 无截止时间
+  @State todoEditBook: string = '';      // 所属本名（只读展示）
+  @State todoEditWritable: boolean = true;
+  @State todoEditRecur: string = '';   // 当前循环（'' = 不循环），存 FREQ 值如 WEEKLY
+  /** 优先级：iCal 原生值 1=高 5=中 9=低，0=未设置 */
+  @State todoEditPriority: number = 0;
+  /** 分类标签，逗号分隔（对应 CATEGORIES） */
+  @State todoEditCategories: string = '';
+  /** 地点（复用 VTODO 的 LOCATION） */
+  @State todoEditLocation: string = '';
+  /** 提醒：提前分钟数（多选），空 = 不提醒 */
+  @State todoEditReminders: number[] = [];
+  /** 当前编辑待办的父任务 UID（空 = 顶层任务） */
+  @State todoEditParentUid: string = '';
+  /** 附件 JSON（格式与数据层一致：[{name,mime,size,base64}]） */
+  @State todoEditAttachments: string = '';
+  /** 父任务选择弹层 */
+  @State todoParentPickShow: boolean = false;
+  /** 附件选择中（防连点，文件选择器打开期间） */
+  @State todoAttachBusy: boolean = false;
+  @State todoEditHasDue: boolean = false;
+  @State todoEditPickShow: boolean = false;  // 截止时间选择器
+  @State todoEditPickDate: Date = new Date();
+  @State todoEditPickHour: number = 9;
+  @State todoEditPickMin: number = 0;
   @State agendaEvents: DisplayEvent[] = []; // 列表视图全量数据（今天 ~ 未来2年）
   private agendaStale: boolean = true; // 全量数据是否需要重新加载
   @State monthPages: MonthCell[][] = [[], [], []]; // 上月/本月/下月
+  /** ⭐ 月视图数据版本号：每次 rebuildPages 后自增，拼进外层 ForEach 的 key。
+   *  为什么需要它：外层 key 原本用"这页第一天"（cells[0].dateMs），
+   *  数据重载前后这个值完全相同，ArkUI 会判定"同一项"而**复用整棵子树**，
+   *  连 itemGenerator 都不重新执行 ⇒ 内层永远拿到旧的 cells（hasEvent 全 false）。
+   *  只改内层 key 是没用的，必须让外层 key 变。 */
+  @State monthDataVersion: number = 0;
+  /** ⭐ 用户**主动选中**的日号（1~31）。翻月时用它算目标日，
+   *  避免"1/31 → 2/28 → 3/28"这种日号被永久钳死的问题：
+   *  有了它，2 月显示 28 号，翻到 3 月能回到 31 号。 */
+  @State preferredDay: number = new Date().getDate();
   @State syncing: boolean = false;
   @State loading: boolean = true;
   @State menuOpen: boolean = false; // 顶部 ≡ 下拉菜单
@@ -317,9 +400,17 @@ struct Index {
   /** 消费卡片"添加"深链：拉起新建日程页并立即清除标记，避免重复触发 */
   private consumeWidgetAction(): void {
     const action: string = AppStorage.get<string>('widgetAction') ?? '';
+    if (action === '') {
+      return;
+    }
+    AppStorage.setOrCreate<string>('widgetAction', '');
     if (action === 'add') {
-      AppStorage.setOrCreate<string>('widgetAction', '');
       this.addEvent();
+    } else if (action === 'addTodo') {
+      this.mode = 'todo';
+      this.openTodoCreator();
+    } else if (action === 'openTodo') {
+      this.mode = 'todo';
     }
   }
 
@@ -540,7 +631,7 @@ struct Index {
     this.todos = await CalendarDataService.loadTodos(context, this.sources);
     this.buildEventsByDay();
     LogUtil.write(`界面刷新完成：日程 ${this.events.length} 条（显示区间内），待办 ${this.todos.length} 条`);
-    this.rebuildPages();
+    this.rebuildPagesFor(this.displayYear, this.displayMonth);
     this.rebuildDayTimeline();
     // 当前正处于列表视图时立即重载，避免同步后列表空白
     if (this.mode === 'agenda') {
@@ -595,12 +686,44 @@ struct Index {
   }
 
   /** 构建某年某月的 42 格 */
+  /**
+   * ⭐ 预先算出"有事件的日期"集合（按 dayStart 归一化）。
+   *
+   * 为什么要预计算：月视图一次渲染 42 个格子，若每格都去 filter 一遍全部事件，
+   * 就是 O(42 × 事件数)；本机 15 个本、近 3000 条数据，翻月会明显卡顿。
+   * 这里只遍历事件一次，把区间相交的每一天都塞进 Set，之后每格 O(1) 查询。
+   *
+   * 与 `eventsOfDate()` 用**完全相同**的区间相交口径
+   * （`startOfDay(start) <= day && end >= day`），
+   * 因此跨天/多天事件覆盖的每一天都会有点，不会出现"点进去有日程、格子上却没点"的不一致。
+   * 另：待办（isTodo）不计入 —— 待办没有时间点语义，混进月视图会让点失去意义。
+   */
+  private buildEventDaySet(): Set<number> {
+    const set: Set<number> = new Set<number>();
+    for (const e of this.events) {
+      const s: number = this.startOfDay(e.startTime);
+      const end: number = e.endTime > 0 ? e.endTime : s;
+      // 兜底：异常数据（end < start）或跨度大得离谱（>1 年）不入集合，避免循环失控
+      if (end < s || end - s > 366 * 86400000) {
+        set.add(s);
+        continue;
+      }
+      for (let t = s; t <= end; t += 86400000) {
+        set.add(this.startOfDay(t));
+      }
+    }
+    return set;
+  }
+
   private buildMonthCells(year: number, month: number): MonthCell[] {
     const first: number = new Date(year, month, 1).getTime();
     const firstDay = new Date(first).getDay();
     const offset: number = (firstDay + 6) % 7; // 周一为一周开始
     const gridStart: number = first - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
+    const eventDays: Set<number> = this.buildEventDaySet();
+    // 诊断：本次构建里 hasEvent=true 的格子数（用于排查"首屏不变色"）
+    let flagTrue: number = 0;
     const cells: MonthCell[] = [];
     for (let i = 0; i < 42; i++) {
       const dateMs: number = gridStart + i * 86400000;
@@ -611,8 +734,12 @@ struct Index {
       cell.inMonth = d.getMonth() === month;
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.hasEvent = eventDays.has(this.startOfDay(dateMs));
       cell.events = this.eventsOfDate(dateMs);
       cell.hasEvents = cell.events.length > 0;
+      if (cell.hasEvent || cell.hasEvents) {
+        flagTrue++;
+      }
       const hInfo: HolidayInfo | null = HolidayUtil.getHoliday(dateMs);
       if (hInfo !== null) {
         cell.holidayBadge = hInfo.badge;
@@ -622,20 +749,42 @@ struct Index {
           cell.lunar = hName.length > 3 ? hName.substring(0, 2) : hName;
         }
       }
+      }
       cells.push(cell);
+    }
+    if (month >= 0) {
+      LogUtil.write(`月视图构建 ${year}-${month + 1}：事件 ${this.events.length} 条，`
+        + `有事件的日期 ${eventDays.size} 天，本页命中 ${flagTrue} 格，`
+        + `版本 v${this.monthDataVersion}`);
     }
     return cells;
   }
 
   /** 重建三页（上月/本月/下月） */
   private rebuildPages(): void {
-    const prev = this.addMonths(this.displayYear, this.displayMonth, -1);
-    const next = this.addMonths(this.displayYear, this.displayMonth, 1);
+    this.rebuildPagesFor(this.displayYear, this.displayMonth);
+  }
+
+  /**
+   * 按**显式传入的年月**重建三页。
+   *
+   * ⭐ 为什么需要这个版本：ArkUI 的 @State 赋值在同一个同步调用栈内
+   *    **不一定立即反映到后续读取**（实测：先 `this.displayMonth = 12`
+   *    再 `rebuildPages()`，里面读到的仍是 11）。
+   *    翻月这种"改状态 + 立刻据此重建"的场景，必须把值用参数传下去，
+   *    不能依赖 `this.displayMonth` 的可读时机 —— 否则中间页会停留在旧月份，
+   *    表现为"闪回上个月再跳回来"。
+   */
+  private rebuildPagesFor(year: number, month: number): void {
+    const prev = this.addMonths(year, month, -1);
+    const next = this.addMonths(year, month, 1);
     this.monthPages = [
       this.buildMonthCells(prev[0], prev[1]),
-      this.buildMonthCells(this.displayYear, this.displayMonth),
+      this.buildMonthCells(year, month),
       this.buildMonthCells(next[0], next[1])
     ];
+    // 自增版本号，强制外层 ForEach 重建（见字段注释）
+    this.monthDataVersion = this.monthDataVersion + 1;
     this.rebuildDayTimeline();
   }
 
@@ -714,6 +863,18 @@ struct Index {
     this.topRangeMode = (dateMs === today) ? 'today' : '';
     this.selectedDate = dateMs;
     this.rebuildDayTimeline();
+
+  /**
+   * 当天截止、尚未完成的待办（#45 待办投射到日历）。
+   * 待办的 DUE 存在 startTime；只有未完成且有截止时间的才显示。
+   */
+  private todosDueOn(dateMs: number): DisplayEvent[] {
+    const day: number = this.startOfDay(dateMs);
+    const out: DisplayEvent[] = this.todos.filter(
+      (t: DisplayEvent): boolean => !t.completed && t.startTime > 0
+        && this.startOfDay(t.startTime) === day);
+    out.sort((a: DisplayEvent, b: DisplayEvent): number => a.startTime - b.startTime);
+    return out;
   }
 
   /** 重建"选中日"的时间轴布局（月/周视图下方那条） */
@@ -729,9 +890,10 @@ struct Index {
     this.selectedDayEvents = dayEvents.slice();
     this.dataVersion++;
     const tl: DayTimeline = TimelineUtil.build(dayEvents, this.selectedDate);
+    tl.todos = this.todosDueOn(this.selectedDate);
     TimelineUtil.markNow(tl.blocks, this.nowMs);
     this.dayTimeline = tl;
-    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：模式 ${this.topRangeMode}，输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条`);
+    LogUtil.write(`时间轴(${this.fmtDateCn(this.selectedDate)})：模式 ${this.topRangeMode}，输入 ${dayEvents.length} 条 → 色块 ${tl.blocks.length} 块，全天/跨天 ${tl.allDay.length} 条，待办 ${tl.todos.length} 条`);
   }
 
   /** 选中日期变化（点月格/周条）→ 重算该日时间轴 */
@@ -756,6 +918,7 @@ struct Index {
     d.allDay = this.dayTimeline.allDay;
     d.blocks = this.dayTimeline.blocks;
     d.hasTimed = this.dayTimeline.hasTimed;
+    d.todos = this.dayTimeline.todos;
     this.dayTimeline = d;
     this.agendaTimelines = this.agendaTimelines.slice();
   }
@@ -802,26 +965,13 @@ struct Index {
     const nm = this.addMonths(this.displayYear, this.displayMonth, delta);
     this.displayYear = nm[0];
     this.displayMonth = nm[1];
-
-    // 翻月联动更新选中日：如果当前真实今天在目标月内则选中今天，否则保持选中相同日号（防超出月天数）
-    const now = new Date();
-    if (now.getFullYear() === nm[0] && now.getMonth() === nm[1]) {
-      this.selectedDate = this.startOfDay(now.getTime());
-    } else {
-      const oldD = new Date(this.selectedDate);
-      const targetDay = oldD.getDate();
-      const maxDays = new Date(nm[0], nm[1] + 1, 0).getDate();
-      const clampedDay = Math.min(targetDay, maxDays);
-      this.selectedDate = new Date(nm[0], nm[1], clampedDay).getTime();
-    }
-
-    // 先用现有内存数据同步构建新三页（此时新的 monthPages[1] 与刚刚滑到的目标页视觉完全一致）
-    this.rebuildPages();
+    // ⭐ KEEP_SELECTED_DAY 翻月后必须把选中日迁到新月份的同一天
+    const lastDay: number = new Date(nm[0], nm[1] + 1, 0).getDate();
+    this.selectedDate = new Date(nm[0], nm[1], Math.min(this.preferredDay, lastDay)).getTime();
+    this.rebuildPagesFor(nm[0], nm[1]);
     this.swiperGuard = true;
     this.swiperController.changeIndex(1, false);
     this.expandedSwiperController.changeIndex(1, false);
-
-    // 异步拉取新边缘月份数据以刷新缓存
     this.reloadEvents();
   }
 
@@ -974,6 +1124,9 @@ struct Index {
       this.getUIContext().getPromptAction()
         .showToast({ message: `同步完成（${ok} 个账号）` });
     }
+    // 同步完成后重新读库并重建月格。
+    // ⚠️ reloadAll() 内部已包含 reloadEvents()，这里不要重复调用 ——
+    //    只在"同步确实拉到了新数据"时再刷一次，避免多余的重建开销。
     await this.reloadAll();
     // 同步后刷新服务卡片 + 重建提醒
     try {
@@ -1680,12 +1833,10 @@ struct Index {
       .shadow({ radius: 8, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 2 })
       .margin(24)
       .onClick(() => {
+        // ⭐ 职责感知：待办视图下新建待办，其余视图新建日程。
         if (this.mode === 'todo') {
-          // 待办模式下：新建待办事项
-          AppStorage.setOrCreate<number>('pendingTodoId', 0);
-          router.pushUrl({ url: 'pages/TodoEditPage' });
+          this.openTodoCreator();
         } else {
-          // 日程模式下：新建日程
           this.addEvent();
         }
       })
@@ -1700,6 +1851,16 @@ struct Index {
         .backgroundColor($r('app.color.page_bg'))
       } else if (!this.policyAgreed) {
         this.consentGate()
+      }
+
+      // ⭐ TODO_EDITOR_UI 待办编辑弹框（覆盖层方案：同一组件只能挂一个 bindSheet）
+      if (this.todoEditShow) {
+        this.todoEditorOverlay()
+      }
+
+      // ⭐ 父任务选择弹层（子任务支持）
+      if (this.todoParentPickShow) {
+        this.todoParentPickerOverlay()
       }
 
       // 功能引导：整页覆盖层，放根 Stack 最后一层（盖住主界面与悬浮按钮）
@@ -2200,6 +2361,24 @@ struct Index {
           this.menuOpen = false;
           router.pushUrl({ url: 'pages/AccountsPage' });
         })
+        // 联系人（CardDAV 通讯录）
+        Row({ space: 10 }) {
+          Text('📇')
+            .fontSize(13)
+            .width(16)
+            .textAlign(TextAlign.Center)
+          Text('联系人')
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%')
+        .height(40)
+        .borderRadius(8)
+        .padding({ left: 12 })
+        .onClick(() => {
+          this.menuOpen = false;
+          router.pushUrl({ url: 'pages/ContactListPage' });
+        })
         // 设置
         Row({ space: 10 }) {
           Text('⚙')
@@ -2246,6 +2425,12 @@ struct Index {
           .fontColor($r('app.color.text_secondary'))
       } else if (this.mode === 'month' || this.mode === 'month_expanded') {
         Text(this.fmtMonthTitle())
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+      } else if (this.mode === 'todo') {
+        // 待办与具体日期无关，显示剩余未完成数量更有用
+        Text(`${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length} 项待办`)
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
@@ -2441,7 +2626,13 @@ struct Index {
   /** 周条：周一到周日（周视图顶部 / 复用） */
   @Builder
   weekStrip() {
-    Row({ space: 4 }) {
+    // 间距与月视图保持一致（space: 2）：周条原来用 4，7 天多吃了 12px，
+    // 每格从 149 缩到 133，圆就只能跟着变小 —— 这才是"圆不够大"的根因。
+    Row({ space: 2 }) {
+      // ⭐ WEEK_REUSE 直接复用月视图的日期格 dayCellCircle，不再单独实现。
+      //    周条一行就是 7 天，和月视图一行结构完全相同，另写一套只会不一致
+      //    （之前就因为圆的大小/字号/间距三处各调一遍，怎么调都对不齐）。
+      //    复用后选中圆、今天圆、农历、事件点天然与月视图一致。
       ForEach(this.weekStripDays(), (cell: MonthCell) => {
         Column({ space: 2 }) {
           Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
@@ -2502,6 +2693,9 @@ struct Index {
     const offset: number = (sel.getDay() + 6) % 7;
     const weekStart: number = this.selectedDate - offset * 86400000;
     const todayStart: number = this.startOfDay(Date.now());
+    // ⭐ WEEK_DOT 周条也要显示圆点 ⇒ 与月视图共用同一份"有事件日期"集合，
+    //    口径完全一致（区间相交，跨天事件覆盖的每天都算）。
+    const eventDays: Set<number> = this.buildEventDaySet();
     const cells: MonthCell[] = [];
     for (let i = 0; i < 7; i++) {
       const dateMs: number = weekStart + i * 86400000;
@@ -2510,8 +2704,10 @@ struct Index {
       cell.day = new Date(dateMs).getDate();
       cell.isToday = dateMs === todayStart;
       cell.lunar = LunarUtil.lunarDayText(dateMs);
+      cell.hasEvent = eventDays.has(this.startOfDay(dateMs));
       cell.events = this.eventsOfDate(dateMs);
       cell.hasEvents = cell.events.length > 0;
+      cell.inMonth = true;
       cells.push(cell);
     }
     return cells;
@@ -2670,18 +2866,24 @@ struct Index {
         Column({ space: 2 }) {
           ForEach(this.chunkCells(cells), (week: MonthCell[], idx: number) => {
             Row({ space: 2 }) {
+              // ⭐ key 必须包含影响渲染的**全部**状态：hasEvent / isToday /
+              //    是否选中。只放 dateMs+选中态时，数据加载完成后 hasEvent 从
+              //    false 变 true 但 key 没变 ⇒ ArkUI 复用旧组件、跳过重绘，
+              //    表现为"首屏农历不变红，切一次视图才正常"。
               ForEach(week, (cell: MonthCell) => {
                 this.dayCell(cell)
               }, (cell: MonthCell) => `${this.dataVersion}_${cell.dateMs}_${cell.dateMs === this.selectedDate}_${cell.hasEvents}_${cell.events.length}`)
             }
             .width('100%')
             .layoutWeight(this.wideLayout ? 1 : 0)
-          }, (week: MonthCell[], idx: number) => String(idx))
+          // 用"这一周首日的 dateMs"当 key，而不是序号：跨月翻页时序号会重复，
+          // 会让 ArkUI 误以为是同一周而复用旧节点。
+          }, (week: MonthCell[], idx: number) => `wk${week.length > 0 ? week[0].dateMs : idx}`)
         }
         .width('100%')
         // 注意：不要给页面设百分比高度——竖屏时 Swiper 是自然高度，
         // 子组件 height('100%') 对 auto 父容器解析为 0，整月网格会塌陷
-      }, (cells: MonthCell[], pIdx: number) => `${this.dataVersion}_p_${pIdx}_${cells[0]?.dateMs ?? 0}`)
+      }, (cells: MonthCell[], pIdx: number) => `${this.monthDataVersion}_p_${pIdx}_${cells.length > 0 ? cells[0].dateMs : 0}`)
     }
     .index(1)
     .loop(false)
@@ -2911,6 +3113,32 @@ struct Index {
     }
   }
 
+  /**
+   * ⭐ TODO_TAB_FACT 待办标签是否显示 —— 只看**事实**，不看声明。
+   *
+   * 判定：`this.todos` 里是否有数据。
+   *
+   * 为什么不再判断"有没有勾选待办本"：
+   *   那个判定依赖 CalendarDataService.loadTodos 之外的 comps 字段，
+   *   而 comps 来自服务器的 supported-calendar-component-set —— 实测本环境
+   *   **拿不到这个属性**，字段恒为空 ⇒ 判定恒 false ⇒ 明明有待办也不显示标签。
+   *   （这个 bug 就是这样产生的：数据同步成功了，标签却被前面的判定挡掉。）
+   *
+   * 而 `loadTodos` 内部已经按 `visibleKeys`（用户勾选的日历本）过滤过，
+   * 所以 `todos.length > 0` 本身就等价于"用户勾选的范围内确实有待办"，
+   * 用户没勾任何待办本时这个值必然是 0 —— 原本想防的场景天然被覆盖。
+   *
+   * 结论：功能判定必须挂在**数据事实**上，不能挂在可能缺失的元数据上。
+   */
+  private shouldShowTodoTab(): boolean {
+    return this.todos.length > 0;
+  }
+
+  /** 当前选中日是否就是今天（用于「今天」按钮的视觉状态） */
+  private isOnToday(): boolean {
+    return this.selectedDate === this.startOfDay(Date.now());
+  }
+
   /** 回到本周（含今天） */
   private goThisWeek(): void {
     this.selectedDate = this.startOfDay(Date.now());
@@ -3112,7 +3340,10 @@ struct Index {
           nowMs: this.nowMs,
           showNowLine: this.selectedDate === this.startOfDay(this.nowMs),
           scrollable: true,
-          onPick: (e: DisplayEvent): void => this.openEvent(e)
+          onPick: (e: DisplayEvent): void => this.openEvent(e),
+          onToggleTodo: (t: DisplayEvent): void => {
+            this.toggleTodo(t);
+          }
         })
         if (!this.dayTimeline.hasTimed && this.dayTimeline.allDay.length === 0 && !this.loading) {
           Text('当天没有日程')
@@ -3243,7 +3474,10 @@ struct Index {
                 nowMs: this.nowMs,
                 showNowLine: day.isToday,
                 scrollable: false,
-                onPick: (e: DisplayEvent): void => this.openEvent(e)
+                onPick: (e: DisplayEvent): void => this.openEvent(e),
+                onToggleTodo: (t: DisplayEvent): void => {
+                  this.toggleTodo(t);
+                }
               })
             }
             .width('100%')
@@ -3472,6 +3706,7 @@ struct Index {
       g.label = key === today ? '今天' : this.fmtDateCn(key);
       g.isToday = key === today;
       const tl: DayTimeline = TimelineUtil.build(map.get(key) ?? [], key);
+      tl.todos = this.todosDueOn(key);
       TimelineUtil.markNow(tl.blocks, this.nowMs);
       g.timeline = tl;
       out.push(g);
@@ -3491,52 +3726,90 @@ struct Index {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
-  /** 待办页：与日历视图完全分开，只读展示服务器端 VTODO */
+  /**
+   * 待办列表的扁平行（摊平后渲染）。
+   *
+   * ⚠️ 这是**普通方法**，不能挂 @Builder —— 里面是普通语句（new/赋值/循环），
+   *    @Builder 内只允许 UI 组件语法。
+   */
+  private todoFlatRows(): TodoFlatRow[] {
+    const rows: TodoFlatRow[] = [];
+    const undone: TodoGroup[] = this.todoGroups(false);
+    const r0 = new TodoFlatRow();
+    r0.role = 'caption';
+    r0.text = `未完成（${this.todos.filter((t: DisplayEvent): boolean => !t.completed).length}）`;
+    rows.push(r0);
+    for (const g of undone) {
+      const rh = new TodoFlatRow();
+      rh.role = 'header';
+      rh.group = g;
+      rows.push(rh);
+      for (const t of g.items) {
+        const rt = new TodoFlatRow();
+        rt.role = 'item';
+        rt.event = t;
+        rows.push(rt);
+      }
+    }
+    if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
+      const r1 = new TodoFlatRow();
+      r1.role = 'caption';
+      r1.text = `已完成（${this.todos.filter((t: DisplayEvent): boolean => t.completed).length}）`;
+      r1.extraTop = 10;
+      rows.push(r1);
+      for (const g of this.todoGroups(true)) {
+        const rh = new TodoFlatRow();
+        rh.role = 'header';
+        rh.group = g;
+        rows.push(rh);
+        for (const t of g.items) {
+          const rt = new TodoFlatRow();
+          rt.role = 'item';
+          rt.event = t;
+          rows.push(rt);
+        }
+      }
+    }
+    return rows;
+  }
+
   @Builder
   todoBody() {
-    List({ space: 8 }) {
-      ListItem() {
-        Text('未完成')
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .padding({ top: 4, bottom: 2 })
-      }
-
-      ForEach(this.todos.filter((t: DisplayEvent): boolean => !t.completed), (t: DisplayEvent) => {
-        ListItem() {
-          this.todoRow(t)
-        }
-        .swipeAction({
-          end: {
-            builder: () => { this.todoSwipeAction(t) }
-          }
-        })
-      }, (t: DisplayEvent) => `${this.dataVersion}_t${t.id}_${t.completed}_${t.startTime}_${t.title}`)
-
-      if (this.todos.some((t: DisplayEvent): boolean => t.completed)) {
-        ListItem() {
-          Text('已完成')
-            .fontSize(13)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .margin({ top: 10 })
-            .padding({ top: 4, bottom: 2 })
-        }
-
-        ForEach(this.todos.filter((t: DisplayEvent): boolean => t.completed), (t: DisplayEvent) => {
+    // ⭐ 用扁平 List 而非 ListItemGroup：
+    //    ListItemGroup 会把剩余空间按比例再分给组内 ListItem，
+    //    实测「不设高度=176px、设 height(96)=300px」（越限越高），
+    //    无法得到"由内容决定"的行高。扁平化后行高自然贴合内容。
+    //    分组视觉不受影响 —— 分组头就是一行普通 ListItem。
+    List({ space: 4 }) {
+      ForEach(this.todoFlatRows(), (row: TodoFlatRow) => {
+        if (row.role === 'caption') {
           ListItem() {
-            this.todoRow(t)
+            Text(row.text)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+              .textAlign(TextAlign.Start)
+              .margin({ top: row.extraTop })
           }
-          .swipeAction({
-            end: {
-              builder: () => { this.todoSwipeAction(t) }
+          .width('100%')
+        } else if (row.role === 'header') {
+          ListItem() {
+            if (row.group !== undefined) {
+              this.todoGroupHeader(row.group)
             }
-          })
-        }, (t: DisplayEvent) => `${this.dataVersion}_t${t.id}_${t.completed}_${t.startTime}_${t.title}`)
-      }
+          }
+          .width('100%')
+        } else if (row.event !== undefined) {
+          ListItem() {
+            this.todoRow(row.event as DisplayEvent)
+          }
+          .width('100%')
+          // 高度由内容自然决定（实测两行文字 ≈ 56vp，正常）。
+          // ⚠️ 绝不能给内部内容区加 height('100%') —— 那会把行撑到 573vp。
+          .swipeAction({ end: this.todoSwipeDelete(row.event as DisplayEvent) })
+        }
+      }, (row: TodoFlatRow, idx: number) => row.keyOf(idx))
 
       if (this.todos.length === 0 && !this.loading) {
         ListItem() {
@@ -3551,18 +3824,653 @@ struct Index {
               .fontSize(12)
               .fontColor($r('app.color.text_hint'))
               .textAlign(TextAlign.Center)
+            Text('提示：系统日历未开放待办接口，这里的待办不会出现在系统「待办」页签中')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+              .textAlign(TextAlign.Center)
+              .margin({ top: 6 })
           }
           .width('100%')
           .padding(32)
         }
+        .width('100%')
       }
     }
-    .layoutWeight(1)
     .width('100%')
+    .layoutWeight(1)
     .padding({ left: 20, right: 20, top: 8, bottom: 24 })
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
-    .align(Alignment.Top)
+  }
+
+  /** 分组头：色点 + 本名（条数） */
+  @Builder
+  todoGroupHeader(g: TodoGroup) {
+    Row({ space: 6 }) {
+      Circle({ width: 8, height: 8 }).fill(g.color)
+      Text(`${g.name}（${g.items.length}）`)
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+    }
+    .width('100%')
+    .padding({ top: 6, bottom: 2 })
+  }
+
+  /**
+   * 左滑露出的「删除」按钮。
+   *
+   * ⚠️ 不要用 height('100%')：swipeAction 的 end 组件参与行高测量，
+   *    百分比会造成放大循环。用固定高度。
+   */
+  @Builder
+  todoSwipeDelete(t: DisplayEvent) {
+    Row() {
+      Text('删除')
+        .fontSize(14)
+        .fontColor(Color.White)
+        .textAlign(TextAlign.Center)
+    }
+    .width(72)
+    // 用 100% 与 ListItem 同高：ListItem 高度由内容决定，
+    // 按钮跟随即可（官方文档：swipeAction builder 高度默认不匹配内容，
+    // 需要显式撑满才不会只占一半）。
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.error'))
+    .borderRadius(12)
+    .margin({ left: 6 })
+    .onClick(() => {
+      this.todoEditId = t.id;
+      this.todoEditTitle = t.title;
+      this.todoEditWritable = t.writable;
+      this.askDeleteTodo();
+    })
+  }
+
+
+
+  /**
+   * 待办编辑覆盖层。
+   *
+   * 为什么用覆盖层而不是 bindSheet：
+   *   ArkUI 里**同一组件只能挂一个 bindSheet**，Index 已用 `detailShow` 挂了日程详情，
+   *   再挂一个会被覆盖（EventEditPage 顶部也记过这个坑）。
+   *   覆盖层跟 tipsOverlay / consentGate 是同一套路，已验证可用。
+   */
+  /**
+   * 父任务选择覆盖层（子任务支持）。
+   * 候选 = 未完成的顶层任务（不能选自己或自己的后代，防成环）。
+   */
+  @Builder
+  todoParentPickerOverlay() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.todoParentPickShow = false;
+        })
+
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text('选择父任务')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+          Blank()
+          Text('无父任务')
+            .fontSize(14)
+            .fontColor($r('app.color.brand_text'))
+            .onClick(() => {
+              this.todoEditParentUid = '';
+              this.todoParentPickShow = false;
+            })
+        }
+        .width('100%')
+
+        if (this.todoParentCandidates().length === 0) {
+          Text('没有可选的顶层任务')
+            .fontSize(13)
+            .fontColor($r('app.color.text_hint'))
+            .padding(20)
+        } else {
+          List({ space: 6 }) {
+            ForEach(this.todoParentCandidates(), (c: DisplayEvent) => {
+              ListItem() {
+                Row({ space: 6 }) {
+                  Circle({ width: 8, height: 8 }).fill(c.color)
+                  Text(c.title === '' ? '(无标题待办)' : c.title)
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_primary'))
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .layoutWeight(1)
+                  if (this.todoEditParentUid === c.uid) {
+                    Text('✓')
+                      .fontSize(14)
+                      .fontColor($r('app.color.brand_text'))
+                  }
+                }
+                .width('100%')
+                .padding(10)
+              }
+              .width('100%')
+              .onClick(() => {
+                this.todoEditParentUid = c.uid;
+                this.todoParentPickShow = false;
+              })
+            }, (c: DisplayEvent) => `pc_${c.uid}`)
+          }
+          .width('100%')
+          .constraintSize({ maxHeight: 340 })
+        }
+
+        Button('取消')
+          .width('100%')
+          .height(44)
+          .borderRadius(12)
+          .fontSize(15)
+          .fontColor($r('app.color.text_primary'))
+          .backgroundColor($r('app.color.chip_off_bg'))
+          .onClick(() => {
+            this.todoParentPickShow = false;
+          })
+      }
+      .width('100%')
+      .padding(20)
+      .backgroundColor($r('app.color.card_bg'))
+      .borderRadius({ topLeft: 16, topRight: 16 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  todoEditorOverlay() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      // 半透明遮罩：点空白关闭
+      Column()
+        .width('100%')
+        .height('100%')
+        // 与 tipsOverlay 同款遮罩色（资源里没有 scrim 这个色，用字面值保持一致）
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.todoEditShow = false;
+        })
+
+      Column({ space: 12 }) {
+        // 标题行（新建/编辑两态）
+        Row({ space: 8 }) {
+          Text(this.todoCreating ? '新建待办' : '编辑待办')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+          Blank()
+          // 新建时没有可删的东西，隐藏删除入口
+          if (!this.todoCreating && this.todoEditWritable) {
+            Text('删除')
+              .fontSize(14)
+              .fontColor($r('app.color.error'))
+              .onClick(() => {
+                this.askDeleteTodo();
+              })
+          }
+        }
+        .width('100%')
+
+        // ⭐ 中间字段区可滚动（#46）：原来整块 Column 直接铺开，
+        //    字段一多就顶出屏幕且滑不动 → 底部按钮点不到。
+        //    这里参照新建日程页：固定头 + Scroll 承载字段 + 固定底部按钮。
+        Scroll() {
+          Column({ space: 12 }) {
+
+        // 日历本区：新建时**铺开全部可写本供选择**（与新建日程一致的交互），
+        // 编辑时只读显示归属本（改归属等于搬家，不支持原地改）
+        if (this.todoCreating) {
+          Column({ space: 6 }) {
+            Text('日历本')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+              .textAlign(TextAlign.Start)
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              ForEach(this.todoBooks, (b: CalSource) => {
+                Row({ space: 6 }) {
+                  Circle().width(8).height(8).fill(b.color)
+                  Text(b.name)
+                    .fontSize(12)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .fontColor(this.todoCreateBookKey === b.calKey
+                      ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                }
+                .width('48%')
+                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                .borderRadius(14)
+                .margin({ bottom: 8 })
+                .backgroundColor(this.todoCreateBookKey === b.calKey
+                  ? b.color : $r('app.color.chip_off_bg'))
+                .onClick(() => {
+                  this.todoCreateBookKey = b.calKey;
+                })
+              }, (b: CalSource) => b.calKey)
+            }
+            .width('100%')
+          }
+          .width('100%')
+        } else if (this.todoEditBook !== '') {
+          Row({ space: 6 }) {
+            Text('日历本')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+            Text(this.todoEditBook)
+              .fontSize(12)
+              .fontColor($r('app.color.text_primary'))
+            Blank()
+          }
+          .width('100%')
+        }
+
+        if (!this.todoEditWritable) {
+          Text('该日历本为只读，无法修改')
+            .fontSize(12)
+            .fontColor($r('app.color.error'))
+            .width('100%')
+        }
+
+        // 标题输入
+        TextInput({ text: this.todoEditTitle, placeholder: '待办标题' })
+          .fontSize(15)
+          .height(44)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.page_bg'))
+          .onChange((v: string) => {
+            this.todoEditTitle = v;
+          })
+
+        // 截止时间
+        Row({ space: 8 }) {
+          Text('截止时间')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          Text(this.todoEditHasDue
+            ? this.fmtDueFull(this.todoEditDueMs) : '无')
+            .fontSize(14)
+            .fontColor(this.todoEditHasDue
+              ? $r('app.color.text_primary') : $r('app.color.text_hint'))
+          if (this.todoEditHasDue) {
+            Text('清除')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.todoEditHasDue = false;
+                this.todoEditDueMs = 0;
+              })
+          }
+        }
+        .width('100%')
+        .padding({ top: 4, bottom: 4 })
+        .onClick(() => {
+          this.openTodoDuePicker();
+        })
+
+        // ⭐ 循环设置
+        Row({ space: 8 }) {
+          Text('重复')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          Text(this.todoEditRecur === '' ? '不重复' : this.recurLabel(`FREQ=${this.todoEditRecur}`))
+            .fontSize(14)
+            .fontColor(this.todoEditRecur === ''
+              ? $r('app.color.text_hint') : $r('app.color.brand_text'))
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+
+        // 四个循环选项（点同一个取消）
+        Row({ space: 8 }) {
+          ForEach([
+            { v: 'DAILY', label: '每天' },
+            { v: 'WEEKLY', label: '每周' },
+            { v: 'MONTHLY', label: '每月' },
+            { v: 'YEARLY', label: '每年' }
+          ], (opt: Record<string, string>): void => {
+            Text(opt.label)
+              .fontSize(13)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor(this.todoEditRecur === opt.v
+                ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.todoEditRecur === opt.v
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .onClick(() => {
+                // 再点一次 = 取消循环
+                this.todoEditRecur = this.todoEditRecur === opt.v ? '' : opt.v;
+              })
+          }, (opt: Record<string, string>): string => `rr_${opt.v}`)
+        }
+        .width('100%')
+
+        // ⭐ 优先级（iCal 原生值 1/5/9，再点一次取消）
+        Row({ space: 8 }) {
+          Text('优先级')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+          Blank()
+          ForEach([
+            { v: 1, label: '高' },
+            { v: 5, label: '中' },
+            { v: 9, label: '低' }
+          ], (opt: Record<string, Object>): void => {
+            Text(opt.label as string)
+              .fontSize(13)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor(this.todoEditPriority === (opt.v as number)
+                ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+              .fontColor(this.todoEditPriority === (opt.v as number)
+                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .onClick(() => {
+                // 再点一次 = 取消优先级
+                const v: number = opt.v as number;
+                this.todoEditPriority = this.todoEditPriority === v ? 0 : v;
+              })
+          }, (opt: Record<string, Object>): string => `pri_${opt.v}`)
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+
+        // ⭐ 提醒（#38）：与日程同一套选项；待办的提醒基准是 DUE 到期时刻
+        Row({ space: 8 }) {
+          Text('提醒')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          Flex({ wrap: FlexWrap.Wrap }) {
+            ForEach([
+              { v: 0, label: '不提醒' },
+              { v: 5, label: '提前5分钟' },
+              { v: 15, label: '提前15分钟' },
+              { v: 30, label: '提前30分钟' },
+              { v: 60, label: '提前1小时' },
+              { v: 1440, label: '提前1天' }
+            ], (opt: Record<string, Object>): void => {
+              Text(opt.label as string)
+                .fontSize(12)
+                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                .margin({ right: 6, bottom: 6 })
+                .borderRadius(13)
+                .backgroundColor(this.todoReminderActive(opt.v as number)
+                  ? $r('app.color.brand') : $r('app.color.chip_off_bg'))
+                .fontColor(this.todoReminderActive(opt.v as number)
+                  ? $r('app.color.button_text') : $r('app.color.text_primary'))
+                .onClick(() => {
+                  this.toggleTodoReminder(opt.v as number);
+                })
+            }, (opt: Record<string, Object>): string => `tr_${opt.v}`)
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+
+        // ⭐ 分类标签（逗号分隔，对应 CATEGORIES）
+        Row({ space: 8 }) {
+          Text('标签')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          TextInput({ text: this.todoEditCategories, placeholder: '多个用逗号分隔' })
+            .fontSize(14)
+            .height(40)
+            .layoutWeight(1)
+            .borderRadius(10)
+            .backgroundColor($r('app.color.page_bg'))
+            .onChange((v: string) => {
+              this.todoEditCategories = v;
+            })
+        }
+        .width('100%')
+
+        // ⭐ 地点（复用 location 字段）
+        Row({ space: 8 }) {
+          Text('地点')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          TextInput({ text: this.todoEditLocation, placeholder: '可选' })
+            .fontSize(14)
+            .height(40)
+            .layoutWeight(1)
+            .borderRadius(10)
+            .backgroundColor($r('app.color.page_bg'))
+            .onChange((v: string) => {
+              this.todoEditLocation = v;
+            })
+        }
+        .width('100%')
+
+        // ⭐ 父任务（子任务支持，对应 RELATED-TO）
+        Row({ space: 8 }) {
+          Text('父任务')
+            .fontSize(14)
+            .fontColor($r('app.color.text_secondary'))
+            .width(52)
+          Blank()
+          Text(this.parentName(this.todoEditParentUid))
+            .fontSize(14)
+            .fontColor(this.todoEditParentUid === ''
+              ? $r('app.color.text_hint') : $r('app.color.text_primary'))
+          if (this.todoEditParentUid !== '') {
+            Text('清除')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.todoEditParentUid = '';
+              })
+          } else {
+            Text('选择')
+              .fontSize(13)
+              .fontColor($r('app.color.brand_text'))
+              .onClick(() => {
+                this.openTodoParentPicker();
+              })
+          }
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+        .onClick(() => {
+          this.openTodoParentPicker();
+        })
+
+        // ⭐ 附件（内联 base64，随待办同步）
+        Column({ space: 6 }) {
+          Row({ space: 8 }) {
+            Text('附件')
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+              .width(52)
+            if (this.attachList().length < 3) {
+              Text('添加文件')
+                .fontSize(13)
+                .fontColor($r('app.color.brand_text'))
+                .onClick(() => {
+                  const ctx = this.getUIContext().getHostContext();
+                  if (ctx !== undefined) {
+                    this.pickAttachment(ctx);
+                  }
+                })
+            }
+            Blank()
+          }
+          .width('100%')
+
+          ForEach(this.attachList(), (m: AttachMeta, idx: number) => {
+            Row({ space: 8 }) {
+              Text(m.name)
+                .fontSize(13)
+                .fontColor($r('app.color.text_primary'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+              Text('✕')
+                .fontSize(13)
+                .fontColor($r('app.color.text_hint'))
+                .onClick(() => {
+                  this.removeAttach(idx);
+                })
+            }
+            .width('100%')
+            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+            .borderRadius(8)
+            .backgroundColor($r('app.color.chip_off_bg'))
+          }, (m: AttachMeta, idx: number) => `att_${idx}_${m.name}`)
+        }
+        .width('100%')
+
+        if (this.todoEditRecur !== '' && !this.todoEditHasDue) {
+          Text('提示：循环任务需要有截止时间，才能算出下一次')
+            .fontSize(11)
+            .fontColor($r('app.color.error'))
+            .width('100%')
+        }
+
+        // 备注
+        TextArea({ text: this.todoEditDesc, placeholder: '备注（可选）' })
+          .fontSize(14)
+          .height(88)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.page_bg'))
+          .onChange((v: string) => {
+            this.todoEditDesc = v;
+          })
+
+          }
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .align(Alignment.Top)
+
+        // 底部按钮固定在 Scroll 之外，滚动时始终可见（#46）
+        Row({ space: 10 }) {
+          Button('取消')
+            .layoutWeight(1)
+            .height(44)
+            .borderRadius(12)
+            .fontSize(15)
+            .fontColor($r('app.color.text_primary'))
+            .backgroundColor($r('app.color.chip_off_bg'))
+            .onClick(() => {
+              this.todoEditShow = false;
+            })
+          Button(this.todoBusy ? '保存中…' : (this.todoCreating ? '创建' : '保存'))
+            .layoutWeight(1)
+            .height(44)
+            .borderRadius(12)
+            .fontSize(15)
+            .enabled(!this.todoBusy && this.todoEditWritable)
+            .onClick(() => {
+              this.saveTodoEdit();
+            })
+        }
+        .width('100%')
+      }
+      .width('100%')
+      // ⭐ 高度上限 88%（#46）：内容少时自动收缩，内容多时不再顶出屏幕
+      .constraintSize({ maxHeight: '88%' })
+      .padding(18)
+      .borderRadius({ topLeft: 18, topRight: 18 })
+      .backgroundColor($r('app.color.card_bg'))
+      .shadow({ radius: 16, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: -2 })
+
+      // 截止时间选择器（叠在弹框之上）
+      if (this.todoEditPickShow) {
+        Column({ space: 12 }) {
+          Text('选择截止时间')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+            .textAlign(TextAlign.Center)
+          Row({ space: 4 }) {
+            DatePicker({
+              start: new Date(2000, 0, 1),
+              end: new Date(2050, 11, 31),
+              selected: this.todoEditPickDate
+            })
+              .onDateChange((value: Date) => {
+                this.todoEditPickDate = value;
+              })
+              .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+              .selectedTextStyle({
+                color: $r('app.color.text_primary'),
+                font: { size: 16, weight: FontWeight.Medium }
+              })
+              .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+              .layoutWeight(1)
+              .height(200)
+            TimePicker({ selected: new Date(2000, 0, 1, this.todoEditPickHour, this.todoEditPickMin) })
+              .onChange((value: TimePickerResult) => {
+                this.todoEditPickHour = value.hour;
+                this.todoEditPickMin = value.minute;
+              })
+              .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })
+              .selectedTextStyle({
+                color: $r('app.color.text_primary'),
+                font: { size: 16, weight: FontWeight.Medium }
+              })
+              .disappearTextStyle({ color: $r('app.color.text_hint'), font: { size: 14 } })
+              .layoutWeight(1)
+              .height(200)
+          }
+          .width('100%')
+          Row({ space: 10 }) {
+            Button('取消')
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(12)
+              .fontSize(15)
+              .fontColor($r('app.color.text_primary'))
+              .backgroundColor($r('app.color.chip_off_bg'))
+              .onClick(() => {
+                this.todoEditPickShow = false;
+              })
+            Button('确定')
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(12)
+              .fontSize(15)
+              .onClick(() => {
+                this.confirmTodoDue();
+              })
+          }
+          .width('100%')
+        }
+        .width('92%')
+        .padding(16)
+        .borderRadius(16)
+        .backgroundColor($r('app.color.card_bg'))
+        .shadow({ radius: 20, color: $r('app.color.shadow_color'), offsetX: 0, offsetY: 4 })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 截止时间完整显示（含时分） */
+  private fmtDueFull(ms: number): string {
+    const d = new Date(ms);
+    const hh: string = d.getHours() < 10 ? `0${d.getHours()}` : `${d.getHours()}`;
+    const mm: string = d.getMinutes() < 10 ? `0${d.getMinutes()}` : `${d.getMinutes()}`;
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
   }
 
     /** 快速添加待办事项（支持智能自然语言解析并自动同步 CalDAV） */
@@ -3969,18 +4877,34 @@ struct Index {
 
   @Builder
   todoRow(t: DisplayEvent) {
+    // ⭐ TODO_ROW_SPLIT 点击区域拆分：
+    //    · 左侧圆圈 → 勾选/取消完成
+    //    · 其余部分 → 打开编辑弹框
+    //    旧版把 onClick 挂在整行上，点标题、点截止时间、点空白都会改完成状态，
+    //    用户反馈"点任何地方都是完成"，是明确的交互缺陷。
+    // 子任务缩进：顶层不缩，子任务缩 24vp
     Row({ space: 10 }) {
-      // 勾选框（大触控热区 36x36，点击即时切换完成/未完成）
+      // 勾选框（颜色跟随日历本）—— **只有这块触发完成切换**
       Row() {
         if (t.completed) {
-          Text('✓')
-            .fontSize(13)
-            .fontColor($r('app.color.button_text'))
-            .width(22)
-            .height(22)
-            .textAlign(TextAlign.Center)
-            .borderRadius(11)
-            .backgroundColor(this.colorOfCal(t.calKey))
+          // ⭐ 用矢量 Path 画勾（#50）：字符 '✓' 依赖字体，
+          //    不同设备下粗细/居中不一致，视觉上"不精致"。
+          //    Path 可精确控制线宽、端点圆角与几何比例。
+          Stack() {
+            Path()
+              .width(22)
+              .height(22)
+              .commands('M6 12.5 L9.5 16 L16.5 8')
+              .stroke($r('app.color.button_text'))
+              .strokeWidth(2.2)
+              .strokeLineCap(LineCapStyle.Round)
+              .strokeLineJoin(LineJoinStyle.Round)
+              .fill(Color.Transparent)
+          }
+          .width(22)
+          .height(22)
+          .borderRadius(11)
+          .backgroundColor(this.colorOfCal(t.calKey))
         } else {
           Text('')
             .width(22)
@@ -3989,60 +4913,601 @@ struct Index {
             .border({ width: 2, color: this.colorOfCal(t.calKey) })
         }
       }
-      .width(36)
-      .height(36)
-      .justifyContent(FlexAlign.Center)
+      .padding({ right: 2 })
       .onClick(() => {
         this.toggleTodo(t);
       })
 
-      // 中间文本内容
       Column({ space: 3 }) {
-        Text(t.title === '' ? '(无标题待办)' : t.title)
+        Text((t.parentUid !== '' ? '∟ ' : '') + (t.title === '' ? '(无标题待办)' : t.title))
           .fontSize(15)
           .fontColor(t.completed ? $r('app.color.text_hint') : $r('app.color.text_primary'))
           .decoration({ type: t.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.todoSubtitle(t) + this.subtaskProgress(t))
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Row({ space: 6 }) {
-          Text(t.isAllDay ? '全天截止' : (t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-          if (t.rrule !== '' || t.recurring) {
-            Text(`↻ ${this.fmtTodoRepeat(t.rrule)}`)
-              .fontSize(10)
-              .fontColor($r('app.color.text_hint'))
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor($r('app.color.chip_off_bg'))
-          }
-        }
       }
       .alignItems(HorizontalAlign.Start)
+      .justifyContent(FlexAlign.Center)
       .layoutWeight(1)
-
-      // 所属日历本：最右侧、垂直居中，与日程行保持一致
-      if (t.calName !== '') {
-        Text(t.calName)
-          .fontSize(11)
-          .fontColor(this.colorOfCal(t.calKey))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '30%' })
-          .decoration({ type: t.writable ? TextDecorationType.None : TextDecorationType.LineThrough })
-      }
+      // ⚠️ 不要用 .height('100%')：ListItem 里百分比会参照被拉伸的可用高度，
+      //    实测让单条变成 1790px（几乎占满整屏）。
+      //    热区扩大改由外层 Row 的 padding 承担（见下方 .padding(10)），
+      //    内容区自身不再加 padding，避免内外叠加把行撑高。
+      // ⭐ 内容区点击 → 打开编辑（不改变完成状态）
+      .onClick(() => {
+        this.openTodoEditor(t);
+      })
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding(10)
+    .padding(t.parentUid !== ''
+      ? { left: 34, right: 10, top: 10, bottom: 10 }
+      : { left: 10, right: 10, top: 10, bottom: 10 })
     .borderRadius(12)
     .backgroundColor($r('app.color.card_bg'))
     .border({ width: 1, color: $r('app.color.shadow_color') })
     .opacity(t.completed ? 0.7 : 1)
-    .onClick(() => {
-      AppStorage.setOrCreate<number>('pendingTodoId', t.id);
-      router.pushUrl({ url: 'pages/TodoEditPage' });
-    })
+  }
+
+  /**
+   * 把待办按日历本聚合成组。
+   *
+   * @param completed true=取已完成；false=取未完成
+   * @returns 按"未完成优先、组内按截止时间升序"排好的分组
+   *
+   * 为什么单独抽出来：视图里直接写 filter + group 会让 build() 里塞逻辑，
+   * 而且 ForEach 的 key 需要稳定（用 calKey），抽出来更好维护。
+   */
+  private todoGroups(completed: boolean): TodoGroup[] {
+    const list: DisplayEvent[] = this.todos.filter(
+      (t: DisplayEvent): boolean => t.completed === completed);
+    const map: Map<string, TodoGroup> = new Map<string, TodoGroup>();
+    const order: string[] = [];
+    for (const t of list) {
+      const key: string = t.calKey === '' ? '__unknown' : t.calKey;
+      let g: TodoGroup | undefined = map.get(key);
+      if (g === undefined) {
+        const ng = new TodoGroup();
+        ng.calKey = key;
+        ng.name = t.calName !== '' ? t.calName : '其他';
+        ng.color = t.color;
+        map.set(key, ng);
+        order.push(key);
+        g = ng;
+      }
+      g.items.push(t);
+    }
+    const out: TodoGroup[] = [];
+    for (const k of order) {
+      const g = map.get(k);
+      if (g !== undefined) {
+        // 组内按截止时间升序（无截止时间的排最后）
+        g.items.sort((a: DisplayEvent, b: DisplayEvent): number => {
+          const av: number = a.startTime > 0 ? a.startTime : Number.MAX_SAFE_INTEGER;
+          const bv: number = b.startTime > 0 ? b.startTime : Number.MAX_SAFE_INTEGER;
+          return av - bv;
+        });
+        out.push(g);
+      }
+    }
+    // 组之间按"组内最早截止时间"排序，最紧急的本排前面
+    out.sort((a: TodoGroup, b: TodoGroup): number => {
+      const av: number = a.items.length > 0 && a.items[0].startTime > 0
+        ? a.items[0].startTime : Number.MAX_SAFE_INTEGER;
+      const bv: number = b.items.length > 0 && b.items[0].startTime > 0
+        ? b.items[0].startTime : Number.MAX_SAFE_INTEGER;
+      return av - bv;
+    });
+    return out;
+  }
+
+  /**
+   * 打开「新建待办」弹层。
+   *
+   * 与 openTodoEditor 的区别：不预填任何既有数据，todoEditId=0，
+   * 并把**所有可写日历本铺开**供用户选择。
+   *
+   * 默认选中策略：优先 Inbox（多数 CalDAV 服务器把待办收件箱叫 inbox/Inbox/收件箱），
+   * 找不到就选第一个可写的本 —— 让用户少点一步，但仍可改。
+   */
+  private async openTodoCreator(): Promise<void> {
+    // ⭐ 改为独立页面（与新建日程一致）：预置参数后跳转
+    //    待办默认**没有截止时间**（与日程不同：待办不是"发生在某天的事"，
+    //    而是"要完成的事"，多数待办一开始并不确定哪天截止）。
+    //    所以不传 pendingTodoDate（0 = 不预填）。
+    AppStorage.setOrCreate<number>('pendingTodoId', 0);
+    AppStorage.setOrCreate<number>('pendingTodoDate', 0);
+    router.pushUrl({ url: 'pages/TodoEditPage' });
+  }
+
+  /** 打开待办编辑页（点内容区触发；不会改变完成状态） */
+  private openTodoEditor(t: DisplayEvent): void {
+    // ⭐ 改为独立页面（与编辑日程一致）：把 id 预置后跳转
+    AppStorage.setOrCreate<number>('pendingTodoId', t.id);
+    AppStorage.setOrCreate<number>('pendingTodoDate', 0);
+    LogUtil.write(`打开待办编辑：id=${t.id} uid=${t.uid} 标题长度=${t.title.length} 本=${t.calKey}`);
+    router.pushUrl({ url: 'pages/TodoEditPage' });
+    return;
+  }
+
+  /** 打开截止时间选择器（把当前值灌进滚轮初值） */
+  private openTodoDuePicker(): void {
+    const d: Date = this.todoEditHasDue && this.todoEditDueMs > 0
+      ? new Date(this.todoEditDueMs) : new Date();
+    this.todoEditPickDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    this.todoEditPickHour = d.getHours();
+    this.todoEditPickMin = d.getMinutes();
+    this.todoEditPickShow = true;
+  }
+
+  /** 确认截止时间 */
+  private confirmTodoDue(): void {
+    const d: Date = this.todoEditPickDate;
+    this.todoEditDueMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
+      this.todoEditPickHour, this.todoEditPickMin).getTime();
+    this.todoEditHasDue = true;
+    this.todoEditPickShow = false;
+  }
+
+  /** 保存待办编辑（标题 / 备注 / 截止时间） */
+  private async saveTodoEdit(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy) {
+      return;
+    }
+    // ⭐ 新建分支：走 createTodo（先 PUT 服务器，成功才落库）
+    if (this.todoCreating) {
+      await this.saveNewTodo(ctx);
+      return;
+    }
+    if (this.todoEditId <= 0) {
+      return;
+    }
+    if (!this.todoEditWritable) {
+      this.getUIContext().getPromptAction().showToast({ message: '该日历本为只读，无法修改' });
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      // 父任务/附件：编辑页显示什么就保存什么（touch 恒 true，
+      // 值来自弹层状态，用户点保存的意图就是让它们生效）
+      const ok: boolean = await TodoService.updateTodo(ctx, this.todoEditId,
+        this.todoEditTitle, this.todoEditDesc,
+        this.todoEditHasDue ? this.todoEditDueMs : 0,
+        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation,
+        this.todoEditReminders, this.todoEditParentUid, this.todoEditAttachments,
+        true, true);
+      if (ok) {
+        // ⭐ 循环规则单独写：它与"改内容"是两回事，
+        //    而且要先有截止时间才有意义（没有 DUE 的循环任务无法算下一次）
+        const wantRule: string = this.todoEditRecur !== '' ? `FREQ=${this.todoEditRecur}` : '';
+        const dueForRecur: number = this.todoEditHasDue ? this.todoEditDueMs : 0;
+        if (dueForRecur > 0) {
+          await TodoService.setRecurrence(ctx, this.todoEditId, wantRule, dueForRecur);
+        }
+        this.todoEditShow = false;
+        this.getUIContext().getPromptAction().showToast({ message: '已保存' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+        // ⭐ 卡片是独立实例，必须显式推送；提醒随标题/截止/提醒项变化需重排
+        await CardDataService.pushToAllForms(ctx);
+        await ReminderService.refreshReminders(ctx);
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '保存失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 提醒是否选中（0 表示"不提醒"，即列表为空） */
+  private todoReminderActive(v: number): boolean {
+    if (v === 0) {
+      return this.todoEditReminders.length === 0;
+    }
+    return this.todoEditReminders.indexOf(v) >= 0;
+  }
+
+  /** 切换提醒：0=清空（不提醒），其余=多选切换 */
+  private toggleTodoReminder(v: number): void {
+    if (v === 0) {
+      this.todoEditReminders = [];
+      return;
+    }
+    const idx: number = this.todoEditReminders.indexOf(v);
+    if (idx >= 0) {
+      this.todoEditReminders = this.todoEditReminders.filter((x: number): boolean => x !== v);
+    } else {
+      this.todoEditReminders = this.todoEditReminders.concat([v]);
+    }
+  }
+
+  /**
+   * 选择附件：DocumentViewPicker → 读二进制 → base64 → 存入 todoEditAttachments。
+   *
+   * 限制：最多 3 个、单文件 ≤ 5MB。内联 base64 会让 .ics 膨胀，
+   * 限制是为了防爆服务器与同步性能。
+   */
+  private async pickAttachment(ctx: common.Context): Promise<void> {
+    if (this.todoAttachBusy) {
+      return;
+    }
+    this.todoAttachBusy = true;
+    try {
+      const pickerv = new picker.DocumentViewPicker(ctx);
+      const uris: string[] = await pickerv.select({
+        maxSelectNumber: 3
+      });
+      if (uris.length === 0) {
+        return;
+      }
+      // 已有附件数 + 新选数不得超过 3
+      const existing: AttachMeta[] = IcsUtil.jsonToAttachMeta(this.todoEditAttachments);
+      if (existing.length + uris.length > 3) {
+        this.getUIContext().getPromptAction().showToast({ message: '最多 3 个附件' });
+        uris.splice(0); // 丢弃，不超过限制时已读的部分也不该要
+        return;
+      }
+      const merged: AttachMeta[] = existing.slice();
+      for (const uri of uris) {
+        const meta: AttachMeta | null = this.readAttach(uri);
+        if (meta === null) {
+          continue;
+        }
+        if (meta.base64.length > 5 * 1024 * 1024) {
+          this.getUIContext().getPromptAction().showToast({ message: '单文件不超过 5MB' });
+          continue;
+        }
+        merged.push(meta);
+      }
+      this.todoEditAttachments = IcsUtil.attachMetaToJson(merged);
+      if (merged.length > existing.length) {
+        this.getUIContext().getPromptAction().showToast({ message: `已添加 ${merged.length - existing.length} 个附件` });
+      }
+    } catch (err) {
+      // 用户取消选择也会走这里（返回空/抛错），不提示错误
+      LogUtil.write(`选择附件取消或失败: ${(err as BusinessError).message ?? ''}`);
+    } finally {
+      this.todoAttachBusy = false;
+    }
+  }
+
+  /** 读一个文件 URI → AttachMeta（文件名/mime/size/base64）。失败返回 null。 */
+  private readAttach(uri: string): AttachMeta | null {
+    try {
+      const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      const stat = fs.statSync(file.fd);
+      const size: number = stat.size;
+      if (size <= 0 || size > 5 * 1024 * 1024) {
+        fs.closeSync(file.fd);
+        return null;
+      }
+      // 最多 5MB，一次性读完
+      const buf: ArrayBuffer = new ArrayBuffer(size);
+      const readLen: number = fs.readSync(file.fd, buf);
+      fs.closeSync(file.fd);
+      if (readLen <= 0) {
+        return null;
+      }
+      // ArrayBuffer → base64
+      const u8 = new Uint8Array(buf);
+      let bin: string = '';
+      for (let i = 0; i < u8.length; i++) {
+        bin += String.fromCharCode(u8[i]);
+      }
+      const base64: string = new util.Base64Helper().encodeToStringSync(
+        new Uint8Array(buf));
+      // 文件名：从 URI 末尾解析（去掉 querystring），拿不到就占位
+      let name: string = uri.substring(uri.lastIndexOf('/') + 1);
+      const q: number = name.indexOf('?');
+      if (q >= 0) {
+        name = name.substring(0, q);
+      }
+      if (name === '') {
+        name = '附件';
+      }
+      // mime：按扩展名粗略推断，其余 application/octet-stream
+      const m = new AttachMeta();
+      m.name = name;
+      m.mime = this.mimeOfName(name);
+      m.base64 = base64;
+      return m;
+    } catch (err) {
+      LogUtil.write(`读附件失败: ${(err as BusinessError).message ?? ''}`);
+      return null;
+    }
+  }
+
+  /** 按扩展名推断 mime，能覆盖常见文档/图片即可。 */
+  private mimeOfName(name: string): string {
+    const lower: string = name.toLowerCase();
+    if (lower.endsWith('.pdf')) { return 'application/pdf'; }
+    if (lower.endsWith('.png')) { return 'image/png'; }
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) { return 'image/jpeg'; }
+    if (lower.endsWith('.gif')) { return 'image/gif'; }
+    if (lower.endsWith('.txt')) { return 'text/plain'; }
+    if (lower.endsWith('.csv')) { return 'text/csv'; }
+    if (lower.endsWith('.zip')) { return 'application/zip'; }
+    if (lower.endsWith('.doc') || lower.endsWith('.docx')) {
+      return 'application/msword';
+    }
+    if (lower.endsWith('.xls') || lower.endsWith('.xlsx')) {
+      return 'application/vnd.ms-excel';
+    }
+    return 'application/octet-stream';
+  }
+
+  /** 父任务的子任务进度文案「 N/M」，无子任务返回空串。 */
+  private subtaskProgress(t: DisplayEvent): string {
+    const children: DisplayEvent[] = this.todos.filter(
+      (x: DisplayEvent): boolean => x.parentUid === t.uid && x.parentUid !== '');
+    if (children.length === 0) {
+      return '';
+    }
+    const done: number = children.filter((x: DisplayEvent): boolean => x.completed).length;
+    return ` · ${done}/${children.length}`;
+  }
+
+  /** 是否有子任务（按父 uid 找）。 */
+  private hasChildren(uid: string): boolean {
+    return this.todos.some((x: DisplayEvent): boolean => x.parentUid === uid);
+  }
+
+  /** 父任务显示名：按 uid 在 todos 里找；找不到显示「无」。 */
+  private parentName(uid: string): string {
+    if (uid === '') {
+      return '无';
+    }
+    for (const t of this.todos) {
+      if (t.uid === uid) {
+        return t.title === '' ? '(无标题)' : t.title;
+      }
+    }
+    return '（已不存在）';
+  }
+
+  /** 解析附件 JSON → AttachMeta[]。 */
+  private attachList(): AttachMeta[] {
+    return IcsUtil.jsonToAttachMeta(this.todoEditAttachments);
+  }
+
+  /** 删除第 idx 个附件，回写 JSON。 */
+  private removeAttach(idx: number): void {
+    const list: AttachMeta[] = this.attachList();
+    if (idx < 0 || idx >= list.length) {
+      return;
+    }
+    list.splice(idx, 1);
+    this.todoEditAttachments = IcsUtil.attachMetaToJson(list);
+  }
+
+  /** 打开父任务选择弹层。候选 = 未完成的顶层任务，且不能是自己或自己的后代。 */
+  private openTodoParentPicker(): void {
+    this.todoParentPickShow = true;
+  }
+
+  /** 当前编辑待办的 uid（自己） */
+  private todoEditUid(): string {
+    for (const t of this.todos) {
+      if (t.id === this.todoEditId) {
+        return t.uid;
+      }
+    }
+    return '';
+  }
+
+  /** 父任务候选（未完成、顶层、非自身/后代）。 */
+  private todoParentCandidates(): DisplayEvent[] {
+    const selfUid: string = this.todoEditUid();
+    // 收集"自己"及其所有后代的 uid，选父时排除（防成环）
+    const selfAndDesc: Set<string> = new Set<string>();
+    if (selfUid !== '') {
+      selfAndDesc.add(selfUid);
+      const queue: string[] = [selfUid];
+      let guard = 0;
+      while (queue.length > 0 && guard < 200) {
+        const cur: string = queue.shift() as string;
+        for (const t of this.todos) {
+          if (t.parentUid === cur && !selfAndDesc.has(t.uid)) {
+            selfAndDesc.add(t.uid);
+            queue.push(t.uid);
+          }
+        }
+        guard++;
+      }
+    }
+    const out: DisplayEvent[] = [];
+    for (const t of this.todos) {
+      if (t.completed) { continue; }
+      if (t.parentUid !== '') { continue; } // 只选顶层任务做父
+      if (selfAndDesc.has(t.uid)) { continue; } // 不能选自己或后代
+      out.push(t);
+    }
+    return out;
+  }
+
+  /** 保存新建的待办 */
+  private async saveNewTodo(ctx: common.Context): Promise<void> {
+    const title: string = this.todoEditTitle.trim();
+    if (title === '') {
+      this.getUIContext().getPromptAction().showToast({ message: '请填写待办标题' });
+      return;
+    }
+    const href: string = this.todoBookHrefs.get(this.todoCreateBookKey) ?? '';
+    if (href === '') {
+      this.getUIContext().getPromptAction().showToast({ message: '请选择日历本' });
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const dueMs: number = this.todoEditHasDue ? this.todoEditDueMs : 0;
+      // 截止时间只到日（00:00 视为"当天"）→ 用 DATE 值，避免服务器上显示 00:00
+      const dateOnly: boolean = dueMs > 0 && this.todoEditDueMs % 86400000 === 0;
+      const newId: number = await TodoService.createTodo(ctx, href, title,
+        this.todoEditDesc, dueMs, dateOnly,
+        this.todoEditPriority, this.todoEditCategories, this.todoEditLocation,
+        this.todoEditReminders, this.todoEditParentUid, this.todoEditAttachments);
+      if (newId > 0) {
+        this.todoEditShow = false;
+        this.todoCreating = false;
+        this.getUIContext().getPromptAction().showToast({ message: '待办已创建' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+        await CardDataService.pushToAllForms(ctx);
+        await ReminderService.refreshReminders(ctx);
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '创建失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '创建失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 删除待办（带二次确认） */
+  private askDeleteTodo(): void {
+    this.getUIContext().showAlertDialog({
+      title: '删除待办',
+      message: '将从服务器删除这条待办，删除后无法撤销。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        action: (): void => {
+          this.doDeleteTodo();
+        }
+      }
+    });
+  }
+
+  private async doDeleteTodo(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy || this.todoEditId <= 0) {
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      const ok: boolean = await TodoService.deleteTodo(ctx, this.todoEditId);
+      if (ok) {
+        this.todoEditShow = false;
+        this.getUIContext().getPromptAction().showToast({ message: '已删除' });
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        this.rebuildPages();
+        await CardDataService.pushToAllForms(ctx);
+        // 删除后必须重排，否则已删待办的提醒还会响
+        await ReminderService.refreshReminders(ctx);
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
+  }
+
+  /** 待办副标题：截止时间 · 所属日历本（分组后本名仍在，方便跨组辨识） */
+  private todoSubtitle(t: DisplayEvent): string {
+    const due: string = t.startTime > 0 ? `截止 ${this.fmtDue(t.startTime)}` : '无截止时间';
+    const book: string = t.calName !== '' ? ` · ${t.calName}` : '';
+    // ⭐ TODO_RECUR_UI 循环标记：让用户一眼看出"这条会重复"
+    //    没有这个标记，循环任务看起来和普通待办完全一样，
+    //    用户勾完成后发现"又冒出新的"会很困惑。
+    const rec: string = t.recurRule !== '' ? ` ↻ ${this.recurLabel(t.recurRule)}` : '';
+    return due + rec + book;
+  }
+
+  /** RRULE → 中文标签（只处理 FREQ 四种，够用且不会误导） */
+  private recurLabel(rrule: string): string {
+    const f: string = IcsUtil.freqOfRrule(rrule);
+    if (f === 'DAILY') {
+      return '每天';
+    }
+    if (f === 'WEEKLY') {
+      return '每周';
+    }
+    if (f === 'MONTHLY') {
+      return '每月';
+    }
+    if (f === 'YEARLY') {
+      return '每年';
+    }
+    return '循环';
+  }
+
+  /** 待办完成状态切换：写回服务器成功后刷新列表；失败保持原状并提示。
+   *  ⚠️ 不做"先改界面再回滚"：待办写回要走网络，若先改后失败，
+   *  用户会看到状态闪一下又跳回去，容易误以为操作没生效。这里直接等结果。 */
+  private async toggleTodo(t: DisplayEvent): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined || this.todoBusy) {
+      return;
+    }
+    this.todoBusy = true;
+    try {
+      // ⭐ 循环待办勾"完成" = 这一轮做完了，推进到下一个周期（不结束）
+      //    非循环 / 取消完成 → 走原来的 setCompleted
+      const isRecurring: boolean = t.recurRule !== '';
+      let ok: boolean = false;
+      let nextDue: number = 0;
+      if (isRecurring && !t.completed) {
+        nextDue = await TodoService.completeRecurringRound(ctx, t.id);
+        ok = nextDue > 0;
+      } else {
+        ok = await TodoService.setCompleted(ctx, t.id, !t.completed);
+        // ⭐ 父任务级联完成子任务（勾父任务→所有子任务一并完成）
+        if (ok && !t.completed && this.hasChildren(t.uid)) {
+          await TodoService.completeChildren(ctx, t.uid);
+        }
+      }
+      if (ok) {
+        if (isRecurring && !t.completed) {
+          this.getUIContext().getPromptAction().showToast({
+            message: nextDue > 0 ? `这一轮完成，下次 ${this.fmtDue(nextDue)}` : '这一轮已完成'
+          });
+        } else {
+          this.getUIContext().getPromptAction().showToast({
+            message: t.completed ? '已标记为未完成' : '已完成'
+          });
+        }
+        // 重新读库刷新列表（服务层已更新 completed）
+        this.todos = await CalendarDataService.loadTodos(ctx, this.sources);
+        // ⭐ 时间轴上的待办区是快照，勾选后必须重建，否则不消失/不划线（#45）
+        this.rebuildDayTimeline();
+        if (this.mode === 'agenda') {
+          this.agendaTimelines = this.buildAgendaTimelines(this.agendaEvents);
+        }
+        // ⭐ 桌面卡片是独立实例，必须显式推送，否则停在旧数据
+        await CardDataService.pushToAllForms(ctx);
+        // 完成/取消完成会改变"该不该提醒"，需要重排
+        await ReminderService.refreshReminders(ctx);
+      } else {
+        this.getUIContext().getPromptAction().showToast({
+          message: '更新失败：需联网，且该日历本需可写'
+        });
+      }
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '更新失败，请稍后重试' });
+    } finally {
+      this.todoBusy = false;
+    }
   }
 
   /** 是否跨天（结束日期晚于开始日期） */
@@ -4056,7 +5521,7 @@ struct Index {
 
   @Builder
   dayCell(cell: MonthCell) {
-    Column({ space: 2 }) {
+    Column({ space: 1 }) {
       Stack({ alignContent: Alignment.TopEnd }) {
         Text(String(cell.day))
           .fontSize(this.wideLayout ? 12 : 13)
@@ -4064,12 +5529,12 @@ struct Index {
           .fontColor(!cell.inMonth
             ? $r('app.color.text_hint')
             : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
-          .width(this.wideLayout ? 22 : 26)
-          .height(this.wideLayout ? 22 : 26)
+          .width(this.wideLayout ? 22 : 24)
+          .height(this.wideLayout ? 22 : 24)
           .textAlign(TextAlign.Center)
-          .borderRadius(this.wideLayout ? 11 : 13)
+          .borderRadius(this.wideLayout ? 11 : 12)
           .backgroundColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.selected_bg')
+            ? Color.Transparent
             : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
 
         if (cell.holidayBadge !== '') {
@@ -4085,29 +5550,23 @@ struct Index {
         }
       }
       if (!this.wideLayout) {
-        // 宽屏下月历格子变窄，省略农历腾出空间
         Text(cell.lunar)
           .fontSize(8)
+          // 选中 → 与日期同色（白），保证在同块蓝底上都看得清
           .fontColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.text_secondary') : $r('app.color.text_hint'))
+            ? $r('app.color.button_text') : $r('app.color.text_hint'))
           .maxLines(1)
       }
-      // 小红点：当天有日程时展示（参考图2）
-      Row() {
-        if (cell.hasEvents) {
-          Circle({ width: 4, height: 4 })
-            .fill(cell.dateMs === this.selectedDate
-              ? $r('app.color.brand')
-              : (!cell.inMonth ? '#FFA080' : '#FF3B30'))
-        }
-      }
-      .height(4)
-      .alignItems(VerticalAlign.Center)
-      .justifyContent(FlexAlign.Center)
+      // 无事件时圆点透明但仍占位：保证有/无事件的行高完全一致，整月不会跳
+      // 选中时圆点也转白（与日期同色），否则浅红压在蓝底上会发灰
+      Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
+        .fill(cell.dateMs === this.selectedDate
+          ? $r('app.color.button_text') : $r('app.color.soft_red'))
+        .opacity((cell.hasEvent || cell.hasEvents) ? 1 : 0)
     }
     .layoutWeight(1)
-    .padding({ top: 4, bottom: 2 })
-    .borderRadius(8)
+    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 1 })
+    .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.selectDayCell(cell.dateMs);
       if (!cell.inMonth) {
@@ -4237,6 +5696,110 @@ struct Index {
     })
   }
 
+  /**
+   * 月视图日期格（带选中正圆背景）。
+   *
+   * ⭐ SEL_CIRCLE 为什么套一层 Stack：
+   *   Column 是 layoutWeight(1) 撑满格子的**矩形**，无论圆角给多大
+   *   都只能是"方块"或"胶囊"，变不成正圆。只有独立的正方形容器
+   *   取 50% 圆角才是真正的圆。Stack 居中叠放，圆在格子正中，内容压在上面。
+   *
+   *   ⚠️ 改过两轮才定下来：
+   *     第一版把蓝底铺在 Column 上 → 得到 149×133 的圆角方块（用户不满意）
+   *     这一版用 46vp 正方形 → 真正的圆
+   */
+  // RING_CLEANUP
+  /**
+   * 月/周视图的日期格。
+   *
+   * 层级设计（改过好几轮，这里定稿）：
+   *   Column                       ← 整格，承接点击
+   *     ├ Text(星期)               ← 仅周条有，**在圆外面**
+   *     └ Stack
+   *         ├ 圆底（选中=实蓝 / 今天=淡蓝，46vp）
+   *         └ Column               ← 日期数字 / 农历 / 事件点，圆只包这三个
+   *
+   * ⚠️ 为什么星期放在 Stack 外面：
+   *    放进圆里的话，为了让圆包住它就得把圆撑到 54vp，结果星期也被圈进圆内，
+   *    视觉上很怪（用户明确否掉了）。
+   *    放外面后圆只包 日期(72)+农历(27)+点(11)+间隙 ≈ 116px，46vp(138px) 够用，
+   *    且与月视图完全一致。
+   */
+  @Builder
+  dayCellCircle(cell: MonthCell, showWeekLabel: boolean = false) {
+    Column({ space: 1 }) {
+      // 星期标签：圆外，仅周条显示（月视图的星期在表头单独一行）
+      if (showWeekLabel) {
+        Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
+          .fontSize(10)
+          .fontColor(cell.dateMs === this.selectedDate
+            ? $r('app.color.brand_text') : $r('app.color.text_secondary'))
+      }
+      Stack({ alignContent: Alignment.Center }) {
+        // 圆底：选中实蓝、今天淡蓝，尺寸一致
+        if (cell.dateMs === this.selectedDate) {
+          Column()
+            .width(this.wideLayout ? 40 : 46)
+            .height(this.wideLayout ? 40 : 46)
+            .borderRadius('50%')
+            .backgroundColor($r('app.color.selected_bg'))
+        } else if (cell.isToday) {
+          Column()
+            .width(this.wideLayout ? 40 : 46)
+            .height(this.wideLayout ? 40 : 46)
+            .borderRadius('50%')
+            .backgroundColor($r('app.color.today_bg'))
+        }
+        Column({ space: 1 }) {
+          Text(String(cell.day))
+            .fontSize(this.wideLayout ? 12 : 13)
+            .fontWeight(cell.isToday || cell.dateMs === this.selectedDate
+              ? FontWeight.Bold : FontWeight.Normal)
+            .fontColor(!cell.inMonth
+              ? $r('app.color.text_hint')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_primary')))
+            .width(this.wideLayout ? 22 : 24)
+            .height(this.wideLayout ? 22 : 24)
+            .textAlign(TextAlign.Center)
+            .borderRadius(this.wideLayout ? 11 : 12)
+            // 背景一律交给底层圆，这里透明（否则"大圆里套小圈"）
+            .backgroundColor(Color.Transparent)
+          if (!this.wideLayout) {
+            // 周条的农历提亮一档（text_secondary），月历保持 text_hint
+            Text(cell.lunar)
+              .fontSize(showWeekLabel ? 9 : 8)
+              .fontColor(cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text')
+                : (showWeekLabel ? $r('app.color.text_secondary') : $r('app.color.text_hint')))
+              .maxLines(1)
+          }
+          // 事件点：无事件时透明但仍占位，保证行高一致、整月不跳
+          Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
+            .fill(cell.dateMs === this.selectedDate
+              ? $r('app.color.button_text') : $r('app.color.soft_red'))
+            .opacity(cell.hasEvent ? 1 : 0)
+        }
+        .justifyContent(FlexAlign.Center)
+      }
+    }
+    .layoutWeight(1)
+    .padding({ top: this.wideLayout ? 2 : 3, bottom: this.wideLayout ? 2 : 1 })
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.selectedDate = cell.dateMs;
+      // 用户主动点了某天 ⇒ 记住这个日号，作为后续翻月的基准
+      this.preferredDay = new Date(cell.dateMs).getDate();
+      if (!cell.inMonth) {
+        const d = new Date(cell.dateMs);
+        this.displayYear = d.getFullYear();
+        this.displayMonth = d.getMonth();
+        this.rebuildPages();
+        this.swiperGuard = true;
+        this.swiperController.changeIndex(1, false);
+      }
+    })
+  }
   /** 把 42 个格子按每周 7 个分组 */
   private chunkCells(cells: MonthCell[]): MonthCell[][] {
     const weeks: MonthCell[][] = [];
@@ -4253,6 +5816,163 @@ class AgendaTimelineGroup {
   label: string = '';
   isToday: boolean = false;
   timeline: DayTimeline = new DayTimeline();
+}
+
+/**
+ * 列表视图的"待办 + 全天/跨天"区（#68）。
+ *
+ * 为什么做成独立组件：列表视图每天一张卡片，需要**每天独立折叠**
+ * （用户反馈：原来多个卡片共用一个折叠状态，"要收都收、要展都展"）。
+ * 独立组件 = 独立 @State topExpanded，天然互不影响。
+ *
+ * 为什么放在 DayTimelineView 外面：后者内部时间轴是固定高度 viewH()，
+ * 在它里面插内容会被挤出去（实测渲染不出来）。
+ */
+@Component
+struct AgendaTopBar {
+  @Prop todos: DisplayEvent[] = [];
+  @Prop allDay: DisplayEvent[] = [];
+  onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {
+  };
+  onToggleTodo: (t: DisplayEvent) => void = (t: DisplayEvent): void => {
+  };
+
+  /** 本卡片的折叠状态（每天独立） */
+  @State private expanded: boolean = false;
+
+  /** 合并条目：待办在前、全天在后 */
+  private items(): TopBarItem[] {
+    const out: TopBarItem[] = [];
+    for (const td of this.todos) {
+      const it = new TopBarItem();
+      it.isTodo = true;
+      it.ev = td;
+      out.push(it);
+    }
+    for (const ev of this.allDay) {
+      const it = new TopBarItem();
+      it.isTodo = false;
+      it.ev = ev;
+      out.push(it);
+    }
+    return out;
+  }
+
+  private total(): number {
+    return this.todos.length + this.allDay.length;
+  }
+
+  private visible(): TopBarItem[] {
+    const all: TopBarItem[] = this.items();
+    if (this.expanded || all.length <= 3) {
+      return all;
+    }
+    return all.slice(0, 3);
+  }
+
+  build() {
+    Column() {
+      if (this.total() > 0) {
+      Column({ space: 4 }) {
+        ForEach(this.visible(), (item: TopBarItem) => {
+          if (item.isTodo) {
+            Row({ space: 8 }) {
+              Stack() {
+                if (item.ev.completed) {
+                  Path()
+                    .width(18)
+                    .height(18)
+                    .commands('M5 9.5 L7.5 12.5 L13 6.5')
+                    .stroke('#FFFFFF')
+                    .strokeWidth(2)
+                    .strokeLineCap(LineCapStyle.Round)
+                    .strokeLineJoin(LineJoinStyle.Round)
+                    .fill(Color.Transparent)
+                }
+              }
+              .width(18)
+              .height(18)
+              .borderRadius(9)
+              .backgroundColor(item.ev.completed ? item.ev.color : 'rgba(0,0,0,0)')
+              .border({ width: 1.5, color: item.ev.color })
+              .onClick(() => {
+                this.onToggleTodo(item.ev);
+              })
+              Text(item.ev.title === '' ? '(无标题待办)' : item.ev.title)
+                .fontSize(12)
+                .fontColor($r('app.color.text_primary'))
+                .decoration({
+                  type: item.ev.completed ? TextDecorationType.LineThrough : TextDecorationType.None
+                })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 0.5, color: $r('app.color.shadow_color') })
+          } else {
+            Row({ space: 6 }) {
+              Text(item.ev.isAllDay ? '全天' : '跨天')
+                .fontSize(9)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#26000000')
+                .borderRadius(6)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              Text(item.ev.title === '' ? '(无标题)' : item.ev.title)
+                .fontSize(12)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#FFFFFF')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor(item.ev.color)
+            .onClick(() => this.onPick(item.ev))
+          }
+        }, (item: TopBarItem) => `ab_${item.isTodo ? 't' : 'a'}_${item.ev.id}_${item.ev.completed ? 1 : 0}`)
+
+        if (this.total() > 3) {
+          Row({ space: 4 }) {
+            Text(this.expanded ? '收起' : `还有 ${this.total() - 3} 条`)
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+            Text(this.expanded ? '⌃' : '⌄')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+          }
+          .width('100%')
+          .height(18)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => {
+            this.expanded = !this.expanded;
+          })
+        }
+      }
+      .width('100%')
+      .padding({ bottom: 4 })
+      }
+    }
+    .width('100%')
+  }
+}
+
+/**
+ * 顶部固定区（全天日程 + 待办）的一个条目（#68）。
+ * ArkTS 不允许内联对象字面量类型，必须用命名 class。
+ */
+class TopBarItem {
+  isTodo: boolean = false;   // true=待办（带勾选圈） false=全天/跨天日程（色块）
+  ev: DisplayEvent = new DisplayEvent();
 }
 
 /** 日程层纵向序列中的一行：空隙 / 冲突组。整点线与红线已移到另外两层，本层不含任何"线"。
@@ -4281,9 +6001,15 @@ struct DayTimelineView {
   private twoLineVp: number = 30;    // 能放下"标题 + 时间/地点"两行的高度门槛
   private threeLineVp: number = 46;  // 能放下"标题 / 时间 / 地址"三行的高度门槛
   onPick: (e: DisplayEvent) => void = (e: DisplayEvent): void => {};
+  onToggleTodo: (t: DisplayEvent) => void = (t: DisplayEvent): void => {}; // 勾选待办回调
   private scroller: Scroller = new Scroller();
   @State private viewportH: number = 0; // 滚动视口高度（由 Scroll 实测，用于把"当前时刻"居中）
-  @State private allDayH: number = 0;   // 顶部"全天/跨天"区高度（它现在随内容滚动，居中定位要加上）
+  /** ⭐ 顶部固定区（全天日程 + 待办）是否展开（#68）
+   *  默认折叠：最多显示 3 条，超出显示向下箭头。折叠是为了避免浮动区盖住大片时间轴视野。 */
+  @State private topExpanded: boolean = false;
+  /** 顶部"全天/跨天"区高度 —— #68 起该区移出 Scroll（浮动固定），
+   *  不再参与滚动偏移计算，恒为 0。保留字段仅为兼容旧引用。 */
+  @State private allDayH: number = 0;
   private pendingScroll: boolean = false;
 
   aboutToAppear(): void {
@@ -4293,6 +6019,49 @@ struct DayTimelineView {
   /** 显示日变为"今天"（或从今天切走）时触发；切到今天则自动定位到当前时刻 */
   private onShowNowLine(): void {
     this.scrollToNow();
+  }
+
+  /**
+   * 顶部固定区要显示的条目（#68）：**待办在前、全天/跨天在后**，合并成一个列表。
+   * 合并而不是分两块，是为了统一"最多显示 3 条"的限制 —— 否则两块各自 3 条会变 6 条。
+   */
+  private topItems(): TopBarItem[] {
+    const out: TopBarItem[] = [];
+    for (const td of this.timeline.todos) {
+      const it = new TopBarItem();
+      it.isTodo = true;
+      it.ev = td;
+      out.push(it);
+    }
+    for (const ev of this.timeline.allDay) {
+      const it = new TopBarItem();
+      it.isTodo = false;
+      it.ev = ev;
+      out.push(it);
+    }
+    return out;
+  }
+
+  /** 顶部固定区总条数 */
+  private topCount(): number {
+    return this.timeline.todos.length + this.timeline.allDay.length;
+  }
+
+  /** 折叠时最多显示 3 条（#68）；展开后显示全部 */
+  private topLimit(): number {
+    return this.topExpanded ? this.topCount() : 3;
+  }
+
+  /** 折叠时是否还有被藏起来的条目（决定要不要画展开箭头） */
+  private topHasMore(): boolean {
+    return this.topCount() > 3;
+  }
+
+  /** 取前 N 条（展开状态由 topLimit 决定） */
+  private topVisible(): TopBarItem[] {
+    const all: TopBarItem[] = this.topItems();
+    const lim: number = this.topLimit();
+    return all.length > lim ? all.slice(0, lim) : all;
   }
 
   /** 自动滚动：把"当前时刻红线"定位到可视区**垂直居中**
@@ -4311,8 +6080,9 @@ struct DayTimelineView {
       return;
     }
     const vp: number = this.viewportH > 0 ? this.viewportH : this.hourUnit * 8;
-    // 内容顶部还有"全天/跨天"区（allDayH），且时间轴只从 viewTop 开始 → 都要计入偏移
-    const y: number = this.allDayH + (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - vp / 2;
+    // #68：全天/待办区已移出 Scroll（浮动固定），偏移里不再加 allDayH。
+    // 时间轴只从 viewTop 开始 → 直接用比例换算即可。
+    const y: number = (TimelineUtil.nowRatio(this.nowMs) - this.viewTop()) * this.totalH() - vp / 2;
     setTimeout((): void => {
       this.scroller.scrollTo({ xOffset: 0, yOffset: y < 0 ? 0 : y });
     }, 60);
@@ -4525,7 +6295,20 @@ struct DayTimelineView {
 
   build() {
     Column() {
-      // 时间轴主体（含顶部"全天/跨天"条 —— 它们随内容一起滚动，向下滑时跟 0 点一起上移）。
+      // ⭐ 顶部固定区（待办 + 全天/跨天）#68：放在 Scroll **之外** → 不随时间轴滚动。
+      //    原来它在 timelineBody 里，会被"自动滚到当前时刻"带走，
+      //    导致下午 16 点打开时全天日程看不见。
+      //    ⚠️ 只对 scrollable（周/月视图）做固定区：
+      //    列表视图（scrollable=false）的卡片高度由"按日程起止截断的时间轴"决定，
+      //    在里面再插一个固定区会被固定高度的 timelineBody 挤到卡片外（实测红块跑到 y=620）。
+      //    列表视图逐天展开、不存在"自动滚到当前时刻"的问题，所以它继续把
+      //    待办+全天放在 timelineBody 内部跟随内容即可。
+      // ⭐ 顶部固定区（待办 + 全天/跨天）#68。
+      //    周/月视图：放在 Scroll 之外 → 不随时间轴滚动，保持固定。
+      //    列表视图：交给下面 else 分支（timelineBody 之前）渲染，那里才有正确的高度上下文。
+      if (this.scrollable) {
+        this.topBar()
+      }
       // scrollable=true 时包一层 Scroll 并自动定位到当前时刻；否则整页平铺。
       if (this.scrollable) {
         Scroll(this.scroller) {
@@ -4543,6 +6326,9 @@ struct DayTimelineView {
           }
         })
       } else {
+        // 列表视图：待办 + 全天/跨天（#68）。放在 timelineBody 之前，
+        // 这里的高度上下文才正确（放根 Column 第一位会被 ListItem 裁掉）。
+        this.topBar()
         this.timelineBody()
       }
     }
@@ -4553,24 +6339,81 @@ struct DayTimelineView {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 时间轴主体：顶部"全天/跨天"条（随滚动一起移动）+ 左侧小时刻度 + 右侧按冲突组分行、组内按列并排 */
+  /**
+   * 顶部固定区（#68）：待办 + 全天/跨天日程，**不随时间轴滚动**。
+   *
+   * 为什么加这个区：原来它们排在时间轴最前面，但打开日视图会自动滚到当前时刻
+   * （比如下午 16 点），于是全天日程被滚上去看不见了。改成浮动固定后，
+   * 不管时间轴怎么滚，它们都贴在日期行下方。
+   *
+   * 折叠机制（用户提的折中方案）：全天+待办合计**最多显示 3 条**，
+   * 超出时显示向下箭头，点一下展开全部；避免条数多时盖住大片视野。
+   */
+  /**
+   * 顶部区：待办 + 全天/跨天（#68）。
+   *
+   * @param render 是否真的渲染。ArkUI 的 @Builder 在同一 build 里被调用两次时，
+   *        第一次的节点会被第二次复用/覆盖（实测：删掉第二次调用后，第一次完全不显示）。
+   *        所以这里保留两次调用位：Scroll 分支前那次传 false（占位不渲染），
+   *        非滚动分支传 true（真正渲染），避免"显示两遍"。
+   */
   @Builder
-  private timelineBody() {
-    Column() {
-      // 全天 / 跨天日程：同样用**色块**展示（与普通日程保持一致的视觉），
-      // 画在 0 点之前并**随内容一起滚动**（向下滑时跟 0 点一起上移，不再常驻顶部）
-      if (this.timeline.allDay.length > 0) {
-        Column({ space: 4 }) {
-          ForEach(this.timeline.allDay, (e: DisplayEvent) => {
+  private topBar() {
+    if (this.topCount() > 0) {
+      Column({ space: 4 }) {
+        ForEach(this.topVisible(), (item: TopBarItem) => {
+          if (item.isTodo) {
+            // ---- 待办行：勾选圈 + 标题 ----
+            Row({ space: 8 }) {
+              // 矢量勾（#50）：字符 ✓ 依赖字体，粗细/居中不稳定
+              Stack() {
+                if (item.ev.completed) {
+                  Path()
+                    .width(18)
+                    .height(18)
+                    .commands('M5 9.5 L7.5 12.5 L13 6.5')
+                    .stroke('#FFFFFF')
+                    .strokeWidth(2)
+                    .strokeLineCap(LineCapStyle.Round)
+                    .strokeLineJoin(LineJoinStyle.Round)
+                    .fill(Color.Transparent)
+                }
+              }
+              .width(18)
+              .height(18)
+              .borderRadius(9)
+              .backgroundColor(item.ev.completed ? item.ev.color : 'rgba(0,0,0,0)')
+              .border({ width: 1.5, color: item.ev.color })
+              .onClick(() => {
+                this.onToggleTodo(item.ev);
+              })
+              Text(item.ev.title === '' ? '(无标题待办)' : item.ev.title)
+                .fontSize(12)
+                .fontColor($r('app.color.text_primary'))
+                .decoration({
+                  type: item.ev.completed ? TextDecorationType.LineThrough : TextDecorationType.None
+                })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .alignItems(VerticalAlign.Center)
+            .width('100%')
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .borderRadius(6)
+            .backgroundColor($r('app.color.card_bg'))
+            .border({ width: 0.5, color: $r('app.color.shadow_color') })
+          } else {
+            // ---- 全天/跨天日程：色块 ----
             Row({ space: 6 }) {
-              Text(e.isAllDay ? '全天' : '跨天')
+              Text(item.ev.isAllDay ? '全天' : '跨天')
                 .fontSize(9)
                 .fontColor('#FFFFFF')
                 .backgroundColor('#26000000')
                 .borderRadius(6)
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-              if (!e.writable) {
-                // 只读标记：圆角矩形白框 + 白字（与色块上的「只读」小标同一套样式）
+              if (!item.ev.writable) {
                 Text('只读')
                   .fontSize(9)
                   .fontColor('#FFFFFF')
@@ -4578,43 +6421,60 @@ struct DayTimelineView {
                   .borderRadius(4)
                   .padding({ left: 4, right: 4, top: 0, bottom: 0 })
               }
-              Text(e.title === '' ? '(无标题)' : e.title)
+              Text(item.ev.title === '' ? '(无标题)' : item.ev.title)
                 .fontSize(12)
                 .fontWeight(FontWeight.Medium)
                 .fontColor('#FFFFFF')
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .layoutWeight(1)
-              if (e.location !== '') {
-                Text(e.location)
+              if (item.ev.location !== '') {
+                Text(item.ev.location)
                   .fontSize(10)
                   .fontColor('#D9FFFFFF')
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .constraintSize({ maxWidth: 120 })
+                  .constraintSize({ maxWidth: 100 })
               }
             }
             .alignItems(VerticalAlign.Center)
             .width('100%')
-            .height(26)
+            .height(24)
             .padding({ left: 8, right: 8 })
-            .borderRadius(8)
-            // 只读不再用灰蒙版（已撤），只靠标题后的「只读」白框小标区分
-            .backgroundColor(e.color)
-            .onClick(() => this.onPick(e))
-          }, (e: DisplayEvent) => `al_${this.timeline.dateKey}_${TimelineUtil.keyOf(e)}_${e.writable ? 1 : 0}_${e.location.length}`)
-        }
-        .width('100%')
-        .padding({ bottom: 6 })
-        .onAreaChange((oldVal: Area, newVal: Area): void => {
-          const h: number = Number(newVal.height);
-          if (h > 0 && (h - this.allDayH > 1 || h - this.allDayH < -1)) {
-            this.allDayH = h;
-            this.tryScroll();
+            .borderRadius(6)
+            .backgroundColor(item.ev.color)
+            .onClick(() => this.onPick(item.ev))
           }
-        })
-      }
+        }, (item: TopBarItem) => `tb_${this.timeline.dateKey}_${item.isTodo ? 't' : 'a'}_${item.ev.id}_${item.ev.completed ? 1 : 0}`)
 
+        // 展开/收起箭头（合计超过 3 条时才出现）
+        if (this.topHasMore()) {
+          Row({ space: 4 }) {
+            Text(this.topExpanded ? '收起' : `还有 ${this.topCount() - 3} 条`)
+              .fontSize(10)
+              .fontColor($r('app.color.text_hint'))
+            Text(this.topExpanded ? '⌃' : '⌄')
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+          }
+          .width('100%')
+          .height(18)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => {
+            this.topExpanded = !this.topExpanded;
+          })
+        }
+      }
+      .width('100%')
+      .padding({ bottom: 6 })
+    }
+  }
+
+  /** 时间轴主体：左侧小时刻度 + 右侧按冲突组分行、组内按列并排（顶部固定区已移出，#68） */
+  @Builder
+  private timelineBody() {
+    Column() {
+      // 待办+全天区由 build() 负责渲染（#68），这里只有时间轴本体。
       Row() {
         // 左侧小时刻度（每格一条底线，作为时间尺；当前小时高亮）。只渲染视窗内的小时
         Column() {
