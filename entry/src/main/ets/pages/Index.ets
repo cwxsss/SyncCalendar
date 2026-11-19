@@ -765,7 +765,6 @@ struct Index {
           cell.lunar = hName.length > 3 ? hName.substring(0, 2) : hName;
         }
       }
-      }
       cells.push(cell);
     }
     if (month >= 0) {
@@ -879,6 +878,7 @@ struct Index {
     this.topRangeMode = (dateMs === today) ? 'today' : '';
     this.selectedDate = dateMs;
     this.rebuildDayTimeline();
+  }
 
   /**
    * 当天截止、尚未完成的待办（#45 待办投射到日历）。
