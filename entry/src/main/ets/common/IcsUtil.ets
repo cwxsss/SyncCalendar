@@ -1409,8 +1409,7 @@ export class IcsUtil {
   }
 
   /** 标准 VTODO 字符串双向同步到 CalDAV 服务器 */
-    /** 标准 VTODO 字符串双向同步到 CalDAV 服务器 */
-  static buildTodo(e: LocalEvent): string {
+  static buildTodoFromLocal(e: LocalEvent): string {
     const pad = (n: number): string => (n < 10 ? '0' : '') + n;
     const fmtLocal = (ms: number): string => {
       const d = new Date(ms);

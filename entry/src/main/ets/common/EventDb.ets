@@ -121,7 +121,6 @@ export class LocalEvent {
 /** 远端事件条目（REPORT 解析结果） */
 export class RemoteEvent {
   uid: string = '';
-  remotePath: string = '';
   etag: string = '';
   title: string = '';
   description: string = '';

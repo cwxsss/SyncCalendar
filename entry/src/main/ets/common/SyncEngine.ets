@@ -700,7 +700,7 @@ export class SyncEngine {
             }
           }
         } else {
-          const ics: string = IcsUtil.buildTodo(e);
+          const ics: string = IcsUtil.buildTodoFromLocal(e);
           try {
             const etag: string = await DavClient.putEvent(url, auth, ics);
             await EventDb.clearDirty(context, e.id, etag);
