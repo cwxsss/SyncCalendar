@@ -1741,16 +1741,16 @@ struct EventEditPage {
           .backgroundColor($r('app.color.card_bg'))
 
           // 时间卡片（开始与结束时间显示到一行，紧凑一点）
-          Row({ space: 8 }) {
+          Row({ space: 6 }) {
             // 开始时间
             Column({ space: 2 }) {
               Text('开始')
                 .fontSize(11)
                 .fontColor($r('app.color.text_secondary'))
               Text(this.allDay
-                ? `${this.fmtDate(this.startMs)} ${this.weekName(this.startMs)}`
-                : `${this.fmtDate(this.startMs)} ${this.weekName(this.startMs)} ${this.fmtTime(this.startMs)}`)
-                .fontSize(13)
+                ? this.fmtDate(this.startMs)
+                : `${this.fmtDate(this.startMs)} ${this.fmtTime(this.startMs)}`)
+                .fontSize(12)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.brand'))
                 .maxLines(1)
@@ -1768,7 +1768,7 @@ struct EventEditPage {
             Text('至')
               .fontSize(12)
               .fontColor($r('app.color.text_hint'))
-              .padding({ left: 2, right: 2 })
+              .padding({ left: 1, right: 1 })
 
             // 结束时间
             Column({ space: 2 }) {
@@ -1776,9 +1776,9 @@ struct EventEditPage {
                 .fontSize(11)
                 .fontColor($r('app.color.text_secondary'))
               Text(this.allDay
-                ? `${this.fmtDate(this.endMs)} ${this.weekName(this.endMs)}`
-                : `${this.fmtDate(this.endMs)} ${this.weekName(this.endMs)} ${this.fmtTime(this.endMs)}`)
-                .fontSize(13)
+                ? this.fmtDate(this.endMs)
+                : `${this.fmtDate(this.endMs)} ${this.fmtTime(this.endMs)}`)
+                .fontSize(12)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.brand'))
                 .maxLines(1)
@@ -2334,8 +2334,8 @@ struct EventEditPage {
         .fontColor($r('app.color.text_secondary'))
         .width(36)
       Text(this.allDay
-        ? `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.weekName(isStart ? this.startMs : this.endMs)}`
-        : `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.weekName(isStart ? this.startMs : this.endMs)} ${this.fmtTime(isStart ? this.startMs : this.endMs)}`)
+        ? this.fmtDate(isStart ? this.startMs : this.endMs)
+        : `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.fmtTime(isStart ? this.startMs : this.endMs)}`)
         .fontSize(15)
         .fontColor($r('app.color.brand'))
         .layoutWeight(1)
