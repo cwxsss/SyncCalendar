@@ -511,10 +511,22 @@ struct TodoEditPage {
   }
 
   // ---------- 显示 ----------
+  private getWeekDayStr(d: Date): string {
+    const w = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return w[d.getDay()];
+  }
+
+  private fmtDateWithWeek(d: Date): string {
+    const p = (n: number): string => n < 10 ? '0' + n : String(n);
+    const w = this.getWeekDayStr(d);
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${w}`;
+  }
+
   private fmtDue(ms: number): string {
     const d = new Date(ms);
     const p = (n: number): string => n < 10 ? '0' + n : String(n);
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    const w = this.getWeekDayStr(d);
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${w} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
   private reminderActive(v: number): boolean {
@@ -948,14 +960,20 @@ struct TodoEditPage {
   /** 截止时间选择弹层（居中卡片：日期 + 时间） */
   @Builder
   dueDialog() {
-    Column({ space: 14 }) {
-      Text('选择截止时间')
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .padding({ top: 12 })
+    Column({ space: 10 }) {
+      Column({ space: 4 }) {
+        Text('选择截止时间')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Text(this.fmtDateWithWeek(this.pickDate))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Center)
+      .padding({ top: 12 })
       Row({ space: 6 }) {
         DatePicker({
           start: new Date(2000, 0, 1),

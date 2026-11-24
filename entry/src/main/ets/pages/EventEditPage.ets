@@ -660,6 +660,12 @@ struct EventEditPage {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
+  private weekName(ms: number): string {
+    const d = new Date(ms);
+    const w = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return w[d.getDay()];
+  }
+
   private fmtTime(ms: number): string {
     const d = new Date(ms);
     const p = (n: number): string => n < 10 ? '0' + n : String(n);
@@ -1742,8 +1748,8 @@ struct EventEditPage {
                 .fontSize(11)
                 .fontColor($r('app.color.text_secondary'))
               Text(this.allDay
-                ? this.fmtDate(this.startMs)
-                : `${this.fmtDate(this.startMs)} ${this.fmtTime(this.startMs)}`)
+                ? `${this.fmtDate(this.startMs)} ${this.weekName(this.startMs)}`
+                : `${this.fmtDate(this.startMs)} ${this.weekName(this.startMs)} ${this.fmtTime(this.startMs)}`)
                 .fontSize(13)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.brand'))
@@ -1770,8 +1776,8 @@ struct EventEditPage {
                 .fontSize(11)
                 .fontColor($r('app.color.text_secondary'))
               Text(this.allDay
-                ? this.fmtDate(this.endMs)
-                : `${this.fmtDate(this.endMs)} ${this.fmtTime(this.endMs)}`)
+                ? `${this.fmtDate(this.endMs)} ${this.weekName(this.endMs)}`
+                : `${this.fmtDate(this.endMs)} ${this.weekName(this.endMs)} ${this.fmtTime(this.endMs)}`)
                 .fontSize(13)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.brand'))
@@ -2328,8 +2334,8 @@ struct EventEditPage {
         .fontColor($r('app.color.text_secondary'))
         .width(36)
       Text(this.allDay
-        ? this.fmtDate(isStart ? this.startMs : this.endMs)
-        : `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.fmtTime(isStart ? this.startMs : this.endMs)}`)
+        ? `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.weekName(isStart ? this.startMs : this.endMs)}`
+        : `${this.fmtDate(isStart ? this.startMs : this.endMs)} ${this.weekName(isStart ? this.startMs : this.endMs)} ${this.fmtTime(isStart ? this.startMs : this.endMs)}`)
         .fontSize(15)
         .fontColor($r('app.color.brand'))
         .layoutWeight(1)
@@ -2717,6 +2723,17 @@ struct DateTimePickerSheetContent {
   private readonly pickerStart: Date = new Date(2000, 0, 1);
   private readonly pickerEnd: Date = new Date(2050, 11, 31);
 
+  private getWeekDayStr(d: Date): string {
+    const w = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return w[d.getDay()];
+  }
+
+  private fmtDateWithWeek(d: Date): string {
+    const p = (n: number): string => n < 10 ? '0' + n : String(n);
+    const w = this.getWeekDayStr(d);
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${w}`;
+  }
+
   aboutToAppear(): void {
     this.currentDate = new Date(this.initDate.getTime());
     this.selectedDate = new Date(this.initDate.getTime());
@@ -2726,14 +2743,20 @@ struct DateTimePickerSheetContent {
   }
 
   build() {
-    Column({ space: 14 }) {
-      Text(this.pickerTitle)
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .padding({ top: 12 })
+    Column({ space: 10 }) {
+      Column({ space: 4 }) {
+        Text(this.pickerTitle)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Text(this.fmtDateWithWeek(this.currentDate))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Center)
+      .padding({ top: 12 })
 
       Row({ space: 6 }) {
         DatePicker({
@@ -2800,23 +2823,42 @@ struct RepeatEndSheetContent {
   initDate: Date = new Date();
   onConfirm: (date: Date) => void = () => {};
 
+  @State private currentDate: Date = new Date();
   private selectedDate: Date = new Date();
   private readonly pickerStart: Date = new Date(2000, 0, 1);
   private readonly repeatUntilEnd: Date = new Date(2060, 11, 31);
 
+  private getWeekDayStr(d: Date): string {
+    const w = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return w[d.getDay()];
+  }
+
+  private fmtDateWithWeek(d: Date): string {
+    const p = (n: number): string => n < 10 ? '0' + n : String(n);
+    const w = this.getWeekDayStr(d);
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${w}`;
+  }
+
   aboutToAppear(): void {
     this.selectedDate = new Date(this.initDate.getTime());
+    this.currentDate = new Date(this.initDate.getTime());
   }
 
   build() {
-    Column({ space: 14 }) {
-      Text('重复到哪一天')
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .padding({ top: 12 })
+    Column({ space: 10 }) {
+      Column({ space: 4 }) {
+        Text('重复到哪一天')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Text(this.fmtDateWithWeek(this.currentDate))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.brand'))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Center)
+      .padding({ top: 12 })
 
       DatePicker({
         start: this.pickerStart,
@@ -2826,6 +2868,7 @@ struct RepeatEndSheetContent {
         .onDateChange((value: Date) => {
           if (value && !isNaN(value.getTime())) {
             this.selectedDate = value;
+            this.currentDate = value;
           }
         })
         .textStyle({ color: $r('app.color.text_secondary'), font: { size: 14 } })

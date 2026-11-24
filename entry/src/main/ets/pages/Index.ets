@@ -2655,31 +2655,44 @@ struct Index {
             .fontSize(11)
             // ⚠️ 这里原来用 button_text（纯白），但该标签**没有背景**、坐在页面底色上，
             //    浅色模式下是"白字压浅灰底"→ 对比度仅 1.11:1（应用市场 UX 检测被判不合格）。
-            //    改用 brand_text（品牌色文字版）：浅 #0057C2 → 6.01:1，深 #4DA3FF → 8.0:1，
-            //    既保留"选中"的强调含义，又满足对比度要求。
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.brand_text') : $r('app.color.text_hint'))
+            //    改用 brand_text（品牌色文字版）：浅 #0057C2 → 6.01:1，深 #4DA3FF → 8.0:1。
+            //    今天则使用深红色 event_mark 高亮。
+            .fontColor(cell.isToday
+              ? $r('app.color.event_mark')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.brand_text') : $r('app.color.text_hint')))
           Text(String(cell.day))
             .fontSize(14)
             .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
               ? FontWeight.Bold : FontWeight.Normal)
-            .fontColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.text_primary'))
+            .fontColor(cell.isToday
+              ? $r('app.color.event_mark')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.text_primary')))
             .width(30)
             .height(30)
             .textAlign(TextAlign.Center)
             .borderRadius(15)
-            .backgroundColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.selected_bg')
-              : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+            .backgroundColor(cell.isToday
+              ? (cell.dateMs === this.selectedDate ? '#26D93025' : '#14D93025')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.selected_bg')
+                : Color.Transparent))
+            .border((cell.isToday && cell.dateMs === this.selectedDate)
+              ? { width: 1.5, color: $r('app.color.event_mark') } : undefined)
           Text(cell.lunar)
             .fontSize(8)
-            .fontColor($r('app.color.text_hint'))
+            .fontColor(cell.isToday
+              ? $r('app.color.event_mark')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.brand_text') : $r('app.color.text_hint')))
             .maxLines(1)
           Row() {
             if (cell.hasEvents) {
               Circle({ width: 4, height: 4 })
-                .fill(cell.dateMs === this.selectedDate ? $r('app.color.brand') : '#FF3B30')
+                .fill(cell.isToday
+                  ? $r('app.color.event_mark')
+                  : (cell.dateMs === this.selectedDate ? $r('app.color.brand') : '#FF3B30'))
             }
           }
           .height(4)
@@ -2946,7 +2959,7 @@ struct Index {
         Text(this.fmtDateCn(this.selectedDate))
           .fontSize(13)
           .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_secondary'))
+          .fontColor(this.isOnToday() ? $r('app.color.event_mark') : $r('app.color.text_secondary'))
         Blank()
         Text(this.fmtMonthTitle())
           .fontSize(12)
@@ -3231,7 +3244,7 @@ struct Index {
             Text(this.fmtDateCn(this.selectedDate))
               .fontSize(13)
               .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.text_secondary'))
+              .fontColor(this.isOnToday() ? $r('app.color.event_mark') : $r('app.color.text_secondary'))
             Blank()
           }
           .width('100%')
@@ -3264,24 +3277,31 @@ struct Index {
           Row({ space: 10 }) {
             Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
               .fontSize(12)
-              // 同上：选中态改用高对比的 brand_text（原 text_secondary 在浅色下仅 2.85:1）
-              .fontColor(cell.dateMs === this.selectedDate
-                ? $r('app.color.brand_text') : $r('app.color.text_hint'))
+              .fontColor(cell.isToday
+                ? $r('app.color.event_mark')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.brand_text') : $r('app.color.text_hint')))
               .width(18)
               .textAlign(TextAlign.Center)
             Text(String(cell.day))
               .fontSize(15)
               .fontWeight(cell.dateMs === this.selectedDate || cell.isToday
                 ? FontWeight.Bold : FontWeight.Normal)
-              .fontColor(cell.dateMs === this.selectedDate
-                ? $r('app.color.button_text') : $r('app.color.text_primary'))
+              .fontColor(cell.isToday
+                ? $r('app.color.event_mark')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.button_text') : $r('app.color.text_primary')))
               .width(32)
               .height(32)
               .textAlign(TextAlign.Center)
               .borderRadius(16)
-              .backgroundColor(cell.dateMs === this.selectedDate
-                ? $r('app.color.selected_bg')
-                : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+              .backgroundColor(cell.isToday
+                ? (cell.dateMs === this.selectedDate ? '#26D93025' : '#14D93025')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.selected_bg')
+                  : Color.Transparent))
+              .border((cell.isToday && cell.dateMs === this.selectedDate)
+                ? { width: 1.5, color: $r('app.color.event_mark') } : undefined)
           }
           .width('100%')
           .height(44)
@@ -3413,7 +3433,7 @@ struct Index {
             Text(day.label)
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_secondary'))
+              .fontColor(day.isToday ? $r('app.color.event_mark') : $r('app.color.text_secondary'))
               .width('100%')
               .padding({ top: 6, bottom: 2 })
           }
@@ -3468,12 +3488,12 @@ struct Index {
                 Text(day.label)
                   .fontSize(14)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(day.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))
+                  .fontColor(day.isToday ? $r('app.color.event_mark') : $r('app.color.text_primary'))
                 if (day.isToday) {
                   Text('今天')
                     .fontSize(10)
                     .fontColor($r('app.color.button_text'))
-                    .backgroundColor($r('app.color.brand'))
+                    .backgroundColor($r('app.color.event_mark'))
                     .borderRadius(6)
                     .padding({ left: 6, right: 6, top: 1, bottom: 1 })
                 }
@@ -3719,7 +3739,7 @@ struct Index {
     for (const key of keys) {
       const g = new AgendaTimelineGroup();
       g.dateMs = key;
-      g.label = key === today ? '今天' : this.fmtDateCn(key);
+      g.label = this.fmtDateCn(key);
       g.isToday = key === today;
       const tl: DayTimeline = TimelineUtil.build(map.get(key) ?? [], key);
       tl.todos = this.todosDueOn(key);
@@ -5395,14 +5415,18 @@ struct Index {
           .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
           .fontColor(!cell.inMonth
             ? $r('app.color.text_hint')
-            : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary')))
+            : (cell.isToday
+              ? $r('app.color.event_mark')
+              : (cell.dateMs === this.selectedDate ? $r('app.color.button_text') : $r('app.color.text_primary'))))
           .width(this.wideLayout ? 22 : 24)
           .height(this.wideLayout ? 22 : 24)
           .textAlign(TextAlign.Center)
           .borderRadius(this.wideLayout ? 11 : 12)
-          .backgroundColor(cell.dateMs === this.selectedDate
-            ? Color.Transparent
-            : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+          .backgroundColor(cell.isToday
+            ? (cell.dateMs === this.selectedDate ? '#26D93025' : '#14D93025')
+            : (cell.dateMs === this.selectedDate ? $r('app.color.selected_bg') : Color.Transparent))
+          .border((cell.isToday && cell.dateMs === this.selectedDate)
+            ? { width: 1.5, color: $r('app.color.event_mark') } : undefined)
 
         if (cell.holidayBadge !== '') {
           Text(cell.holidayBadge)
@@ -5419,16 +5443,16 @@ struct Index {
       if (!this.wideLayout) {
         Text(cell.lunar)
           .fontSize(8)
-          // 选中 → 与日期同色（白），保证在同块蓝底上都看得清
-          .fontColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.button_text') : $r('app.color.text_hint'))
+          .fontColor(cell.isToday
+            ? $r('app.color.event_mark')
+            : (cell.dateMs === this.selectedDate ? $r('app.color.brand_text') : $r('app.color.text_hint')))
           .maxLines(1)
       }
       // 无事件时圆点透明但仍占位：保证有/无事件的行高完全一致，整月不会跳
-      // 选中时圆点也转白（与日期同色），否则浅红压在蓝底上会发灰
       Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
-        .fill(cell.dateMs === this.selectedDate
-          ? $r('app.color.button_text') : $r('app.color.soft_red'))
+        .fill(cell.isToday
+          ? $r('app.color.event_mark')
+          : (cell.dateMs === this.selectedDate ? $r('app.color.brand') : $r('app.color.soft_red')))
         .opacity((cell.hasEvent || cell.hasEvents) ? 1 : 0)
     }
     .layoutWeight(1)
@@ -5461,16 +5485,22 @@ struct Index {
             .fontWeight(cell.isToday || cell.dateMs === this.selectedDate ? FontWeight.Bold : FontWeight.Normal)
             .fontColor(!cell.inMonth
               ? $r('app.color.text_hint')
-              : (cell.dateMs === this.selectedDate
-                ? $r('app.color.button_text')
-                : (cell.isToday ? $r('app.color.brand') : $r('app.color.text_primary'))))
+              : (cell.isToday
+                ? $r('app.color.event_mark')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.button_text')
+                  : $r('app.color.text_primary'))))
             .width(20)
             .height(20)
             .textAlign(TextAlign.Center)
             .borderRadius(10)
-            .backgroundColor(cell.dateMs === this.selectedDate
-              ? $r('app.color.selected_bg')
-              : (cell.isToday ? $r('app.color.today_bg') : Color.Transparent))
+            .backgroundColor(cell.isToday
+              ? (cell.dateMs === this.selectedDate ? '#26D93025' : '#14D93025')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.selected_bg')
+                : Color.Transparent))
+            .border((cell.isToday && cell.dateMs === this.selectedDate)
+              ? { width: 1, color: $r('app.color.event_mark') } : undefined)
 
           if (cell.holidayBadge !== '') {
             Text(cell.holidayBadge)
@@ -5487,7 +5517,9 @@ struct Index {
 
         Text(cell.lunar)
           .fontSize(8)
-          .fontColor(!cell.inMonth ? $r('app.color.text_hint') : $r('app.color.text_hint'))
+          .fontColor(cell.isToday
+            ? $r('app.color.event_mark')
+            : (!cell.inMonth ? $r('app.color.text_hint') : $r('app.color.text_hint')))
           .maxLines(1)
           .layoutWeight(1)
       }
@@ -5599,23 +5631,26 @@ struct Index {
       if (showWeekLabel) {
         Text(WEEK_LABELS[(new Date(cell.dateMs).getDay() + 6) % 7])
           .fontSize(10)
-          .fontColor(cell.dateMs === this.selectedDate
-            ? $r('app.color.brand_text') : $r('app.color.text_secondary'))
+          .fontColor(cell.isToday
+            ? $r('app.color.event_mark')
+            : (cell.dateMs === this.selectedDate
+              ? $r('app.color.brand_text') : $r('app.color.text_secondary')))
       }
       Stack({ alignContent: Alignment.Center }) {
-        // 圆底：选中实蓝、今天淡蓝，尺寸一致
+        // 圆底：选中实蓝、今天淡红，尺寸一致
         if (cell.dateMs === this.selectedDate) {
           Column()
             .width(this.wideLayout ? 40 : 46)
             .height(this.wideLayout ? 40 : 46)
             .borderRadius('50%')
-            .backgroundColor($r('app.color.selected_bg'))
+            .backgroundColor(cell.isToday ? '#26D93025' : $r('app.color.selected_bg'))
+            .border(cell.isToday ? { width: 1.5, color: $r('app.color.event_mark') } : undefined)
         } else if (cell.isToday) {
           Column()
             .width(this.wideLayout ? 40 : 46)
             .height(this.wideLayout ? 40 : 46)
             .borderRadius('50%')
-            .backgroundColor($r('app.color.today_bg'))
+            .backgroundColor('#14D93025')
         }
         Column({ space: 1 }) {
           Text(String(cell.day))
@@ -5624,8 +5659,10 @@ struct Index {
               ? FontWeight.Bold : FontWeight.Normal)
             .fontColor(!cell.inMonth
               ? $r('app.color.text_hint')
-              : (cell.dateMs === this.selectedDate
-                ? $r('app.color.button_text') : $r('app.color.text_primary')))
+              : (cell.isToday
+                ? $r('app.color.event_mark')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.button_text') : $r('app.color.text_primary'))))
             .width(this.wideLayout ? 22 : 24)
             .height(this.wideLayout ? 22 : 24)
             .textAlign(TextAlign.Center)
@@ -5636,15 +5673,19 @@ struct Index {
             // 周条的农历提亮一档（text_secondary），月历保持 text_hint
             Text(cell.lunar)
               .fontSize(showWeekLabel ? 9 : 8)
-              .fontColor(cell.dateMs === this.selectedDate
-                ? $r('app.color.button_text')
-                : (showWeekLabel ? $r('app.color.text_secondary') : $r('app.color.text_hint')))
+              .fontColor(cell.isToday
+                ? $r('app.color.event_mark')
+                : (cell.dateMs === this.selectedDate
+                  ? $r('app.color.button_text')
+                  : (showWeekLabel ? $r('app.color.text_secondary') : $r('app.color.text_hint'))))
               .maxLines(1)
           }
           // 事件点：无事件时透明但仍占位，保证行高一致、整月不跳
           Circle({ width: this.wideLayout ? 4 : 3.5, height: this.wideLayout ? 4 : 3.5 })
-            .fill(cell.dateMs === this.selectedDate
-              ? $r('app.color.button_text') : $r('app.color.soft_red'))
+            .fill(cell.isToday
+              ? $r('app.color.event_mark')
+              : (cell.dateMs === this.selectedDate
+                ? $r('app.color.button_text') : $r('app.color.soft_red')))
             .opacity(cell.hasEvent ? 1 : 0)
         }
         .justifyContent(FlexAlign.Center)
