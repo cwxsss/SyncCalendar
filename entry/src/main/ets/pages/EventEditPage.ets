@@ -138,6 +138,7 @@ struct EventEditPage {
   /** 本次编辑的"目标发生时刻"（未改期时 = 原发生时刻；用户改了开始时间 → 新时刻） */
   private occStartMs: number = 0;
   private event: LocalEvent | null = null;
+  private formErrTimer: number = -1;
 
   aboutToAppear(): Promise<void> {
     // 键盘避让不阻塞页面加载：拿窗口是异步的，失败也只是少一层滚动校正
@@ -145,9 +146,13 @@ struct EventEditPage {
     return this.initPage();
   }
 
-  /** 页面销毁：清掉地点补全的防抖定时器 */
+  /** 页面销毁：清掉地点补全与错误滚动定时器 */
   aboutToDisappear(): void {
     this.cancelSuggestTimer();
+    if (this.formErrTimer !== -1) {
+      clearTimeout(this.formErrTimer);
+      this.formErrTimer = -1;
+    }
   }
 
   /**
@@ -916,7 +921,11 @@ struct EventEditPage {
       // Toast 失败也不影响其它两种提示
     }
     // ③ 滚回出错位置：延时一帧，等状态刷新（标红后高度可能变化）后再滚
-    setTimeout(() => {
+    if (this.formErrTimer !== -1) {
+      clearTimeout(this.formErrTimer);
+    }
+    this.formErrTimer = setTimeout(() => {
+      this.formErrTimer = -1;
       try {
         if (field === 'title') {
           this.formScroller.scrollEdge(Edge.Top);

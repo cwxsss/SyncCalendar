@@ -1037,11 +1037,15 @@ export class SystemCalendarMirror {
         if (desired.reminderTime === undefined) {
           desired.reminderTime = [];
         }
-        await cal.updateEvent(desired);
-        res.updated++;
-        if (logged < 5) { // 只记前 5 条，避免刷屏
-          LogUtil.write(`镜像更新[${ref.name}] ${occ.identifier}: 差异=${diff}`);
-          logged++;
+        try {
+          await cal.updateEvent(desired);
+          res.updated++;
+          if (logged < 5) { // 只记前 5 条，避免刷屏
+            LogUtil.write(`镜像更新[${ref.name}] ${occ.identifier}: 差异=${diff}`);
+            logged++;
+          }
+        } catch (err) {
+          LogUtil.write(`镜像更新单条失败[${ref.name}] ${occ.identifier}: ${(err as BusinessError).message}`);
         }
       }
     }
@@ -1050,18 +1054,32 @@ export class SystemCalendarMirror {
       await SystemCalendarMirror.addInChunks(cal, toAdd, res);
     }
 
-    // 删除：本地已没有，但系统日历里还在的**我们写进去的**条目
+    // 删除：本地已没有，但系统日历里还在的**我们写进去的**条目（批量删除）
     for (const id of want) {
       existing.delete(id);
     }
+    const delIds: number[] = [];
     for (const id of existing.keys()) {
       if (!id.startsWith(`${ref.bookId}|`)) {
         continue; // 不是本日历本写进去的（可能是用户在系统日历里手动加的）→ 保留
       }
       const ev: calendarManager.Event | undefined = existing.get(id);
       if (ev !== undefined && ev.id !== undefined) {
-        await cal.deleteEvent(ev.id);
-        res.deleted++;
+        delIds.push(ev.id);
+      }
+    }
+    if (delIds.length > 0) {
+      try {
+        await cal.deleteEvents(delIds);
+        res.deleted += delIds.length;
+      } catch (err) {
+        // 批量删除失败时回退逐条尝试，避免单条异常阻断快照重建
+        for (const eid of delIds) {
+          try {
+            await cal.deleteEvent(eid);
+            res.deleted++;
+          } catch (_e2) {}
+        }
       }
     }
 
@@ -1262,7 +1280,7 @@ export class SystemCalendarMirror {
     //   原因：写进系统日历的 reminderTime 一旦其时刻已过，系统会在**任何一次覆写**时
     //   立即补发一条通知 → 表现为"日程都过去了还提醒"。这类提醒已无意义，索性不写。
     const future: number[] = SystemCalendarMirror.futureReminders(
-      reminders, startTs, e.isAllDay, Date.now());
+      reminders, finalStartTs, finalAllDay, Date.now());
     if (future.length > 0) {
       ev.reminderTime = future;
     }

@@ -91,6 +91,9 @@ export class DavClient {
       });
       console.info(`PROPFIND(颜色) 响应码: ${resp.responseCode}`);
       LogUtil.write(`HTTP PROPFIND(颜色) ${serverUrl} → ${resp.responseCode}`);
+      if (resp.responseCode === 401 || resp.responseCode === 403) {
+        throw new DavHttpError(resp.responseCode, `服务器拒绝凭据 (${resp.responseCode})`);
+      }
       if (resp.responseCode !== 207 && resp.responseCode !== 200) {
         return [];
       }
@@ -578,8 +581,6 @@ export class DavClient {
       }
       const xml: string = resp.result as string;
       LogUtil.write(`HTTP REPORT(${compName}) 响应体 ${xml.length} 字符`);
-      LogUtil.write(`REPORT-诊断(${compName}) 前200字符: ${xml.substring(0, 200)}`);
-      LogUtil.write(`REPORT-诊断(${compName}) 含VTODO=${xml.indexOf('BEGIN:VTODO') >= 0} 含VEVENT=${xml.indexOf('BEGIN:VEVENT') >= 0} 响应数=${(xml.match(/<[\w-]*:?response[\s>]/gi) || []).length}`);
       const originMatch = /https?:\/\/[^/]+/i.exec(href);
       const origin: string = originMatch !== null ? originMatch[0] : '';
       const items: RemoteItem[] = [];
@@ -594,8 +595,8 @@ export class DavClient {
         }
         const etag: string = DavClient.extractTag(block, 'getetag').replace(/"/g, '');
         const start: number = block.indexOf('BEGIN:VCALENDAR');
-        const end: number = block.indexOf('END:VCALENDAR');
-        if (start < 0 || end < 0) {
+        const end: number = block.lastIndexOf('END:VCALENDAR');
+        if (start < 0 || end < start) {
           continue;
         }
         const item = new RemoteItem();
@@ -605,13 +606,6 @@ export class DavClient {
         item.ics = DavClient.unescapeXmlEntities(
           block.substring(start, end + 'END:VCALENDAR'.length));
         items.push(item);
-      }
-      LogUtil.write(`诊断 blocks=${blocks.length} items=${items.length} xml长=${xml.length}`);
-      for (let bi = 0; bi < blocks.length; bi++) {
-        const bb: string = blocks[bi];
-        if (!/<[\w-]*:?response[\s>]/i.test(bb)) { continue; }
-        const h: string = DavClient.extractTag(bb, "href");
-        LogUtil.write(`诊断 block${bi} len=${bb.length} href=[${h.substring(0,50)}] VCAL=${bb.indexOf("BEGIN:VCALENDAR")>=0} VTODO=${bb.indexOf("BEGIN:VTODO")>=0}`);
       }
       return items;
     } finally {
@@ -709,9 +703,15 @@ export class DavClient {
       .replace(/&amp;/g, '&');
   }
 
+  private static tagRegexCache: Map<string, RegExp> = new Map();
+
   static extractTag(xml: string, tag: string): string {
-    const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
-    const regex: RegExp = new RegExp(pattern, 'i');
+    let regex: RegExp | undefined = DavClient.tagRegexCache.get(tag);
+    if (regex === undefined) {
+      const pattern: string = '<([\\w-]+:)?' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/([\\w-]+:)?' + tag + '>';
+      regex = new RegExp(pattern, 'i');
+      DavClient.tagRegexCache.set(tag, regex);
+    }
     const match = regex.exec(xml);
     // 属性值同样是 XML 文本节点，可能带实体（如 displayname 含 & 或 <）
     return match !== null ? DavClient.unescapeXmlEntities(match[2].trim()) : '';

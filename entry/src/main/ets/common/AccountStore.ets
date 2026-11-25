@@ -244,13 +244,20 @@ class Vault {
     props.push({ tag: huks.HuksTag.HUKS_TAG_NONCE, value: nonce });
     props.push({ tag: huks.HuksTag.HUKS_TAG_ASSOCIATED_DATA, value: Vault.aad() });
     const session: huks.HuksSessionHandle = await huks.initSession(HUKS_ALIAS, { properties: props });
-    const result: huks.HuksReturnResult =
-      await huks.finishSession(session.handle, { properties: props, inData: strToBytes(plain) });
-    const buf: Uint8Array | undefined = result.outData;
-    if (buf === undefined || buf.length === 0) {
-      throw new Error('HUKS 加密返回空数据');
+    try {
+      const result: huks.HuksReturnResult =
+        await huks.finishSession(session.handle, { properties: props, inData: strToBytes(plain) });
+      const buf: Uint8Array | undefined = result.outData;
+      if (buf === undefined || buf.length === 0) {
+        throw new Error('HUKS 加密返回空数据');
+      }
+      return `${bytesToB64(nonce)}:${bytesToB64(buf)}`;
+    } catch (err) {
+      try {
+        await huks.abortSession(session.handle, { properties: props });
+      } catch (_abortErr) {}
+      throw err as Error;
     }
-    return `${bytesToB64(nonce)}:${bytesToB64(buf)}`;
   }
 
   /** HUKS 解密（nonce 与密文分开传递）；失败抛异常由上层统一兜底 */
@@ -259,10 +266,17 @@ class Vault {
     props.push({ tag: huks.HuksTag.HUKS_TAG_NONCE, value: b64ToBytes(nonceB64) });
     props.push({ tag: huks.HuksTag.HUKS_TAG_ASSOCIATED_DATA, value: Vault.aad() });
     const session: huks.HuksSessionHandle = await huks.initSession(HUKS_ALIAS, { properties: props });
-    const result: huks.HuksReturnResult =
-      await huks.finishSession(session.handle, { properties: props, inData: b64ToBytes(cipherB64) });
-    const buf: Uint8Array | undefined = result.outData;
-    return buf === undefined ? null : bytesToStr(buf);
+    try {
+      const result: huks.HuksReturnResult =
+        await huks.finishSession(session.handle, { properties: props, inData: b64ToBytes(cipherB64) });
+      const buf: Uint8Array | undefined = result.outData;
+      return buf === undefined ? null : bytesToStr(buf);
+    } catch (err) {
+      try {
+        await huks.abortSession(session.handle, { properties: props });
+      } catch (_abortErr) {}
+      throw err as Error;
+    }
   }
 
   /**
@@ -463,6 +477,37 @@ class Vault {
  * 账号持久化：加密 JSON 存储 + 旧版明文自动迁移
  */
 export class AccountStore {
+  private static cachedAccounts: DavAccount[] | null = null;
+  private static writeQueue: Promise<void> = Promise.resolve();
+
+  private static cloneAccount(src: DavAccount): DavAccount {
+    const a = new DavAccount();
+    a.id = src.id;
+    a.type = src.type;
+    a.name = src.name;
+    a.serverUrl = src.serverUrl;
+    a.username = src.username;
+    a.password = src.password;
+    a.calendarHrefs = src.calendarHrefs.slice();
+    a.calendarNames = src.calendarNames.slice();
+    a.calendarColors = src.calendarColors.slice();
+    a.calendarWritable = src.calendarWritable.slice();
+    a.calendarComps = src.calendarComps.slice();
+    a.calendarFailCount = src.calendarFailCount.slice();
+    a.calendarNextRetry = src.calendarNextRetry.slice();
+    a.itemCount = src.itemCount;
+    a.lastSyncTime = src.lastSyncTime;
+    return a;
+  }
+
+  private static cloneList(list: DavAccount[]): DavAccount[] {
+    return list.map((a: DavAccount): DavAccount => AccountStore.cloneAccount(a));
+  }
+
+  static invalidateCache(): void {
+    AccountStore.cachedAccounts = null;
+  }
+
   /** 规范化颜色：#RRGGBBAA → #RRGGBB；非法返回空串 */
   static normalizeColor(raw: string): string {
     const v: string = raw.trim();
@@ -596,6 +641,9 @@ export class AccountStore {
   }
 
   static async loadAll(context: common.Context): Promise<DavAccount[]> {
+    if (AccountStore.cachedAccounts !== null) {
+      return AccountStore.cloneList(AccountStore.cachedAccounts);
+    }
     // 1) 新加密存储
     try {
       const store: preferences.Preferences = await Vault.prefs(context);
@@ -603,8 +651,11 @@ export class AccountStore {
       if (data !== '') {
         const plain: string | null = await Vault.decrypt(context, data);
         if (plain !== null) {
-          const arr: Array<Record<string, Object>> =
-            JSON.parse(plain) as Array<Record<string, Object>>;
+          const parsed: Object = JSON.parse(plain) as Object;
+          if (!Array.isArray(parsed)) {
+            throw new Error('账号数据格式不是数组');
+          }
+          const arr: Array<Record<string, Object>> = parsed as Array<Record<string, Object>>;
           const result: DavAccount[] = [];
           for (const o of arr) {
             const a = new DavAccount();
@@ -648,6 +699,7 @@ export class AccountStore {
               // 升级失败不阻断本次读取，下次启动再试
             }
           }
+          AccountStore.cachedAccounts = AccountStore.cloneList(result);
           return result;
         }
         console.error('[AccountStore] 加密账号数据解密失败');
@@ -676,21 +728,23 @@ export class AccountStore {
   static async saveAll(context: common.Context, accounts: DavAccount[], force: boolean = false): Promise<void> {
     // 防御：先看加密存储里现有数量（空列表覆盖保护）
     let existing: number = -1;
+    let data: string = '';
     try {
       const store: preferences.Preferences = await Vault.prefs(context);
-      const data: string = await store.get(VAULT_DATA, '') as string;
+      data = await store.get(VAULT_DATA, '') as string;
       if (data !== '') {
         const plain: string | null = await Vault.decrypt(context, data);
         if (plain !== null) {
-          existing = (JSON.parse(plain) as Array<Record<string, Object>>).length;
+          const parsed: Object = JSON.parse(plain) as Object;
+          existing = Array.isArray(parsed) ? parsed.length : 1;
         } else {
           // 有密文但解不开：按"存在数据"处理，宁可拦住空写，也不把账号整体清掉
           existing = 1;
         }
       }
     } catch (err) {
-      // 读取失败按"未知"处理，不拦截
-      existing = -1;
+      // 若密文非空但解析失败，保守按存在数据拦截空列表覆盖
+      existing = data !== '' ? 1 : -1;
     }
     if (accounts.length === 0 && existing > 0 && !force) {
       console.error(`[AccountStore] 拒绝用空列表覆盖账号存储（原有 ${existing} 个账号）`);
@@ -701,39 +755,28 @@ export class AccountStore {
     const store: preferences.Preferences = await Vault.prefs(context);
     await store.put(VAULT_DATA, enc);
     await store.flush();
+    AccountStore.cachedAccounts = AccountStore.cloneList(accounts);
     console.info(`[AccountStore] saveAll: ${accounts.length} 个账号已加密写入`);
   }
 
-  /**
-   * 追加一个账号（读全量 → push → 整体加密回写）。
-   *
-   * 防覆盖保护：回写前先探测"现有存储是否可读"（canReadExisting）。
-   * 若存储里有密文却解不开（例如 key_b64 丢失或被重新生成），loadAll 会回落成空数组，
-   * 此时 push 一个账号后长度 = 1，会绕过 saveAll 的"空列表覆盖保护"→ 其余账号连同密码全部丢失。
-   * 因此遇到该情况直接抛错中止：宁可让用户看到失败提示，也不能静默清空账号。
-   */
   static async addAccount(context: common.Context, acc: DavAccount): Promise<void> {
-    if (!(await AccountStore.canReadExisting(context))) {
-      console.error('[AccountStore] 现有账号存储不可读，已中止 addAccount 以防覆盖');
-      throw new Error('读取已有账号失败，为避免覆盖已保存的账号，已中止本次添加');
-    }
-    const list: DavAccount[] = await AccountStore.loadAll(context);
-    list.push(acc);
-    await AccountStore.saveAll(context, list);
+    const task: Promise<void> = AccountStore.writeQueue.then(async (): Promise<void> => {
+      if (!(await AccountStore.canReadExisting(context))) {
+        console.error('[AccountStore] 现有账号存储不可读，已中止 addAccount 以防覆盖');
+        throw new Error('读取已有账号失败，为避免覆盖已保存的账号，已中止本次添加');
+      }
+      AccountStore.invalidateCache();
+      const list: DavAccount[] = await AccountStore.loadAll(context);
+      list.push(acc);
+      await AccountStore.saveAll(context, list);
+    });
+    AccountStore.writeQueue = task.catch((): void => {});
+    return task;
   }
 
-  /**
-   * 【逃生舱】重置账号库：清空本地保存的全部账号、服务器地址与密码。
-   *
-   * 场景：账号库存在但**解不开**（密钥丢失 / HUKS 密钥失效等），此时 `canReadExisting()`
-   * 会拒绝任何写入 —— 表现为"账号消失且再也加不上"，而唯一的原生出路是清除**整个**应用数据
-   * （会一并丢掉设置偏好、功能引导标记、本地日程库）。本方法只清账号那一块。
-   *
-   * ⚠️ **必须由用户在界面上二次确认后调用**；日程数据在 CalDAV 服务器上，重新添加账号
-   *    并同步即可恢复，但本地保存的密码会被删除且不可撤销。
-   */
   static async resetVault(context: common.Context): Promise<void> {
     await Vault.clearVault(context);
+    AccountStore.invalidateCache();
     console.info('[AccountStore] 账号库已重置，可重新添加账号');
   }
 

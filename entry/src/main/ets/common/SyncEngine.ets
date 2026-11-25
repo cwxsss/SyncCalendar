@@ -26,27 +26,32 @@ export class SyncBusyError extends Error {
   }
 }
 
+class SyncLockEntry {
+  since: number = 0;
+  token: number = 0;
+}
+
 export class SyncEngine {
-  /** 正在同步中的账号 id → 开始时间：防止超时后的"僵尸同步"与新一轮同步并发写库 */
-  private static activeSyncs: Map<string, number> = new Map();
+  /** 正在同步中的账号 id → 锁信息：防止超时后的"僵尸同步"误删新锁与并发写库 */
+  private static activeSyncs: Map<string, SyncLockEntry> = new Map();
+  private static nextLockToken: number = 1;
   /** 互斥锁最长持有时间：超过视为异常残留（如进程挂起后网络停摆），允许抢占 */
   private static readonly LOCK_STALE_MS: number = 15 * 60 * 1000;
 
   /** 某账号当前是否正在同步（供界面判断，不触发任何操作） */
   static isSyncing(accId: string): boolean {
-    const heldSince: number | undefined = SyncEngine.activeSyncs.get(accId);
-    if (heldSince === undefined) {
+    const entry: SyncLockEntry | undefined = SyncEngine.activeSyncs.get(accId);
+    if (entry === undefined) {
       return false;
     }
-    return Date.now() - heldSince < SyncEngine.LOCK_STALE_MS;
+    return Date.now() - entry.since < SyncEngine.LOCK_STALE_MS;
   }
 
   /** 当前是否有任意账号正在同步 */
   static isAnySyncing(): boolean {
     const now: number = Date.now();
-    for (const id of SyncEngine.activeSyncs.keys()) {
-      const since: number | undefined = SyncEngine.activeSyncs.get(id);
-      if (since !== undefined && now - since < SyncEngine.LOCK_STALE_MS) {
+    for (const entry of SyncEngine.activeSyncs.values()) {
+      if (now - entry.since < SyncEngine.LOCK_STALE_MS) {
         return true;
       }
     }
@@ -72,15 +77,19 @@ export class SyncEngine {
   static async syncAccount(context: common.Context, acc: DavAccount): Promise<number> {
     // 同一账号互斥：超时被掐断后内层任务仍在后台运行，期间不允许再次同步该账号。
     // 锁超过 LOCK_STALE_MS 未释放（如熄屏挂起导致任务冻结）则视为残留，允许抢占
-    const heldSince: number | undefined = SyncEngine.activeSyncs.get(acc.id);
-    if (heldSince !== undefined) {
-      if (Date.now() - heldSince < SyncEngine.LOCK_STALE_MS) {
+    const entry: SyncLockEntry | undefined = SyncEngine.activeSyncs.get(acc.id);
+    if (entry !== undefined) {
+      if (Date.now() - entry.since < SyncEngine.LOCK_STALE_MS) {
         // ⭐ 抛专用类型：界面据此提示"同步进行中，请耐心等待"而非"失败"
         throw new SyncBusyError();
       }
       LogUtil.write(`同步互斥锁超时残留（账号 id=${acc.id}），强制释放并重新同步`);
     }
-    SyncEngine.activeSyncs.set(acc.id, Date.now());
+    const lockToken: number = SyncEngine.nextLockToken++;
+    const newEntry = new SyncLockEntry();
+    newEntry.since = Date.now();
+    newEntry.token = lockToken;
+    SyncEngine.activeSyncs.set(acc.id, newEntry);
     const t0: number = Date.now();
     // 日志不记录账号名（用户自定义，可能含个人信息），以 id + 服务器地址定位
     LogUtil.write(`========== 同步账号 id=${acc.id} 开始：服务器 ${acc.serverUrl}，共 ${acc.calendarHrefs.length} 个日历本 ==========`);
@@ -100,18 +109,21 @@ export class SyncEngine {
       // 全量重拉（升级后首次）要逐个 GET 所有资源，放宽超时到 10 分钟；常规 5 分钟
       const fullRefetch: boolean = await AppSettings.isFullRefetchPending(context);
       const timeoutMs: number = fullRefetch ? 600000 : 300000;
-      // 内层任务真正结束（无论成败）才释放互斥锁；超时后它仍会在后台跑完
+      // 内层任务真正结束（无论成败）才释放互斥锁；仅当 token 仍属于本次任务时才删除，避免误删抢占后的新锁
       const inner: Promise<number> = SyncEngine.syncAccountInner(context, acc);
       inner.catch((): void => {}).finally((): void => {
-        SyncEngine.activeSyncs.delete(acc.id);
+        const cur: SyncLockEntry | undefined = SyncEngine.activeSyncs.get(acc.id);
+        if (cur !== undefined && cur.token === lockToken) {
+          SyncEngine.activeSyncs.delete(acc.id);
+        }
       });
       const r: number = await SyncEngine.withTimeout<number>(inner, timeoutMs);
       LogUtil.write(`同步账号 id=${acc.id} 完成：拉取 ${r} 条日程，耗时 ${Math.round((Date.now() - t0) / 1000)} 秒`);
       return r;
     } catch (err) {
-      // ⭐ "正在同步中"原样抛出（界面据此提示"请耐心等待"，不当成失败）
-      if (err instanceof SyncBusyError) {
-        throw err;
+      // ⭐ "正在同步中"与 HTTP 状态错误原样抛出（便于上层识别 401 凭据失效与并发忙碌）
+      if (err instanceof SyncBusyError || err instanceof DavHttpError) {
+        throw err as Error;
       }
       const e = err as BusinessError;
       LogUtil.write(`同步账号 id=${acc.id} 失败：${e.message}（耗时 ${Math.round((Date.now() - t0) / 1000)} 秒）`);
@@ -119,12 +131,23 @@ export class SyncEngine {
     }
   }
 
+  /** 颜色与写权限刷新节流：同一账号 30 分钟内不重复探测 */
+  private static colorRefreshAt: Map<string, number> = new Map();
+  private static readonly COLOR_REFRESH_INTERVAL_MS: number = 30 * 60 * 1000;
+
   private static async syncAccountInner(context: common.Context, acc: DavAccount): Promise<number> {
     const auth: string = DavClient.authHeader(acc.username, acc.password);
-    // 0) 刷新服务器端日历本颜色（每次同步都校正）
-    //    ⭐ 有变化就立刻落盘：镜像 listBooks 从磁盘重新 loadAll，
-    //      不落盘的话镜像 setConfig 的永远是旧颜色（系统日历颜色不跟服务器变）。
-    const colorChanged: boolean = await SyncEngine.refreshCalendarColors(acc, auth);
+    // 0) 刷新服务器端日历本颜色与写权限（30 分钟节流，避免后台/卡片同步重复耗时）
+    const lastColorAt: number = SyncEngine.colorRefreshAt.get(acc.id) ?? 0;
+    const needColorRefresh: boolean = (Date.now() - lastColorAt >= SyncEngine.COLOR_REFRESH_INTERVAL_MS)
+      || acc.calendarColors.length < acc.calendarHrefs.length
+      || acc.calendarWritable.length < acc.calendarHrefs.length;
+    const colorChanged: boolean = needColorRefresh
+      ? await SyncEngine.refreshCalendarColors(acc, auth)
+      : false;
+    if (needColorRefresh) {
+      SyncEngine.colorRefreshAt.set(acc.id, Date.now());
+    }
     if (colorChanged) {
       try {
         const all: DavAccount[] = await AccountStore.loadAll(context);
@@ -203,36 +226,6 @@ export class SyncEngine {
         throw err as Error;
       }
       LogUtil.write(`日历本[${i}]「${calName}」REPORT 返回 ${items.length} 个资源`);
-      // ⭐ SYNC_TODOS 同步该本里的待办（VTODO）。
-      //    原来整个同步流程只处理 VEVENT，`DavClient.reportTodos` 写了却没人调用，
-      //    导致待办数据从来不会从服务器拉下来 ——
-      //    用户取消勾选本（触发 pruneStaleHrefs 清行）后再勾回来，待办就永久消失了。
-      //    放在这里（VEVENT 处理之前）单独走一遍，不影响原有日程逻辑。
-      try {
-        const todoItems: RemoteItem[] = await DavClient.reportTodos(href, auth);
-        if (todoItems.length > 0) {
-          const todoRemote: RemoteEvent[] = [];
-          for (const ti of todoItems) {
-            try {
-              const raw: string = await DavClient.getRawStrict(ti.href, auth);
-              const parsed: RemoteEvent[] = IcsUtil.parseTodos(raw);
-              for (const pr of parsed) {
-                pr.etag = ti.etag;
-                todoRemote.push(pr);
-              }
-            } catch (e) {
-              LogUtil.write(`待办 GET 失败(跳过) ${ti.href}`);
-            }
-          }
-          if (todoRemote.length > 0) {
-            await EventDb.applyRemote(context, calKey, href, todoRemote, true);
-            LogUtil.write(`日历本[${i}]「${calName}」待办同步：${todoRemote.length} 条`);
-          }
-        }
-      } catch (e) {
-        // 待办同步失败不能影响日程同步（很多服务器对 VTODO 查询返回 403/不支持）
-        LogUtil.write(`日历本[${i}]「${calName}」待办同步失败(忽略)：${(e as BusinessError).message ?? ''}`);
-      }
       // 现有行按 uid 分组（同一资源的覆盖实例共享 uid 与 etag）
       const existingRows: LocalEvent[] = await EventDb.queryByCalKey(context, calKey, 'event');
       const byUid: Map<string, LocalEvent[]> = new Map();

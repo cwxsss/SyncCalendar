@@ -158,6 +158,7 @@ export class RemoteEvent {
 
 export class EventDb {
   private static db: relationalStore.RdbStore | null = null;
+  private static initPromise: Promise<relationalStore.RdbStore> | null = null;
 
   /**
    * ⭐ 统计"是覆盖实例（RECURRENCE-ID 行）但还没回填 recurrence_id"的行数。
@@ -190,6 +191,21 @@ export class EventDb {
   }
 
   static async getDb(context: common.Context): Promise<relationalStore.RdbStore> {
+    if (EventDb.db !== null) {
+      return EventDb.db;
+    }
+    if (EventDb.initPromise !== null) {
+      return EventDb.initPromise;
+    }
+    EventDb.initPromise = EventDb.openDb(context);
+    try {
+      return await EventDb.initPromise;
+    } finally {
+      EventDb.initPromise = null;
+    }
+  }
+
+  private static async openDb(context: common.Context): Promise<relationalStore.RdbStore> {
     if (EventDb.db !== null) {
       return EventDb.db;
     }
@@ -296,6 +312,15 @@ export class EventDb {
     } catch (err) {
       // 忽略
     }
+    // 复合索引：大幅加速 queryRange / queryByCalKey / queryByUid / getDirty / queryTodos
+    try {
+      await store.executeSql('CREATE INDEX IF NOT EXISTS idx_events_cal_kind_del ON events(cal_key, kind, deleted)');
+      await store.executeSql('CREATE INDEX IF NOT EXISTS idx_events_uid_cal ON events(uid, cal_key)');
+      await store.executeSql('CREATE INDEX IF NOT EXISTS idx_events_del_kind_time ON events(deleted, kind, start_time, end_time)');
+      await store.executeSql('CREATE INDEX IF NOT EXISTS idx_events_dirty ON events(dirty)');
+    } catch (err) {
+      // 忽略
+    }
     EventDb.db = store;
     return store;
   }
@@ -382,6 +407,7 @@ export class EventDb {
       'location': e.location,
       'start_time': e.startTime,
       'end_time': e.endTime,
+      'dtstart': e.dtstart,
       'is_all_day': e.isAllDay ? 1 : 0,
       'etag': e.etag,
       'dirty': e.dirty ? 1 : 0,
@@ -773,134 +799,135 @@ export class EventDb {
     //    旧版用循环前的 existing 快照判重，插入后不回写 → 第二条仍判为"新增"又插一行，
     //    在本地库留下 href/etag/remote_path 完全相同的冗余行（2026-09-19 实测 10 组）。
     const seenKeys: Set<string> = new Set<string>();
-    for (const r of remote) {
-      // 重复日程实例共享 UID，唯一标识 = uid + 开始时间 + RECURRENCE-ID
-      //（同一时刻可能同时存在"主事件"与"覆盖该次发生的实例行"，只带上 recurrenceId 才唯一）
-      const key: string = `${r.uid}_${r.startTime}_${r.recurrenceId}`;
-      if (seenKeys.has(key)) {
-        continue; // 同一资源内的重复条目 → 只保留一条
-      }
-      seenKeys.add(key);
-      // ⭐ REVIVE_GUARD 本地已删待推送 → 远端旧版本一律忽略，防止死灰复燃
-      if (dirtyDeletedUids.has(r.uid)) {
-        continue;
-      }
-      // ⭐ 本地有未推送的修改 → 保留本地版本，绝不能让远端旧版覆盖或重复插入
-      if (dirtyKeyed.has(key)) {
-        continue;
-      }
-      const found: LocalEvent | undefined = keyed.get(key);
-      if (found === undefined) {
-        // 新增
-        const e = new LocalEvent();
-        e.uid = r.uid;
-        e.calKey = calKey;
-        e.href = href;
-        // ⭐ REMOTE_PATH 优先用服务器真实文件名；为空时才退回按 uid 猜（本地新建等场景）
-        e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
-        e.title = r.title;
-        e.description = r.description;
-        e.location = r.location;
-        e.startTime = r.startTime;
-        e.endTime = r.endTime;
-        e.isAllDay = r.isAllDay;
-        e.etag = r.etag;
-        e.dirty = false;
-        e.deleted = false;
-        e.recurring = r.recurring;
-        e.kind = kind;
-        e.completed = r.completed;
-        e.rrule = r.rrule;
-        e.exdate = r.exdate;
-        e.recurrenceId = r.recurrenceId;
-        e.reminder = r.reminder;
-        e.reminders = r.reminders;
-        e.priority = r.priority;
-        e.categories = r.categories;
-        e.parentUid = r.parentUid;
-        e.attachments = r.attachments;
-        await store.insert('events', EventDb.toBucket(e));
-        added++;
-      } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
-        || found.reminder !== r.reminder || found.recurring !== r.recurring
-        || found.startTime !== r.startTime || found.endTime !== r.endTime
-        || found.isAllDay !== r.isAllDay || found.title !== r.title
-        || found.description !== r.description || found.location !== r.location
-        || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
-        || found.priority !== r.priority || found.categories !== r.categories
-        || found.parentUid !== r.parentUid || found.attachments !== r.attachments
-        || found.href !== href) {
-        // 更新（rrule/exdate/recurring 变化也更新，兼容老数据回填；
-        // href 变化也要更新——服务器上日历本被删除重建后集合 URL 变了，
-        // 行里若残留旧 URL，用户下次编辑该日程会 PUT 到已不存在的集合（404），
-        // 且 pushDirty 按 href 过滤会漏掉它导致永远推不出去）
-        found.href = href;
-        // 服务器上资源被改名时同步更新，否则后续 DELETE/PUT 会打到旧路径
-        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
-          found.remotePath = r.remotePath;
+    const deleteIds: number[] = [];
+    store.beginTransaction();
+    try {
+      for (const r of remote) {
+        // 重复日程实例共享 UID，唯一标识 = uid + 开始时间 + RECURRENCE-ID
+        const key: string = `${r.uid}_${r.startTime}_${r.recurrenceId}`;
+        if (seenKeys.has(key)) {
+          continue; // 同一资源内的重复条目 → 只保留一条
         }
-        found.title = r.title;
-        found.description = r.description;
-        found.location = r.location;
-        found.startTime = r.startTime;
-        found.endTime = r.endTime;
-        found.isAllDay = r.isAllDay;
-        found.etag = r.etag;
-        found.dirty = false;
-        found.deleted = false;
-        found.recurring = r.recurring;
-        found.kind = kind;
-        found.completed = r.completed;
-        found.rrule = r.rrule;
-        found.exdate = r.exdate;
-        found.recurrenceId = r.recurrenceId;
-        found.reminder = r.reminder;
-        found.reminders = r.reminders;
-        found.priority = r.priority;
-        found.categories = r.categories;
-        found.parentUid = r.parentUid;
-        found.attachments = r.attachments;
-        const up = new relationalStore.RdbPredicates('events');
-        up.equalTo('id', found.id);
-        await store.update(EventDb.toBucket(found), up);
-        updated++;
-      } else {
-        unchanged++;
-        // ⭐ UNCHANGED_REMOTE_PATH etag 未变是**常态路径**（REPORT 只给 etag，
-        //    未变就直接复用本地行、不 GET）。实测 742 行里 99% 走这里。
-        //    若只在"更新分支"回填 remotePath，对存量数据等于无效 ——
-        //    历史行里存的是旧的 uid 猜测值，而 DELETE/PUT 正是用它拼 URL，
-        //    拼错就 404（服务器上删不掉）。
-        //    所以这里必须一并校正 href 与 remotePath。
-        const hb: relationalStore.ValuesBucket = {};
-        if (found.href !== href) {
+        seenKeys.add(key);
+        if (dirtyDeletedUids.has(r.uid)) {
+          continue;
+        }
+        if (dirtyKeyed.has(key)) {
+          continue;
+        }
+        const found: LocalEvent | undefined = keyed.get(key);
+        if (found === undefined) {
+          // 新增
+          const e = new LocalEvent();
+          e.uid = r.uid;
+          e.calKey = calKey;
+          e.href = href;
+          e.remotePath = r.remotePath !== '' ? r.remotePath : (encodeURIComponent(r.uid) + '.ics');
+          e.title = r.title;
+          e.description = r.description;
+          e.location = r.location;
+          e.startTime = r.startTime;
+          e.endTime = r.endTime;
+          e.dtstart = r.dtstart;
+          e.isAllDay = r.isAllDay;
+          e.etag = r.etag;
+          e.dirty = false;
+          e.deleted = false;
+          e.recurring = r.recurring;
+          e.kind = kind;
+          e.completed = r.completed;
+          e.rrule = r.rrule;
+          e.exdate = r.exdate;
+          e.recurrenceId = r.recurrenceId;
+          e.reminder = r.reminder;
+          e.reminders = r.reminders;
+          e.priority = r.priority;
+          e.categories = r.categories;
+          e.parentUid = r.parentUid;
+          e.attachments = r.attachments;
+          await store.insert('events', EventDb.toBucket(e));
+          added++;
+        } else if (found.etag !== r.etag || found.rrule !== r.rrule || found.exdate !== r.exdate
+          || found.reminder !== r.reminder || found.recurring !== r.recurring
+          || found.startTime !== r.startTime || found.endTime !== r.endTime
+          || found.dtstart !== r.dtstart || found.isAllDay !== r.isAllDay || found.title !== r.title
+          || found.description !== r.description || found.location !== r.location
+          || EventDb.remKey(found.reminders) !== EventDb.remKey(r.reminders)
+          || found.priority !== r.priority || found.categories !== r.categories
+          || found.parentUid !== r.parentUid || found.attachments !== r.attachments
+          || found.href !== href) {
           found.href = href;
-          hb['href'] = href;
-        }
-        if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
-          found.remotePath = r.remotePath;
-          hb['remote_path'] = r.remotePath;
-        }
-        if (Object.keys(hb).length > 0) {
-          const hp = new relationalStore.RdbPredicates('events');
-          hp.equalTo('id', found.id);
-          await store.update(hb, hp);
+          if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+            found.remotePath = r.remotePath;
+          }
+          found.title = r.title;
+          found.description = r.description;
+          found.location = r.location;
+          found.startTime = r.startTime;
+          found.endTime = r.endTime;
+          found.dtstart = r.dtstart;
+          found.isAllDay = r.isAllDay;
+          found.etag = r.etag;
+          found.dirty = false;
+          found.deleted = false;
+          found.recurring = r.recurring;
+          found.kind = kind;
+          found.completed = r.completed;
+          found.rrule = r.rrule;
+          found.exdate = r.exdate;
+          found.recurrenceId = r.recurrenceId;
+          found.reminder = r.reminder;
+          found.reminders = r.reminders;
+          found.priority = r.priority;
+          found.categories = r.categories;
+          found.parentUid = r.parentUid;
+          found.attachments = r.attachments;
+          const up = new relationalStore.RdbPredicates('events');
+          up.equalTo('id', found.id);
+          await store.update(EventDb.toBucket(found), up);
+          updated++;
+        } else {
+          unchanged++;
+          const hb: relationalStore.ValuesBucket = {};
+          if (found.href !== href) {
+            found.href = href;
+            hb['href'] = href;
+          }
+          if (r.remotePath !== '' && found.remotePath !== r.remotePath) {
+            found.remotePath = r.remotePath;
+            hb['remote_path'] = r.remotePath;
+          }
+          if (Object.keys(hb).length > 0) {
+            const hp = new relationalStore.RdbPredicates('events');
+            hp.equalTo('id', found.id);
+            await store.update(hb, hp);
+          }
         }
       }
-    }
-    // 删除远端已不存在的（排除本地修改未推送的）
-    for (const local of existing) {
-      if (local.dirty) {
-        continue;
+      // 收集远端已不存在的（排除本地修改未推送的），一次性批量删除
+      for (const local of existing) {
+        if (local.dirty) {
+          continue;
+        }
+        const localKey: string = `${local.uid}_${local.startTime}_${local.recurrenceId}`;
+        if (!seenKeys.has(localKey)) {
+          deleteIds.push(local.id);
+        }
       }
-      const localKey: string = `${local.uid}_${local.startTime}_${local.recurrenceId}`;
-      // ⭐ 同样从 O(m) 的数组 includes 换成 Set 查询（见上方 keyed 的说明）
-      if (!seenKeys.has(localKey)) {
-        const del = new relationalStore.RdbPredicates('events');
-        del.equalTo('id', local.id);
-        await store.delete(del);
-        removed++;
+      if (deleteIds.length > 0) {
+        const chunkSize: number = 400;
+        for (let idx: number = 0; idx < deleteIds.length; idx += chunkSize) {
+          const chunk: number[] = deleteIds.slice(idx, idx + chunkSize);
+          const del = new relationalStore.RdbPredicates('events');
+          del.in('id', chunk);
+          await store.delete(del);
+        }
+        removed = deleteIds.length;
       }
+      store.commit();
+    } catch (err) {
+      store.rollBack();
+      throw err as Error;
     }
     return `新增${added} 更新${updated} 删除${removed} 不变${unchanged}`;
   }
@@ -1031,7 +1058,7 @@ export class EventDb {
   static async deleteAccountEvents(context: common.Context, accId: string): Promise<void> {
     const store = await EventDb.getDb(context);
     const predicates = new relationalStore.RdbPredicates('events');
-    predicates.like(`cal_key`, `${accId}%`);
+    predicates.like('cal_key', `${accId}_%`);
     await store.delete(predicates);
   }
 
@@ -1291,21 +1318,28 @@ export class EventDb {
     const stamp: number = Date.now();
     const tmpKeys: string[] = [];
     let moved: number = 0;
-    // 阶段一：旧键 → 临时键
-    for (let i = 0; i < pairs.length; i++) {
-      const tmpKey: string = `__remap_${stamp}_${i}`;
-      const bucket: relationalStore.ValuesBucket = { 'cal_key': tmpKey };
-      const p = new relationalStore.RdbPredicates('events');
-      p.equalTo('cal_key', pairs[i][0]);
-      moved += await store.update(bucket, p);
-      tmpKeys.push(tmpKey);
-    }
-    // 阶段二：临时键 → 新键
-    for (let i = 0; i < pairs.length; i++) {
-      const bucket: relationalStore.ValuesBucket = { 'cal_key': pairs[i][1] };
-      const p = new relationalStore.RdbPredicates('events');
-      p.equalTo('cal_key', tmpKeys[i]);
-      await store.update(bucket, p);
+    store.beginTransaction();
+    try {
+      // 阶段一：旧键 → 临时键
+      for (let i = 0; i < pairs.length; i++) {
+        const tmpKey: string = `__remap_${stamp}_${i}`;
+        const bucket: relationalStore.ValuesBucket = { 'cal_key': tmpKey };
+        const p = new relationalStore.RdbPredicates('events');
+        p.equalTo('cal_key', pairs[i][0]);
+        moved += await store.update(bucket, p);
+        tmpKeys.push(tmpKey);
+      }
+      // 阶段二：临时键 → 新键
+      for (let i = 0; i < pairs.length; i++) {
+        const bucket: relationalStore.ValuesBucket = { 'cal_key': pairs[i][1] };
+        const p = new relationalStore.RdbPredicates('events');
+        p.equalTo('cal_key', tmpKeys[i]);
+        await store.update(bucket, p);
+      }
+      store.commit();
+    } catch (err) {
+      store.rollBack();
+      throw err as Error;
     }
     return moved;
   }
@@ -1351,19 +1385,12 @@ export class EventDb {
       return [];
     }
     const store = await EventDb.getDb(context);
-    const predicates = new relationalStore.RdbPredicates('events');
-    predicates.equalTo('deleted', 0)
-      .and()
-      .beginWrap()
-      .like('title', '%' + trimmed + '%')
-      .or()
-      .like('location', '%' + trimmed + '%')
-      .or()
-      .like('description', '%' + trimmed + '%')
-      .endWrap()
-      .orderByDesc('start_time')
-      .limitAs(limit);
-    const rs = await store.query(predicates);
+    const escaped: string = trimmed.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const pat: string = `%${escaped}%`;
+    const rs = await store.querySql(
+      "SELECT * FROM events WHERE deleted = 0 AND (title LIKE ? ESCAPE '\\' OR location LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\') ORDER BY start_time DESC LIMIT ?",
+      [pat, pat, pat, limit]
+    );
     const list: LocalEvent[] = [];
     try {
       while (rs.goToNextRow()) {

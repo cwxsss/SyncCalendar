@@ -6,7 +6,7 @@ import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
-import { geoLocationManager } from '@kit.LocationKit';
+import { GeoUtil } from '../common/GeoUtil';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { DavAccount, AccountStore, CalSource, TYPE_CALDAV } from '../common/AccountStore';
 import { DisplayEvent, CalendarDataService } from '../common/CalendarDataService';
@@ -202,6 +202,8 @@ struct Index {
   @State docTitle: string = '';
   @State docUrl: ResourceStr = '';
 
+  private isDestroyed: boolean = false;
+
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();
     if (ctx !== undefined) {
@@ -241,7 +243,17 @@ struct Index {
       });
     }
     // 红线"播放"效果：每 30s 更新 nowMs，让当前时间红线随真实时间推进（同时刷新色块"进行中"标记与跨天检测）
+    this.startNowTimer();
+  }
+
+  private startNowTimer(): void {
+    if (this.nowTimer !== -1 || this.isDestroyed) {
+      return;
+    }
     this.nowTimer = setInterval((): void => {
+      if (this.isDestroyed) {
+        return;
+      }
       const prevMs = this.nowMs;
       this.nowMs = Date.now();
       // 跨天检测（0点翻篇）：若日期变了，自动刷新全量数据并推送服务卡片
@@ -254,15 +266,20 @@ struct Index {
     }, 30000);
   }
 
-  aboutToDisappear(): void {
-    if (this.autoSyncTimer !== -1) {
-      clearInterval(this.autoSyncTimer);
-      this.autoSyncTimer = -1;
-    }
+  private stopNowTimer(): void {
     if (this.nowTimer !== -1) {
       clearInterval(this.nowTimer);
       this.nowTimer = -1;
     }
+  }
+
+  aboutToDisappear(): void {
+    this.isDestroyed = true;
+    if (this.autoSyncTimer !== -1) {
+      clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = -1;
+    }
+    this.stopNowTimer();
     if (this.winObj !== null && this.winSizeCallback !== null) {
       try {
         this.winObj.off('windowSizeChange', this.winSizeCallback);
@@ -305,6 +322,9 @@ struct Index {
       return;
     }
     window.getLastWindow(ctx).then((win: window.Window): void => {
+      if (this.isDestroyed) {
+        return;
+      }
       this.winObj = win;
       this.applyLayoutFromWindow(win);
       this.winSizeCallback = (_size: window.Size): void => {
@@ -317,8 +337,15 @@ struct Index {
     });
   }
 
+  onPageHide(): void {
+    // 退到后台时暂停 30s 红线刷新定时器，避免后台空转耗电
+    this.stopNowTimer();
+  }
+
   /** 从设置页/账号页返回时刷新（同步间隔、系统日历开关立即生效），并处理编辑账号后的待同步 */
   onPageShow(): void {
+    this.nowMs = Date.now();
+    this.startNowTimer();
     // 未同意《隐私政策》前不加载、不同步任何数据
     if (!this.policyAgreed) {
       return;
@@ -1201,12 +1228,12 @@ struct Index {
     // 高德鸿蒙深链 dlat/dlon 为必填（dname 仅作名称显示），先地理编码拿坐标。
     // 地理编码（getAddressesFromLocationName）在本 SDK 上不要求定位权限，
     // 因此这里既不申请、也不使用定位权限 —— 应用自始至终不读取设备实时位置。
-    const coords: number[] | null = await this.geocodeAddress(address);
+    const coords: number[] | null = await GeoUtil.geocodeAddress(address);
     const base: string = 'amapuri://route/plan/?sourceApplication=SyncCalendar';
     let link: string;
     if (coords !== null) {
       // 系统地理编码返回 WGS84，高德要求 GCJ02（dev=0），做本地转换
-      const gcj: number[] = this.wgs84ToGcj02(coords[0], coords[1]);
+      const gcj: number[] = GeoUtil.wgs84ToGcj02(coords[0], coords[1]);
       link = `${base}&dlat=${gcj[0].toFixed(6)}&dlon=${gcj[1].toFixed(6)}&dname=${enc}&dev=0&t=0`;
     } else {
       // 无坐标时尽力而为：部分版本只认坐标，目的地可能为空
@@ -1221,60 +1248,6 @@ struct Index {
       LogUtil.write(`高德深链打开失败：${(err as BusinessError).message}`);
     }
     this.getUIContext().getPromptAction().showToast({ message: '未安装高德地图或无法打开' });
-  }
-
-  /** 正向地理编码：地址 → 坐标（系统服务，无需高德 key、无需定位权限） */
-  private async geocodeAddress(address: string): Promise<number[] | null> {
-    try {
-      if (!geoLocationManager.isGeocoderAvailable()) {
-        LogUtil.write('系统地理编码服务不可用');
-        return null;
-      }
-      const req: geoLocationManager.GeoCodeRequest = { description: address, maxItems: 1 };
-      const list: geoLocationManager.GeoAddress[] =
-        await geoLocationManager.getAddressesFromLocationName(req);
-      if (list.length > 0 && list[0].latitude !== undefined && list[0].longitude !== undefined) {
-        return [list[0].latitude, list[0].longitude];
-      }
-      // 日志不落盘地点文本（可能含家庭/公司等敏感地址）
-      LogUtil.write('地理编码无结果（地点已脱敏）');
-    } catch (err) {
-      LogUtil.write(`地理编码失败：${(err as BusinessError).message}`);
-    }
-    return null;
-  }
-
-  /** WGS84 → GCJ02 火星坐标转换（中国境内；标准偏移算法） */
-  private wgs84ToGcj02(wlat: number, wlon: number): number[] {
-    const a: number = 6378245.0;
-    const ee: number = 0.00669342162296594323;
-    const transformLat = (x: number, y: number): number => {
-      let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y
-        + 0.2 * Math.sqrt(Math.abs(x));
-      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
-      ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
-      ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320.0 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
-      return ret;
-    };
-    const transformLon = (x: number, y: number): number => {
-      let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
-      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
-      ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
-      ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
-      return ret;
-    };
-    if (wlon < 72.004 || wlon > 137.8347 || wlat < 0.8293 || wlat > 55.8271) {
-      return [wlat, wlon]; // 中国境外无偏移
-    }
-    let dLat: number = transformLat(wlon - 105.0, wlat - 35.0);
-    let dLon: number = transformLon(wlon - 105.0, wlat - 35.0);
-    const radLat: number = wlat / 180.0 * Math.PI;
-    let magic: number = Math.sin(radLat);
-    magic = 1 - ee * magic * magic;
-    const sqrtMagic: number = Math.sqrt(magic);
-    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
-    dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
-    return [wlat + dLat, wlon + dLon];
   }
 
   @Builder
@@ -5919,6 +5892,8 @@ struct DayTimelineView {
    *  不再参与滚动偏移计算，恒为 0。保留字段仅为兼容旧引用。 */
   @State private allDayH: number = 0;
   private pendingScroll: boolean = false;
+
+  private isDestroyed: boolean = false;
 
   aboutToAppear(): void {
     this.scrollToNow();

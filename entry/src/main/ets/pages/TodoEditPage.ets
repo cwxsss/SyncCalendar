@@ -128,9 +128,15 @@ struct TodoEditPage {
     }
   }
 
+  private isDestroyed: boolean = false;
+
   aboutToAppear(): void {
     this.setupKeyboardAvoid();
     this.initPage();
+  }
+
+  aboutToDisappear(): void {
+    this.isDestroyed = true;
   }
 
   /** 读 AppStorage 参数并初始化表单 */
@@ -631,7 +637,7 @@ struct TodoEditPage {
             Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
               ForEach(this.books, (b: CalSource) => {
                 Row({ space: 6 }) {
-                  Circle().width(8).height(8).fill(b.color)
+                  Text('').width(8).height(8).borderRadius(4).backgroundColor(b.color)
                   Text(b.name)
                     .fontSize(13)
                     .layoutWeight(1)
@@ -732,7 +738,7 @@ struct TodoEditPage {
           Row({ space: 8 }) {
             ForEach(this.priorityOpts, (o: PriorityOpt) => {
               Row({ space: 4 }) {
-                Circle().width(7).height(7).fill(o.color)
+                Text('').width(7).height(7).borderRadius(3.5).backgroundColor(o.color)
                 Text(o.label)
                   .fontSize(13)
                   .fontColor(this.priority === o.v
@@ -1059,7 +1065,7 @@ struct TodoEditPage {
           ForEach(this.parentCandidates(), (c: DisplayEvent) => {
             ListItem() {
               Row({ space: 8 }) {
-                Circle().width(8).height(8).fill(c.color)
+                Text('').width(8).height(8).borderRadius(4).backgroundColor(c.color)
                 Text(c.title === '' ? '(无标题待办)' : c.title)
                   .fontSize(14)
                   .fontColor($r('app.color.text_primary'))

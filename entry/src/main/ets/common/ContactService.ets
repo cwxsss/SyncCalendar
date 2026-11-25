@@ -243,12 +243,25 @@ export class ContactService {
       return res;
     }
 
-    // 读已有系统联系人 key 映射，避免每轮重复写入
+    // 读已有系统联系人映射，避免循环内 N 次全量 queryAll 系统通讯录
     let permOk: boolean = false;
+    const sysByName: Map<string, contact.Contact> = new Map();
     if (injectSystemContacts) {
       permOk = await ContactService.hasContactPermission(context);
       if (!permOk) {
         LogUtil.write('⚠️ 无通讯录权限：本轮仅更新 App 内缓存，不写入系统通讯录');
+      } else {
+        try {
+          const allSys: contact.Contact[] = await ContactService.queryAll(context);
+          for (const sc of allSys) {
+            const nm: string = ContactService.sysDisplayName(sc);
+            if (nm !== '' && sc.key !== undefined && sc.key !== '' && !sysByName.has(nm)) {
+              sysByName.set(nm, sc);
+            }
+          }
+        } catch (_err) {
+          // 读取失败时降级单条查询
+        }
       }
     }
 
@@ -262,9 +275,8 @@ export class ContactService {
       try {
         const items: RemoteItem[] = await DavCardDavClient.reportCards(bookHref, auth);
         br.remoteCount = items.length;
-        // 本地现有（该地址簿）
-        const localRows: ContactRow[] = (await ContactDb.listAll(context))
-          .filter((r: ContactRow): boolean => r.bookKey === bookKey);
+        // 本地现有（该地址簿，不读 raw 大字段）
+        const localRows: ContactRow[] = await ContactDb.listByBookForSync(context, bookKey);
         const localByHref: Map<string, ContactRow> = new Map<string, ContactRow>();
         for (const r of localRows) {
           localByHref.set(r.href, r);
@@ -291,24 +303,28 @@ export class ContactService {
           }
           c.bookHref = bookHref;
           const isNew: boolean = ex === undefined;
-          await ContactDb.upsert(context, c, bookKey, item.etag);
+          await ContactDb.upsert(context, c, bookKey, item.etag, ex ?? null);
           if (isNew) {
             br.added++;
           } else {
             br.updated++;
           }
-          // 写进系统通讯录
+          // 写进系统通讯录（传入系统联系人缓存避免重复全量查询）
           if (permOk) {
-            await ContactService.pushToSystem(context, c, bookKey);
+            await ContactService.pushToSystem(context, c, bookKey, sysByName, ex);
           }
         }
 
-        // 远端已不存在 → 从本地移除
+        // 远端已不存在 → 批量从本地移除
+        const toRemove: string[] = [];
         for (const r of localRows) {
           if (!seenHrefs.has(r.href)) {
-            await ContactDb.removeByHref(context, r.href);
-            br.deleted++;
+            toRemove.push(r.href);
           }
+        }
+        if (toRemove.length > 0) {
+          await ContactDb.removeByHrefs(context, toRemove);
+          br.deleted = toRemove.length;
         }
         LogUtil.write(`地址簿「${bookName}」：远端 ${br.remoteCount}，新增 ${br.added}，`
           + `更新 ${br.updated}，删除 ${br.deleted}，不变 ${br.unchanged}，失败 ${br.failed}`);
@@ -489,7 +505,6 @@ export class ContactService {
         j.t = e.type;
         return j;
       }));
-    const store = await ContactDb.getDb(context);
     const values: Record<string, string | number> = {
       'display_name': sys.displayName,
       'org': sys.org,
@@ -511,16 +526,17 @@ export class ContactService {
    *   ③ 都没有 → 新建
    */
   static async pushToSystem(context: common.Context, c: VCardContact,
-    bookKey: string): Promise<string> {
+    bookKey: string, sysByNameCache?: Map<string, contact.Contact>,
+    knownRow?: ContactRow): Promise<string> {
     try {
-      const row: ContactRow | null = await ContactDb.findByUid(context, bookKey, c.uid);
+      const row: ContactRow | null = knownRow !== undefined
+        ? knownRow
+        : await ContactDb.findByUid(context, bookKey, c.uid);
       if (row === null) {
         return '';
       }
 
       // ① 已有关联 → 用 queryContact 取回**可写对象**再改
-      //    ⚠️ Contact.id / Contact.key 都是 readonly，直接给新对象赋 key 会编译失败。
-      //    系统也不允许"换 id"，唯一正确姿势是查回原对象、原地改字段、再 updateContact。
       if (row.sysKey !== '') {
         try {
           const existing: contact.Contact = await contact.queryContact(context, row.sysKey);
@@ -536,18 +552,33 @@ export class ContactService {
 
       // ② 按姓名认领先前手动存过的同名联系人，避免重复条目
       if (c.displayName !== '') {
-        const found: contact.Contact[] = await ContactService.queryAll(context);
-        for (const f of found) {
-          const name: string = ContactService.sysDisplayName(f);
-          if (name === c.displayName && f.key !== undefined && f.key !== '') {
+        if (sysByNameCache !== undefined) {
+          const cached = sysByNameCache.get(c.displayName);
+          if (cached !== undefined && cached.key !== undefined && cached.key !== '') {
             try {
-              ContactService.applyToSystem(f, c);
-              await contact.updateContact(context, f);
-              await ContactDb.setSysKey(context, row.id, f.key);
-              LogUtil.write(`认领已存在的同名系统联系人「${name}」`);
-              return f.key;
+              ContactService.applyToSystem(cached, c);
+              await contact.updateContact(context, cached);
+              await ContactDb.setSysKey(context, row.id, cached.key);
+              LogUtil.write(`认领已存在的同名系统联系人「${c.displayName}」`);
+              return cached.key;
             } catch (err) {
               LogUtil.write(`认领同名联系人失败：${(err as BusinessError).message}`);
+            }
+          }
+        } else {
+          const found: contact.Contact[] = await ContactService.queryAll(context);
+          for (const f of found) {
+            const name: string = ContactService.sysDisplayName(f);
+            if (name === c.displayName && f.key !== undefined && f.key !== '') {
+              try {
+                ContactService.applyToSystem(f, c);
+                await contact.updateContact(context, f);
+                await ContactDb.setSysKey(context, row.id, f.key);
+                LogUtil.write(`认领已存在的同名系统联系人「${name}」`);
+                return f.key;
+              } catch (err) {
+                LogUtil.write(`认领同名联系人失败：${(err as BusinessError).message}`);
+              }
             }
           }
         }

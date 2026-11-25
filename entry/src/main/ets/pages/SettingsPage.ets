@@ -62,6 +62,11 @@ struct SettingsPage {
   @State hasLegacyNames: boolean = false;        // 是否还有旧格式账户（给出"可更换"弱提示）
   @State formatPreview: string = '';             // 实时预览示例
   private context?: common.Context;
+  private isDestroyed: boolean = false;
+
+  aboutToDisappear(): void {
+    this.isDestroyed = true;
+  }
 
   aboutToAppear(): void {
     const ctx = this.getUIContext().getHostContext();

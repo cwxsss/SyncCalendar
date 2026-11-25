@@ -376,6 +376,16 @@ export class DavDiscovery {
           const loc = headers['Location'] ?? headers['location'] ?? '';
           if (typeof loc === 'string' && loc !== '') {
             const full: string = loc.startsWith('http') ? loc : origin + (loc.startsWith('/') ? '' : '/') + loc;
+            // 安全校验：禁止从 https 降级重定向到 http，防止 Basic Auth 凭据明文泄漏
+            if (origin.toLowerCase().startsWith('https://') && full.toLowerCase().startsWith('http://')) {
+              LogUtil.write(`.well-known 拒绝不安全的协议降级跳转：${full}`);
+              return '';
+            }
+            const locOrigin: string = DavDiscovery.originOf(full);
+            if (locOrigin !== '' && locOrigin.toLowerCase() !== origin.toLowerCase()) {
+              LogUtil.write(`.well-known 检测到跨源跳转(${locOrigin})，已拒绝以防凭据泄漏`);
+              return '';
+            }
             LogUtil.write(`.well-known 跳转到：${full}`);
             return DavDiscovery.tidy(full);
           }

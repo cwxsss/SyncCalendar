@@ -111,12 +111,27 @@ struct Widget4x4Card {
   @LocalStorageProp('rangeCount') rangeCount: number = 0;
   @LocalStorageProp('multiDayJson') multiDayJson: string = '[]';
 
+  private cachedBlocksKey: string = '';
+  private cachedBlocksVal: TBlock[] = [];
+  private cachedAllDayKey: string = '';
+  private cachedAllDayVal: TAllDay[] = [];
+  private cachedListKey: string = '';
+  private cachedListVal: LItem4[] = [];
+  private cachedMultiKey: string = '';
+  private cachedMultiDaysVal: number = -1;
+  private cachedMultiVal: CardDayGroup4[] = [];
+
   private parseBlocks(): TBlock[] {
-    try {
-      return JSON.parse(this.timelineJson) as TBlock[];
-    } catch (err) {
-      return [];
+    if (this.cachedBlocksKey === this.timelineJson) {
+      return this.cachedBlocksVal;
     }
+    try {
+      this.cachedBlocksVal = JSON.parse(this.timelineJson) as TBlock[];
+    } catch (err) {
+      this.cachedBlocksVal = [];
+    }
+    this.cachedBlocksKey = this.timelineJson;
+    return this.cachedBlocksVal;
   }
 
   /** 当前时间比例（无效返回 -1） */
@@ -377,11 +392,16 @@ struct Widget4x4Card {
   }
 
   private parseAllDay(): TAllDay[] {
-    try {
-      return JSON.parse(this.allDayJson) as TAllDay[];
-    } catch (err) {
-      return [];
+    if (this.cachedAllDayKey === this.allDayJson) {
+      return this.cachedAllDayVal;
     }
+    try {
+      this.cachedAllDayVal = JSON.parse(this.allDayJson) as TAllDay[];
+    } catch (err) {
+      this.cachedAllDayVal = [];
+    }
+    this.cachedAllDayKey = this.allDayJson;
+    return this.cachedAllDayVal;
   }
   /** 卡片空间有限：全天最多显示 W4_ALLDAY_MAX 条 */
   private w4AllDay(): TAllDay[] {
@@ -490,11 +510,16 @@ struct Widget4x4Card {
 
   /** 列表模式单条日程（解析 listJson） */
   private parseList(): LItem4[] {
-    try {
-      return JSON.parse(this.listJson) as LItem4[];
-    } catch (err) {
-      return [];
+    if (this.cachedListKey === this.listJson) {
+      return this.cachedListVal;
     }
+    try {
+      this.cachedListVal = JSON.parse(this.listJson) as LItem4[];
+    } catch (err) {
+      this.cachedListVal = [];
+    }
+    this.cachedListKey = this.listJson;
+    return this.cachedListVal;
   }
 
   /** 判断单条日程此刻是否正在进行中（优先结合真实时间戳动态计算，防止静态缓存漂移） */
@@ -610,15 +635,20 @@ struct Widget4x4Card {
   }
 
   private parseMultiDays(): CardDayGroup4[] {
+    if (this.cachedMultiKey === this.multiDayJson && this.cachedMultiDaysVal === this.cardDays) {
+      return this.cachedMultiVal;
+    }
     try {
       const all = JSON.parse(this.multiDayJson) as CardDayGroup4[];
-      if (this.cardDays > 1) {
-        return all.filter((g: CardDayGroup4) => g.count > 0);
-      }
-      return all;
+      this.cachedMultiVal = this.cardDays > 1
+        ? all.filter((g: CardDayGroup4) => g.count > 0)
+        : all;
     } catch (err) {
-      return [];
+      this.cachedMultiVal = [];
     }
+    this.cachedMultiKey = this.multiDayJson;
+    this.cachedMultiDaysVal = this.cardDays;
+    return this.cachedMultiVal;
   }
 
   private switchDays(days: number): void {

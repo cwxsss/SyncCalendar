@@ -222,46 +222,51 @@ export class CalendarDataService {
     sources: CalSource[]): Promise<DisplayEvent[]> {
     LogUtil.init(context);
     const result: DisplayEvent[] = [];
-    const visibleKeys: string[] = sources.filter((s: CalSource): boolean => s.visible)
-      .map((s: CalSource): string => s.calKey);
+    const sourceMap: Map<string, CalSource> = new Map<string, CalSource>();
+    const visibleKeySet: Set<string> = new Set<string>();
+    for (const s of sources) {
+      sourceMap.set(s.calKey, s);
+      if (s.visible) {
+        visibleKeySet.add(s.calKey);
+      }
+    }
     const colorOf = (key: string): string => {
-      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      const found = sourceMap.get(key);
       return found !== undefined ? found.color : '#9AA0A6';
     };
     const nameOf = (key: string): string => {
-      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      const found = sourceMap.get(key);
       return found !== undefined ? found.name : '';
     };
     const writableOf = (key: string): boolean => {
-      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      const found = sourceMap.get(key);
       return found !== undefined ? found.writable : true;
     };
 
     // 1) 本地库（DAV + 本机）；重复日程(RRULE)按规则展开为窗口内的多次发生
     try {
       const rows: LocalEvent[] = await EventDb.queryRange(context, start, end);
+      const rowIdSet: Set<number> = new Set<number>();
+      for (const r of rows) {
+        rowIdSet.add(r.id);
+      }
       // 重复主事件的首次发生可能在窗口外，也纳入（仅用于展开）
       const masters: LocalEvent[] = await EventDb.queryRecurringMasters(context, end);
       for (const m of masters) {
-        if (!rows.some((r: LocalEvent): boolean => r.id === m.id)) {
+        if (!rowIdSet.has(m.id)) {
+          rowIdSet.add(m.id);
           rows.push(m);
         }
       }
-      // 单次覆盖实例（RECURRENCE-ID 独立行）：展开时跳过对应发生，避免重复。
-      // 注意：①排除键必须带 calKey（同一系列可能出现在多个日历本）；
-      // ②键必须用 **recurrenceId（原始发生时刻）**——覆盖行的 startTime 是"被改到的新时间"，
-      //   用它做键时主事件在原时间的那次发生不会被排除 → 同一日程显示两条（幽灵日程）；
-      // ③只有"可见日历本"的覆盖行才参与排除——历史孤儿行（旧账号迁移残留）
-      //    自己不显示，却会把主事件的对应发生排除掉，导致"第一次不显示"
-      const overrideKeys: string[] = [];
+      const overrideKeySet: Set<string> = new Set<string>();
       for (const e of rows) {
-        if (e.rrule === '' && e.recurring && visibleKeys.includes(e.calKey)) {
-          overrideKeys.push(EventDb.overrideKey(e.calKey, e.uid, e.recurrenceId, e.startTime));
+        if (e.rrule === '' && e.recurring && visibleKeySet.has(e.calKey)) {
+          overrideKeySet.add(EventDb.overrideKey(e.calKey, e.uid, e.recurrenceId, e.startTime));
         }
       }
       let occTotal: number = 0;
       for (const e of rows) {
-        if (!visibleKeys.includes(e.calKey)) {
+        if (!visibleKeySet.has(e.calKey)) {
           continue;
         }
         const baseColor: string = colorOf(e.calKey);
@@ -280,7 +285,7 @@ export class CalendarDataService {
           }
           const occs: number[] = RruleUtil.expand(e.rrule, e.startTime, start, end, exNums, 1500);
           times = occs.filter((occ: number): boolean =>
-            !overrideKeys.includes(EventDb.overrideKey(e.calKey, e.uid, 0, occ)));
+            !overrideKeySet.has(EventDb.overrideKey(e.calKey, e.uid, 0, occ)));
         } else {
           times = [e.startTime];
         }
@@ -324,7 +329,14 @@ export class CalendarDataService {
     }
 
     // 2) 系统日历（只读混合展示）——单日历失败只跳过该日历，不影响其余
-    if (visibleKeys.some((k: string): boolean => k.startsWith('sys_'))) {
+    let hasSysVisible: boolean = false;
+    for (const k of visibleKeySet) {
+      if (k.startsWith('sys_')) {
+        hasSysVisible = true;
+        break;
+      }
+    }
+    if (hasSysVisible) {
       try {
         const uiContext = context as common.UIAbilityContext;
         const mgr: calendarManager.CalendarManager = calendarManager.getCalendarManager(uiContext);
@@ -355,7 +367,7 @@ export class CalendarDataService {
           }
 
           const sysKey: string = `sys_${accountName}`;
-          if (!visibleKeys.includes(sysKey)) {
+          if (!visibleKeySet.has(sysKey)) {
             continue;
           }
           try {
@@ -444,21 +456,26 @@ export class CalendarDataService {
   /** 加载全部待办（VTODO，来自 DAV 同步，只读展示） */
   static async loadTodos(context: common.Context, sources: CalSource[]): Promise<DisplayEvent[]> {
     const result: DisplayEvent[] = [];
-    const visibleKeys: string[] = sources.filter((s: CalSource): boolean => s.visible)
-      .map((s: CalSource): string => s.calKey);
+    const sourceMap: Map<string, CalSource> = new Map<string, CalSource>();
+    const visibleKeySet: Set<string> = new Set<string>();
+    for (const s of sources) {
+      sourceMap.set(s.calKey, s);
+      if (s.visible) {
+        visibleKeySet.add(s.calKey);
+      }
+    }
     const colorOf = (key: string): string => {
-      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      const found = sourceMap.get(key);
       return found !== undefined ? found.color : '#9AA0A6';
     };
-    // ⭐ 待办按日历本分组显示需要"本名"；原来只带 calKey，分组标题无法显示
     const nameOf = (key: string): string => {
-      const found = sources.find((s: CalSource): boolean => s.calKey === key);
+      const found = sourceMap.get(key);
       return found !== undefined ? found.name : '';
     };
     try {
       const rows: LocalEvent[] = await EventDb.queryTodos(context);
       for (const e of rows) {
-        if (!visibleKeys.includes(e.calKey)) {
+        if (!visibleKeySet.has(e.calKey)) {
           continue;
         }
         const d = new DisplayEvent();

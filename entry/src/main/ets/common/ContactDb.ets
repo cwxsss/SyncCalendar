@@ -69,8 +69,24 @@ const PARSER_VERSION: number = 4;
 
 export class ContactDb {
   private static db: relationalStore.RdbStore | null = null;
+  private static initPromise: Promise<relationalStore.RdbStore> | null = null;
 
   static async getDb(context: common.Context): Promise<relationalStore.RdbStore> {
+    if (ContactDb.db !== null) {
+      return ContactDb.db;
+    }
+    if (ContactDb.initPromise !== null) {
+      return ContactDb.initPromise;
+    }
+    ContactDb.initPromise = ContactDb.openDb(context);
+    try {
+      return await ContactDb.initPromise;
+    } finally {
+      ContactDb.initPromise = null;
+    }
+  }
+
+  private static async openDb(context: common.Context): Promise<relationalStore.RdbStore> {
     if (ContactDb.db !== null) {
       return ContactDb.db;
     }
@@ -96,6 +112,12 @@ export class ContactDb {
       );
       await store.executeSql(
         'CREATE INDEX IF NOT EXISTS idx_contacts_syskey ON contacts(sys_key)'
+      );
+      await store.executeSql(
+        'CREATE INDEX IF NOT EXISTS idx_contacts_href ON contacts(href)'
+      );
+      await store.executeSql(
+        'CREATE INDEX IF NOT EXISTS idx_contacts_deleted ON contacts(deleted)'
       );
     } catch (err) {
       LogUtil.write(`创建联系人索引失败（忽略）：${(err as Error).message}`);
@@ -136,19 +158,17 @@ export class ContactDb {
       //    （实测报 "Abort due to constraint violation"）。
       //    直接 INSERT OR REPLACE 一步到位。
       await store.executeSql(
-        `INSERT OR REPLACE INTO ${META} (k, v) VALUES ('parser_version', '${want}')`);
+        `INSERT OR REPLACE INTO ${META} (k, v) VALUES (?, ?)`, ['parser_version', want]);
       LogUtil.write(`联系人解析器版本 ${cur === '' ? '(无)' : cur} → ${want}，已清空缓存待重解析`);
     } catch (err) {
       LogUtil.write(`联系人解析器版本检查失败：${(err as Error).message}`);
     }
   }
 
-  /** 把解析后的联系人写入/更新（按 book_key + uid 判断） */
+  /** 把解析后的联系人写入/更新（按 book_key + uid 判断；可传入已知 existing 避免重复查询） */
   static async upsert(context: common.Context, c: VCardContact, bookKey: string,
-    etag: string): Promise<void> {
+    etag: string, existingOpt?: ContactRow | null): Promise<void> {
     const store = await ContactDb.getDb(context);
-    // ⭐ 存「值 + 类型」：只存值会让 TYPE=CELL/WORK 在回写时全丢。
-    //    旧数据是纯字符串数组，parsePhones 做兼容。
     const phonesJson: string = JSON.stringify(
       c.phones.map((p): PhoneJson => {
         const j = new PhoneJson();
@@ -163,7 +183,9 @@ export class ContactDb {
         j.t = e.type;
         return j;
       }));
-    const existing: ContactRow | null = await ContactDb.findByUid(context, bookKey, c.uid);
+    const existing: ContactRow | null = existingOpt !== undefined
+      ? existingOpt
+      : await ContactDb.findByUid(context, bookKey, c.uid);
     if (existing === null) {
       const values: relationalStore.ValuesBucket = {
         'uid': c.uid,
@@ -271,11 +293,12 @@ export class ContactDb {
 
   static async count(context: common.Context): Promise<number> {
     const store = await ContactDb.getDb(context);
-    const pred = new relationalStore.RdbPredicates(TABLE);
-    pred.equalTo('deleted', 0);
-    const rs = await store.query(pred, ['id']);
+    const rs = await store.querySql('SELECT COUNT(*) AS c FROM contacts WHERE deleted = 0');
     try {
-      return rs.rowCount;
+      if (rs.goToFirstRow()) {
+        return rs.getLong(0);
+      }
+      return 0;
     } finally {
       rs.close();
     }
@@ -290,12 +313,52 @@ export class ContactDb {
     await store.update(values, pred);
   }
 
+  /** 按地址簿查询未删除联系人（同步用，不读 raw 大字段以减少内存开销） */
+  static async listByBookForSync(context: common.Context, bookKey: string): Promise<ContactRow[]> {
+    const store = await ContactDb.getDb(context);
+    const pred = new relationalStore.RdbPredicates(TABLE);
+    pred.equalTo('deleted', 0).and().equalTo('book_key', bookKey);
+    const rs = await store.query(pred, ['id', 'uid', 'book_key', 'href', 'etag',
+      'display_name', 'org', 'title', 'note', 'phones_json', 'emails_json',
+      'dirty', 'deleted', 'sys_key', 'rev']);
+    const out: ContactRow[] = [];
+    try {
+      while (rs.goToNextRow()) {
+        out.push(ContactDb.readRow(rs));
+      }
+    } finally {
+      rs.close();
+    }
+    return out;
+  }
+
   /** 远端已不存在的资源 → 直接从库中移除（不需要推送） */
   static async removeByHref(context: common.Context, href: string): Promise<void> {
     const store = await ContactDb.getDb(context);
     const pred = new relationalStore.RdbPredicates(TABLE);
     pred.equalTo('href', href);
     await store.delete(pred);
+  }
+
+  /** 批量按 href 删除本地联系人 */
+  static async removeByHrefs(context: common.Context, hrefs: string[]): Promise<void> {
+    if (hrefs.length === 0) {
+      return;
+    }
+    const store = await ContactDb.getDb(context);
+    store.beginTransaction();
+    try {
+      const chunkSize: number = 400;
+      for (let i: number = 0; i < hrefs.length; i += chunkSize) {
+        const pred = new relationalStore.RdbPredicates(TABLE);
+        pred.in('href', hrefs.slice(i, i + chunkSize));
+        await store.delete(pred);
+      }
+      store.commit();
+    } catch (err) {
+      store.rollBack();
+      throw err as Error;
+    }
   }
 
   /** 物理删除（推送成功或清理残留时） */
@@ -398,7 +461,8 @@ export class ContactDb {
     r.note = rs.getString(rs.getColumnIndex('note'));
     r.phonesJson = rs.getString(rs.getColumnIndex('phones_json'));
     r.emailsJson = rs.getString(rs.getColumnIndex('emails_json'));
-    r.raw = rs.getString(rs.getColumnIndex('raw'));
+    const rawIdx: number = rs.getColumnIndex('raw');
+    r.raw = rawIdx >= 0 ? rs.getString(rawIdx) : '';
     r.dirty = rs.getLong(rs.getColumnIndex('dirty'));
     r.deleted = rs.getLong(rs.getColumnIndex('deleted'));
     r.sysKey = rs.getString(rs.getColumnIndex('sys_key'));

@@ -12,7 +12,7 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import process from '@ohos.process';
 import { DavAccount, AccountStore, TYPE_CALDAV } from './AccountStore';
-import { SyncEngine } from './SyncEngine';
+import { SyncEngine, SyncBusyError } from './SyncEngine';
 import { CardDataService } from './CardDataService';
 import { ReminderService } from './ReminderService';
 import { SystemCalendarImport } from './SystemCalendarImport';
@@ -26,6 +26,15 @@ export class BackgroundSyncResult {
   ok: number = 0;
   attempted: number = 0;
   failed: number = 0;
+}
+
+class CardWindowGrant {
+  requestId: number = 0;
+  usableMs: number = 0;
+  constructor(requestId: number, usableMs: number) {
+    this.requestId = requestId;
+    this.usableMs = usableMs;
+  }
 }
 
 export class BackgroundSyncRunner {
@@ -55,8 +64,8 @@ export class BackgroundSyncRunner {
    */
   private static readonly CARD_MAX_TOTAL_MS: number = 60 * 1000;
 
-  /** 本次卡片同步申请的短时任务 requestId（0 = 未申请到） */
-  private static cardTransientId: number = 0;
+  /** 进程内卡片同步防重入标志 */
+  private static cardInFlight: boolean = false;
 
   /** 当前进程 pid（取不到返回 -1）。用来判断卡片回调是否与主 App 同进程。 */
   private static pidOf(): number {
@@ -81,6 +90,12 @@ export class BackgroundSyncRunner {
    * ⚠️ 本方法**永不抛错**（后台路径没有 UI 承担异常）。
    */
   static async runOnceThrottledByCard(context: common.Context): Promise<void> {
+    if (BackgroundSyncRunner.cardInFlight) {
+      LogUtil.write('卡片驱动同步：进程内已有卡片同步正在执行，跳过本次重入');
+      return;
+    }
+    BackgroundSyncRunner.cardInFlight = true;
+    let transientId: number = 0;
     try {
       const last: number = await AppSettings.getCardSyncAt(context);
       const now: number = Date.now();
@@ -91,17 +106,9 @@ export class BackgroundSyncRunner {
       }
       // 先写时间戳：避免同步执行期间卡片再次刷新导致并发重入
       await AppSettings.setCardSyncAt(context, now);
-      // ⭐ 尝试申请**短时任务**，把 10 秒窗口延长到最多 3 分钟。
-      //    ⚠️ 官方规定 requestSuspendDelay 应在"应用处于前台"或"onBackground 回调"里调用；
-      //       卡片进程（FormExtensionAbility）是否符合**未知** → 故此处**容错尝试**：
-      //       成功则按实际时长延长，失败（抛错/时长为 0）则退回 9 秒软超时。
-      //    ⚠️ 配额：短时任务单日总配额 10 分钟、单次最长 3 分钟（低电量 1 分钟），
-      //       且**被挂起后才计时**（10 秒内跑完不消耗）→ 对我们很划算。
-      const windowMs: number = await BackgroundSyncRunner.acquireCardWindow();
-      let budget: number = Math.min(windowMs, BackgroundSyncRunner.CARD_MAX_TOTAL_MS);
-      // ⭐ 诊断开关（preferences：card_budget_ms）：>0 时**覆盖**上面算出的可用窗口。
-      //    用途：在真机上回答"卡片进程究竟能活多久""一次完整同步要多久"，
-      //    从而决定卡片这条路该做多少事 —— 不必为此重新编译。
+      const grant = await BackgroundSyncRunner.acquireCardWindow();
+      transientId = grant.requestId;
+      let budget: number = Math.min(grant.usableMs, BackgroundSyncRunner.CARD_MAX_TOTAL_MS);
       const overrideMs: number = await AppSettings.getCardBudgetMs(context);
       if (overrideMs > 0) {
         budget = overrideMs;
@@ -111,9 +118,10 @@ export class BackgroundSyncRunner {
       // 软超时：预算内没跑完就主动放弃（幂等同步，中断不损坏数据，下轮会重试）
       const worker: Promise<void> =
         BackgroundSyncRunner.runOnce(context, 'cardTick').then((): void => {});
+      let timerId: number = -1;
       const guard: Promise<void> = new Promise<void>((_res: () => void, rej: (e: Error) => void) => {
-        setTimeout((): void => rej(new Error('本次同步时间预算用尽，主动收手')),
-          budget);
+        timerId = setTimeout((): void => rej(new Error('本次同步时间预算用尽，主动收手')),
+          budget) as number;
       });
       try {
         await Promise.race<void>([worker, guard]);
@@ -121,59 +129,63 @@ export class BackgroundSyncRunner {
         const e = err as Error;
         LogUtil.write(`卡片驱动同步提前收手：${e.message}（幂等，下轮会重试）`);
       } finally {
+        if (timerId !== -1) {
+          clearTimeout(timerId);
+        }
         // 无论成败都释放短时任务：① 归还当日配额 ② 避免超时不取消被系统强杀进程
-        BackgroundSyncRunner.releaseCardWindow();
+        BackgroundSyncRunner.releaseCardWindow(transientId);
+        transientId = 0;
       }
     } catch (err) {
       const e = err as BusinessError;
       LogUtil.write(`卡片驱动同步异常: ${e.message}`);
+    } finally {
+      if (transientId !== 0) {
+        BackgroundSyncRunner.releaseCardWindow(transientId);
+      }
+      BackgroundSyncRunner.cardInFlight = false;
     }
   }
 
   /**
-   * 为卡片同步申请短时任务，返回**实际可用窗口（毫秒）**。
-   * 申请失败/异常/时长为 0 → 返回 0，由调用方退回默认的 9 秒软超时（不阻塞流程）。
+   * 为卡片同步申请短时任务，返回 `{ requestId, usableMs }`。
+   * 申请失败/异常/时长为 0 → requestId 为 0，退回默认的 9 秒软超时（不阻塞流程）。
    */
-  private static async acquireCardWindow(): Promise<number> {
+  private static async acquireCardWindow(): Promise<CardWindowGrant> {
+    let reqId: number = 0;
     try {
       const info: backgroundTaskManager.DelaySuspendInfo =
         backgroundTaskManager.requestSuspendDelay('正在同步日历数据', (): void => {
-          // 超时回调：配额即将用尽，清掉本地记录（系统会自行处理挂起）
           LogUtil.write('卡片同步的短时任务即将超时');
-          BackgroundSyncRunner.cardTransientId = 0;
         });
-      BackgroundSyncRunner.cardTransientId = info.requestId;
+      reqId = info.requestId;
       const actual: number = info.actualDelayTime ?? 0;
       if (actual <= 0) {
-        // 拿到了 requestId 但没有实际时长 → 视为不可用
-        BackgroundSyncRunner.releaseCardWindow();
+        BackgroundSyncRunner.releaseCardWindow(reqId);
         LogUtil.write('卡片同步：短时任务时长为 0，退回 9 秒软超时');
-        return BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS;
+        return new CardWindowGrant(0, BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
       }
-      // 留 15 秒余量提前收手，保证能干净地取消
       const usable: number = Math.max(actual - BackgroundSyncRunner.CARD_EXT_SOFT_RESERVE_MS,
         BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
       LogUtil.write(`卡片同步：短时任务已获批，实际时长 ${Math.round(actual / 1000)} 秒`);
-      return usable;
+      return new CardWindowGrant(reqId, usable);
     } catch (err) {
-      // 例如"未在前台/退后台时机申请"被拒 —— 退回 9 秒软超时，不影响流程
       const e = err as BusinessError;
       LogUtil.write(`卡片同步：短时任务申请失败(${e.code ?? ''} ${e.message})，退回 9 秒软超时`);
-      return BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS;
+      return new CardWindowGrant(0, BackgroundSyncRunner.CARD_SOFT_TIMEOUT_MS);
     }
   }
 
   /** 释放卡片同步的短时任务（幂等） */
-  private static releaseCardWindow(): void {
-    if (BackgroundSyncRunner.cardTransientId === 0) {
+  private static releaseCardWindow(requestId: number): void {
+    if (requestId === 0) {
       return;
     }
     try {
-      backgroundTaskManager.cancelSuspendDelay(BackgroundSyncRunner.cardTransientId);
+      backgroundTaskManager.cancelSuspendDelay(requestId);
     } catch (err) {
       // 取消失败无需处理
     }
-    BackgroundSyncRunner.cardTransientId = 0;
   }
   /**
    * 跑一次完整同步。全流程 try-catch，**永不抛错**（后台路径没有 UI 承担异常）。
@@ -218,10 +230,14 @@ export class BackgroundSyncRunner {
           await SyncEngine.syncAccount(context, acc);
           r.ok++;
         } catch (err) {
-          const e = err as BusinessError;
-          // "已有同步进行中"不算失败（前台可能正在同步）
-          r.failed++;
-          LogUtil.write(`后台同步[${tag}] id=${acc.id} 失败: ${e.message}`);
+          if (err instanceof SyncBusyError) {
+            // "已有同步进行中"不算失败（前台可能正在同步）
+            LogUtil.write(`后台同步[${tag}] id=${acc.id} 已在同步中，跳过`);
+          } else {
+            const e = err as BusinessError;
+            r.failed++;
+            LogUtil.write(`后台同步[${tag}] id=${acc.id} 失败: ${e.message}`);
+          }
         }
         LogUtil.write(`后台同步[${tag}] 阶段：账号 ${acc.id} 同步 +${el()}ms（ok=${r.ok} failed=${r.failed}）`);
       }
@@ -233,9 +249,29 @@ export class BackgroundSyncRunner {
       LogUtil.write(`后台同步[${tag}] 阶段：本地收尾 +${el()}ms`);
       await SyncEngine.pruneOrphanRows(context, accounts);
       LogUtil.write(`后台同步[${tag}] 阶段：孤儿行清理 +${el()}ms`);
-      // ⚠️ 必须回写账号：syncAccount 会就地更新 acc（服务器日历本颜色、写权限等）。
-      // 缺了这一步，后台同步刷到的颜色只留在内存里、进程退出即丢失。
-      await AccountStore.saveAll(context, accounts);
+      // ⚠️ 按账号 ID 局部合并回写：同步期间用户可能在 UI 增删改账号，避免用旧快照全量覆盖
+      const latestAccounts: DavAccount[] = await AccountStore.loadAll(context);
+      const syncedMap: Map<string, DavAccount> = new Map();
+      for (const a of accounts) {
+        syncedMap.set(a.id, a);
+      }
+      let mergedChanged: boolean = false;
+      for (const latest of latestAccounts) {
+        const synced = syncedMap.get(latest.id);
+        if (synced !== undefined) {
+          latest.calendarColors = synced.calendarColors;
+          latest.calendarWritable = synced.calendarWritable;
+          latest.calendarFailCount = synced.calendarFailCount;
+          latest.calendarNextRetry = synced.calendarNextRetry;
+          latest.calendarNames = synced.calendarNames;
+          latest.calendarHrefs = synced.calendarHrefs;
+          latest.calendarComps = synced.calendarComps;
+          mergedChanged = true;
+        }
+      }
+      if (mergedChanged) {
+        await AccountStore.saveAll(context, latestAccounts);
+      }
       // 出站镜像：把服务器最新状态写进系统日历（自动化，无需手点）
       try {
         if (await AppSettings.getMirrorEnabled(context) && await SystemCalendarMirror.hasPermission()) {

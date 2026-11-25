@@ -895,12 +895,14 @@ export class IcsUtil {
     const parsed: RemoteEvent[] = [];
     let current: RemoteEvent | null = null;
     let curAttaches: AttachMeta[] = [];
+    let inAlarm: boolean = false;
     for (const line of lines) {
       const upper: string = line.toUpperCase();
       if (upper.startsWith('BEGIN:VTODO')) {
         current = new RemoteEvent();
         current.isTodo = true;
         curAttaches = [];
+        inAlarm = false;
         continue;
       }
       if (upper.startsWith('END:VTODO')) {
@@ -912,9 +914,21 @@ export class IcsUtil {
           parsed.push(current);
         }
         current = null;
+        inAlarm = false;
         continue;
       }
       if (current === null) {
+        continue;
+      }
+      if (upper.startsWith('BEGIN:VALARM')) {
+        inAlarm = true;
+        continue;
+      }
+      if (upper.startsWith('END:VALARM')) {
+        inAlarm = false;
+        continue;
+      }
+      if (inAlarm) {
         continue;
       }
       const colon: number = line.indexOf(':');
@@ -1342,11 +1356,16 @@ export class IcsUtil {
   }
 
   static escape(s: string): string {
-    return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r\n/g, '\\r\n');
+    return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n').replace(/\r/g, '\\n');
   }
 
   private static unescape(s: string): string {
-    return s.replace(/\\r\n/gi, '\r\n').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
+    return s.replace(/\\(\\|,|;|[nN]|r\n)/g, (_m: string, g1: string): string => {
+      if (g1 === 'n' || g1 === 'N' || g1 === 'r\n') {
+        return '\n';
+      }
+      return g1;
+    });
   }
 
   /** 解析 iCal DURATION（ISO 8601 时长，如 PT1H30M / P2D / P1W），返回毫秒 */
